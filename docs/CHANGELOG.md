@@ -19,7 +19,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] Direct TCP networking (replaced file-based proxy with mGBA built-in socket API)
 - [x] Auto-generated player IDs (no more hardcoded IDs or client2/ copies)
 - [x] Removed proxy.js and client2/ (no longer needed)
-- [ ] Disconnection handling
+- [x] Disconnection handling (auto-reconnect, server broadcast, UI status)
+
+## [0.2.8-alpha] - 2026-02-03
+
+### Added - Network Polish: Disconnection & Reconnection (P2_05)
+- **network.lua**: Disconnection detection
+  - Socket "error" callback sets `connected = false` on socket failures
+  - `sock:receive()` error handling marks connection as lost
+  - `Network.flush()` wraps `sock:send()` in pcall — detects send failures
+- **network.lua**: Automatic reconnection with exponential backoff
+  - `Network.tryReconnect(timeMs)` — call once per frame, handles timing internally
+  - Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s
+  - Max 10 attempts before giving up
+  - Resets on successful reconnection
+  - `Network.isReconnecting()` / `Network.getReconnectAttempts()` for UI
+  - `Network.resetReconnect()` to manually reset backoff state
+- **main.lua**: Reconnection in update loop
+  - Detects `State.connected` vs `Network.isConnected()` desync each frame
+  - Calls `Network.tryReconnect()` when disconnected
+  - Re-registers and re-joins room on successful reconnect
+  - Sends current position immediately after reconnect
+- **main.lua**: Enhanced connection status UI
+  - ONLINE (green) / RECONNECTING #N (yellow) / OFFLINE (red)
+  - Status bar always visible when disconnected (not just in debug mode)
+- **server.js**: Disconnect broadcast
+  - `handleDisconnect()` now broadcasts `player_disconnected` to room before cleanup
+  - Heartbeat timeout also broadcasts before destroying client
+  - Guard against double-disconnect (end + close both fire on same socket)
 
 ## [0.2.7-alpha] - 2026-02-03
 
@@ -243,6 +270,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **0.2.8-alpha** (2026-02-03): Network polish — disconnection detection, auto-reconnect with backoff, ghost timeout, server broadcast
 - **0.2.7-alpha** (2026-02-03): Interpolation rewrite — animate-toward-target, camera correction, removed dead reckoning
 - **0.2.6-alpha** (2026-02-03): Smooth rendering — sub-tile pixel-perfect, direction marker, state debug colors
 - **0.2.5-alpha** (2026-02-03): Dead reckoning — extrapolation, smooth correction, state tracking (superseded in 0.2.7)
@@ -261,8 +289,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] Camera offset discovery for Run & Bun
 - [x] Ghost overlay rendering (render.lua)
 - [x] Movement interpolation (interpolate.lua)
-- [ ] Disconnection handling and ghost cleanup
-- [ ] Connection status improvements
+- [x] Disconnection handling and ghost cleanup
+- [x] Connection status improvements
 
 ### 0.4.0 - Duel Warp System (Phase 3)
 - [ ] Click/button trigger system

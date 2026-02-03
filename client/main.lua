@@ -311,8 +311,8 @@ local function drawOverlay(currentPos)
     playerCount = playerCount + 1
   end
 
-  -- Draw top bar if there are other players
-  if playerCount > 0 or ENABLE_DEBUG then
+  -- Draw top bar (always show when debug enabled or not connected, for status visibility)
+  if playerCount > 0 or ENABLE_DEBUG or not State.connected then
     -- Semi-transparent black bar at top
     painter:setFillColor(0xA0000000)
     painter:drawRectangle(0, 0, W, 14)
@@ -325,6 +325,9 @@ local function drawOverlay(currentPos)
     if State.connected then
       painter:setFillColor(0xFF00FF00)
       painter:drawText("ONLINE", 80, 1)
+    elseif Network.isReconnecting() then
+      painter:setFillColor(0xFFFFFF00)
+      painter:drawText(string.format("RECONNECTING #%d", Network.getReconnectAttempts()), 80, 1)
     else
       painter:setFillColor(0xFFFF0000)
       painter:drawText("OFFLINE", 80, 1)
@@ -374,6 +377,35 @@ local function update()
   -- Read current position
   local currentPos = readPlayerPosition()
 
+  -- Detect disconnection
+  if State.connected and not Network.isConnected() then
+    State.connected = false
+    log("Connection lost — will attempt reconnection")
+  end
+
+  -- Reconnection logic
+  if not State.connected and not Network.isConnected() then
+    local reconnected = Network.tryReconnect(State.timeMs)
+    if reconnected then
+      State.connected = true
+      log("Reconnected to server!")
+
+      -- Re-register and re-join room
+      Network.send({ type = "register", playerId = State.playerId })
+      Network.send({ type = "join", roomId = State.roomId })
+
+      -- Send current position immediately so other players see us
+      local pos = readPlayerPosition()
+      if pos then
+        Network.send({ type = "position", data = pos, t = State.timeMs })
+        State.lastPosition = pos
+        State.lastSentPosition = pos
+      end
+
+      Network.flush()
+    end
+  end
+
   -- Receive messages from server (limit per frame to avoid lag)
   if State.connected then
     for i = 1, MAX_MESSAGES_PER_FRAME do
@@ -384,7 +416,7 @@ local function update()
       if message.type == "position" then
         -- Feed interpolation buffer with timestamp
         Interpolate.update(message.playerId, message.data, message.t)
-        -- Store raw data as backup
+        -- Store raw data as backup + update last seen
         State.otherPlayers[message.playerId] = message.data
 
       elseif message.type == "player_disconnected" then
@@ -408,6 +440,7 @@ local function update()
 
       end
     end
+
   end
 
   if currentPos then
@@ -492,10 +525,8 @@ callbacks:add("shutdown", function()
     Interpolate.remove(playerId)
   end
 
-  if State.connected then
-    log("Disconnecting from server...")
-    Network.disconnect()
-  end
+  log("Disconnecting from server...")
+  Network.disconnect()
 end)
 
 log("Script loaded successfully!")

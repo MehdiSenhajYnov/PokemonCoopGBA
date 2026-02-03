@@ -118,7 +118,7 @@ PokemonCoop/
 ├── client/                   # Script Lua mGBA
 │   ├── main.lua
 │   ├── hal.lua              # Hardware Abstraction Layer (WRAM + IWRAM, static + dynamic)
-│   ├── network.lua          # Direct TCP client (mGBA built-in socket API)
+│   ├── network.lua          # Direct TCP client (mGBA socket API, auto-reconnect with backoff)
 │   ├── render.lua           # Ghost player rendering (Painter API + camera correction)
 │   ├── interpolate.lua      # Smooth ghost movement (animate-toward-target interpolation)
 │   ├── core.lua             # Core Engine
@@ -168,7 +168,7 @@ PokemonCoop/
 - [x] Taux d'envoi adaptatif (0 en idle, envoi à chaque changement de tile, immédiat sur changement de map)
 - [x] Correction caméra sub-tile (tracking delta camera offsets pour scrolling fluide pendant animations marche)
 - [x] Rendu sub-tile (math.floor pixel-perfect, marqueur direction, couleurs debug par état)
-- [ ] Gestion déconnexion
+- [x] Gestion déconnexion (reconnexion auto avec backoff, server broadcast, UI statut)
 
 ### Phase 3: Duel Warp
 - [ ] Système de trigger
@@ -308,5 +308,5 @@ Run & Bun étant un ROM hack avec modifications majeures:
 ---
 
 **Dernière mise à jour**: 2026-02-03
-**Version**: 0.2.7-alpha
-**Status**: Phase 2 - Ghosting + Animate-Toward-Target Interpolation + Camera Correction + Direct TCP
+**Version**: 0.2.8-alpha
+**Status**: Phase 2 - Ghosting + Interpolation + Camera Correction + Network Polish + Direct TCP

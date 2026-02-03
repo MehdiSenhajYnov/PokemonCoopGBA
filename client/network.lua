@@ -173,21 +173,35 @@ local receiveBuffer = ""      -- Raw bytes buffer for incomplete lines
 local incomingMessages = {}   -- Decoded messages ready to be consumed
 local outgoingBuffer = {}     -- Messages queued for sending
 
+-- Reconnection state
+local reconnectAttempts = 0
+local maxReconnectAttempts = 10
+local reconnectBaseDelay = 1000  -- ms (1 second)
+local reconnectNextTime = 0     -- timeMs at which next reconnect attempt is allowed
+local reconnecting = false
+local lastHost = nil
+local lastPort = nil
+
 --[[
   Connect to TCP server using mGBA built-in socket API
   Note: socket.connect() is BLOCKING - mGBA freezes until connected or timeout
 ]]
 function Network.connect(host, port)
+  lastHost = host
+  lastPort = port
+
   local success, err = pcall(function()
     sock = socket.connect(host, port)
   end)
 
   if success and sock then
     connected = true
+    reconnectAttempts = 0
+    reconnecting = false
 
     -- Register receive callback (fires once per frame when data available)
     sock:add("received", function()
-      local data, error = sock:receive(4096)
+      local data, recvErr = sock:receive(4096)
       if data then
         receiveBuffer = receiveBuffer .. data
 
@@ -206,7 +220,15 @@ function Network.connect(host, port)
 
           lineEnd = receiveBuffer:find("\n")
         end
+      elseif recvErr then
+        -- Connection lost during receive
+        connected = false
       end
+    end)
+
+    -- Register error callback for socket failures
+    sock:add("error", function()
+      connected = false
     end)
 
     return true
@@ -239,7 +261,14 @@ function Network.flush()
   for _, message in ipairs(outgoingBuffer) do
     local ok, jsonStr = pcall(JSON.encode, message)
     if ok then
-      sock:send(jsonStr .. "\n")
+      local sendOk, sendErr = pcall(function()
+        sock:send(jsonStr .. "\n")
+      end)
+      if not sendOk then
+        -- Send failed — connection lost
+        connected = false
+        return false
+      end
     end
   end
 
@@ -265,6 +294,82 @@ function Network.isConnected()
 end
 
 --[[
+  Check if currently attempting reconnection
+]]
+function Network.isReconnecting()
+  return reconnecting
+end
+
+--[[
+  Get reconnection attempt count
+]]
+function Network.getReconnectAttempts()
+  return reconnectAttempts
+end
+
+--[[
+  Attempt reconnection with exponential backoff.
+  Call once per frame from main loop. Uses timeMs to schedule retries.
+  Returns true if reconnected, false otherwise.
+
+  @param timeMs  number  Current elapsed time in ms
+]]
+function Network.tryReconnect(timeMs)
+  if connected then
+    return true
+  end
+
+  if reconnectAttempts >= maxReconnectAttempts then
+    reconnecting = false
+    return false
+  end
+
+  if not lastHost or not lastPort then
+    return false
+  end
+
+  -- Check if enough time has passed for next attempt
+  if timeMs < reconnectNextTime then
+    reconnecting = true
+    return false
+  end
+
+  reconnecting = true
+  reconnectAttempts = reconnectAttempts + 1
+
+  -- Clean up old socket
+  if sock then
+    pcall(function() sock:close() end)
+    sock = nil
+  end
+  receiveBuffer = ""
+
+  -- Attempt connection
+  local success = Network.connect(lastHost, lastPort)
+
+  if success then
+    -- reconnectAttempts is reset inside connect()
+    return true
+  end
+
+  -- Schedule next attempt with exponential backoff
+  local delay = reconnectBaseDelay * (2 ^ (reconnectAttempts - 1))
+  if delay > 30000 then delay = 30000 end  -- Cap at 30 seconds
+  reconnectNextTime = timeMs + delay
+
+  return false
+end
+
+--[[
+  Reset reconnection state (call after giving up or manual reconnect)
+]]
+function Network.resetReconnect()
+  reconnectAttempts = 0
+  reconnectNextTime = 0
+  reconnecting = false
+end
+
+--[[
   Disconnect from server
 ]]
 function Network.disconnect()
@@ -273,6 +378,7 @@ function Network.disconnect()
     sock = nil
   end
   connected = false
+  reconnecting = false
   receiveBuffer = ""
   incomingMessages = {}
   outgoingBuffer = {}

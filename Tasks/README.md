@@ -186,19 +186,22 @@ Tasks/
 
 ---
 
-### todo/P2_05_NETWORK_POLISH.md
-**Status:** 🔴 À faire
+### done/P2_05_NETWORK_POLISH.md
+**Status:** 🟢 Terminé (2026-02-03)
 **Tâche:** #9
 **Description:** Gestion robuste déconnexion/reconnexion
 
-**Contenu:**
-- Auto-reconnexion avec backoff exponentiel
-- Détection déconnexion serveur
-- Nettoyage ghosts inactifs (timeout)
-- Indicateur UI statut connexion
+**Résultat:**
+- Auto-reconnexion avec backoff exponentiel (max 10 attempts, cap 30s)
+- Détection déconnexion (socket error callback, receive error, send pcall)
+- Nettoyage ghosts via server broadcast `player_disconnected` (pas de timeout client)
+- Indicateur UI statut connexion (ONLINE/RECONNECTING/OFFLINE)
+- Server broadcasts `player_disconnected` on disconnect
 
-**Fichiers:**
-- 📝 Modifier: `client/network.lua`, `client/main.lua`
+**Fichiers modifiés:**
+- ✅ `client/network.lua` (disconnection detection, reconnect with backoff)
+- ✅ `client/main.lua` (reconnect logic, enhanced UI)
+- ✅ `server/server.js` (disconnect broadcast, double-disconnect guard)
 
 ---
 
@@ -321,7 +324,7 @@ Tasks/
 ```
 Phase 0 - Memory Discovery    [██████████] 100% ✅ COMPLETE
 Phase 1 - Foundation          [██████████] 100% ✅ COMPLETE
-Phase 2 - Ghosting            [████████░░] 80%  (render + animate-toward-target interp + camera correction + smooth rendering done)
+Phase 2 - Ghosting            [█████████░] 90%  (render + interp + camera + smooth rendering + network polish done)
 Phase 3 - Duel Warp           [░░░░░░░░░░]  0%
 Phase 4 - Multi-ROM           [░░░░░░░░░░]  0%
 Phase 5 - Documentation       [░░░░░░░░░░]  0%
@@ -344,8 +347,8 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 6. ~~**P2_04B_ADAPTIVE_SEND_RATE.md**~~ ✅ TERMINÉ (SEND_RATE_MOVING tuned to 1 in 0.2.7)
 7. ~~**P2_04C_DEAD_RECKONING.md**~~ ✅ REMOVED (caused overshoot, removed in 0.2.7)
 8. ~~**P2_04D_SMOOTH_RENDERING.md**~~ ✅ TERMINÉ (sub-tile rendering + camera correction + direction marker)
-9. **todo/P2_05_NETWORK_POLISH.md** ⭐ ← **PROCHAINE ÉTAPE**
-6. **todo/P2_06_OPTIMIZATION.md**
+9. ~~**P2_05_NETWORK_POLISH.md**~~ ✅ TERMINÉ
+6. **todo/P2_06_OPTIMIZATION.md** ⭐ ← **PROCHAINE ÉTAPE**
 7. **todo/P2_07_FINAL_TESTING.md**
 8. **todo/P3_08_DUEL_WARP.md**
 9. **todo/P4_09_MULTI_ROM.md** (Radical Red, Unbound)
@@ -384,5 +387,5 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 ---
 
 **Dernière mise à jour:** 2026-02-03
-**Version projet:** 0.2.7-alpha
-**Phase actuelle:** Phase 0+1 Complete ✅ | Phase 2 (Ghosting) In Progress — Render + Animate-Toward-Target Interp + Camera Correction + Smooth Rendering done
+**Version projet:** 0.2.8-alpha
+**Phase actuelle:** Phase 0+1 Complete ✅ | Phase 2 (Ghosting) In Progress — Render + Interp + Camera + Smooth Rendering + Network Polish done

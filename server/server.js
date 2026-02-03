@@ -202,6 +202,16 @@ function generateId() {
  */
 function handleDisconnect(client) {
   if (client.id) {
+    // Guard against double-disconnect (end + close both fire)
+    if (!clients.has(client.id)) return;
+
+    // Broadcast disconnection to room BEFORE removing from room
+    if (client.roomId) {
+      broadcastToRoom(client.roomId, client.id, {
+        type: 'player_disconnected',
+        playerId: client.id
+      });
+    }
     leaveRoom(client.id);
     clients.delete(client.id);
     console.log(`[Disconnect] Client ${client.id} disconnected`);
@@ -272,6 +282,13 @@ const heartbeatInterval = setInterval(() => {
   clients.forEach((client, id) => {
     if (!client.alive) {
       console.log(`[Heartbeat] Terminating inactive client ${id}`);
+      // Broadcast disconnection before cleanup
+      if (client.roomId) {
+        broadcastToRoom(client.roomId, id, {
+          type: 'player_disconnected',
+          playerId: id
+        });
+      }
       client.socket.destroy();
       leaveRoom(id);
       clients.delete(id);
