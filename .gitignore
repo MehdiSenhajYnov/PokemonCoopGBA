@@ -1,0 +1,58 @@
+# Node.js
+node_modules/
+npm-debug.log
+package-lock.json
+
+# ROM files (never commit ROMs!)
+rom/
+*.gba
+*.gb
+*.gbc
+*.nds
+*.sav
+*.sa1
+*.sa2
+*.sa3
+*.bps
+
+# mGBA builds (download separately)
+mGBA-build-*/
+mGBA-build-latest-win64.7z
+
+# External dependencies (download separately)
+luasocket.zip
+
+# Runtime / generated files
+client_incoming.json
+client_outgoing.json
+client_status.json
+nul
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# mGBA state/screenshots
+*.state
+*.png
+*.bmp
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Config overrides
+config.local.lua

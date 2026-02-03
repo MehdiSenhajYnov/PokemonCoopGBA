@@ -1,0 +1,24 @@
+{
+  "name": "pokemon-coop-server",
+  "version": "0.1.0",
+  "description": "TCP relay server for Pokémon Co-op Framework",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test-connection.js"
+  },
+  "keywords": [
+    "pokemon",
+    "tcp",
+    "mgba",
+    "multiplayer",
+    "gba"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

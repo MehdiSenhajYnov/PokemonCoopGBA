@@ -1,0 +1,5 @@
+This file is a placeholder. The actual package-lock.json will be generated when you run:
+
+  npm install
+
+The .gitignore is configured to ignore package-lock.json to avoid conflicts.
