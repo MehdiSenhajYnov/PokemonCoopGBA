@@ -3,21 +3,17 @@ node_modules/
 npm-debug.log
 package-lock.json
 
-# ROM files (never commit ROMs!)
-rom/
-*.gba
-*.gb
-*.gbc
-*.nds
+# Save files (runtime, player-specific)
 *.sav
 *.sa1
 *.sa2
 *.sa3
-*.bps
 
-# mGBA builds (download separately)
-mGBA-build-*/
-mGBA-build-latest-win64.7z
+# mGBA runtime files
+mgba/config.ini
+mgba/qt.ini
+mgba/library.sqlite3
+mgba/nointro.sqlite3
 
 # External dependencies (download separately)
 luasocket.zip
@@ -46,7 +42,6 @@ desktop.ini
 
 # mGBA state/screenshots
 *.state
-*.png
 *.bmp
 
 # Temporary files
