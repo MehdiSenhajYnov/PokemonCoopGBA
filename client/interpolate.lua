@@ -9,10 +9,12 @@
   rates (mGBA 2x–250x+).
 
   Catch-up formula:
-    segmentDuration = BASE_DURATION / max(1, queueLength)
+    segmentDuration = waypoint.duration / max(1, queueLength)
 
-  This single expression handles all speeds from 1x to 1000x+ with no
-  thresholds, paliers, or special cases.
+  Each waypoint carries a timestamp-derived duration (ms between network
+  messages).  This adapts automatically to walk/run/bike/speedhack rates.
+  The queue-length divisor provides catch-up when packets arrive faster
+  than they are consumed.
 
   Reference:
   - Gabriel Gambetta: Fast-Paced Multiplayer (entity interpolation)
@@ -22,7 +24,9 @@ local Interpolate = {}
 
 -- Configuration
 local TELEPORT_THRESHOLD = 10  -- Tile distance considered a teleport
-local BASE_DURATION = 250      -- Natural step duration in ms (~16 GBA frames)
+local DEFAULT_DURATION = 266   -- Fallback for 1st message (~16 walk frames at 60fps)
+local MIN_DURATION = 10        -- Clamp minimum (ms)
+local MAX_DURATION = 2000      -- Clamp maximum (ms)
 local MAX_QUEUE_SIZE = 1000    -- Safety cap on queue length
 
 -- Player data storage
@@ -88,11 +92,12 @@ end
   Update target position for a player.
   Called when a new network update arrives.
 
-  @param playerId    string  Unique player identifier
-  @param newPosition table   {x, y, mapId, mapGroup, facing}
-  @param timestamp   number  (kept for API compat, not used internally)
+  @param playerId     string  Unique player identifier
+  @param newPosition  table   {x, y, mapId, mapGroup, facing}
+  @param timestamp    number  Sender timeMs (for duration calculation)
+  @param durationHint number  Optional: sender-estimated step duration (ms)
 ]]
-function Interpolate.update(playerId, newPosition, timestamp)
+function Interpolate.update(playerId, newPosition, timestamp, durationHint)
   if not newPosition or not newPosition.x or not newPosition.y then
     return
   end
@@ -105,6 +110,7 @@ function Interpolate.update(playerId, newPosition, timestamp)
       animFrom = nil,
       animProgress = 0,
       state = "idle",
+      lastTimestamp = timestamp,
     }
     return
   end
@@ -130,11 +136,40 @@ function Interpolate.update(playerId, newPosition, timestamp)
     if ref.facing ~= newPosition.facing and #player.queue == 0 then
       player.current.facing = newPosition.facing
     end
+    -- Still update lastTimestamp so next duration calc is accurate
+    if timestamp then
+      player.lastTimestamp = timestamp
+    end
     return
   end
 
-  -- Enqueue waypoint
-  table.insert(player.queue, copyPos(newPosition))
+  -- Fix 3: Compute duration for this waypoint.
+  -- Priority: 1) timestamp delta (consecutive steps — most stable, averaged over full step)
+  --           2) sender-estimated hint (camera scroll rate — used for first step after idle)
+  --           3) DEFAULT_DURATION (fallback)
+  local duration = DEFAULT_DURATION
+  if timestamp and player.lastTimestamp then
+    local dt = timestamp - player.lastTimestamp
+    if dt >= MIN_DURATION and dt <= DEFAULT_DURATION * 2 then
+      duration = dt  -- Consecutive step: use actual timing
+    elseif durationHint and durationHint >= MIN_DURATION and durationHint <= MAX_DURATION then
+      duration = durationHint  -- Idle gap: use camera estimate
+    end
+  elseif durationHint and durationHint >= MIN_DURATION and durationHint <= MAX_DURATION then
+    duration = durationHint  -- No previous timestamp: use camera estimate
+  end
+
+  -- Fix 2: Pad duration by 8% to absorb network jitter.
+  -- The ghost interpolates slightly slower, so the next waypoint arrives before
+  -- the current one finishes. Catch-up formula corrects any accumulation.
+  duration = math.floor(duration * 1.08)
+
+  player.lastTimestamp = timestamp
+
+  -- Enqueue waypoint with duration
+  local wp = copyPos(newPosition)
+  wp.duration = duration
+  table.insert(player.queue, wp)
 
   -- Queue overflow safety: flush and snap to latest
   if #player.queue > MAX_QUEUE_SIZE then
@@ -173,8 +208,11 @@ function Interpolate.step(dt)
           player.animFrom = copyPos(player.current)
         end
 
-        -- Adaptive duration: inversely proportional to queue size
-        local segDuration = BASE_DURATION / math.max(1, #player.queue)
+        -- Adaptive duration: per-waypoint base, inversely proportional to queue size
+        local wpDuration = player.queue[1].duration or DEFAULT_DURATION
+        -- Fix 5: Softer catch-up curve — halves the acceleration per queue element
+        -- Queue 1→/1, 2→/1.5, 3→/2, 5→/3, 10→/5.5 (instead of linear /N)
+        local segDuration = wpDuration / math.max(1, 1 + 0.5 * (#player.queue - 1))
 
         -- Time left to finish this segment
         local timeLeftInSegment = (1 - player.animProgress) * segDuration

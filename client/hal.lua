@@ -276,6 +276,23 @@ function HAL.readFacing()
 end
 
 --[[
+  Read KEYINPUT register (0x04000130) for direction buttons.
+  Active-low: bit=0 means pressed. Direction bits 4-7.
+  Priority: Down > Up > Left > Right (matches Pokemon engine).
+  @return "down"/"up"/"left"/"right" or nil if no direction pressed
+]]
+function HAL.readKeyInput()
+  local raw = HAL.readIOReg16(0x0130)
+  if not raw then return nil end
+  local pressed = (~raw) & 0x00F0  -- invert active-low, mask bits 4-7
+  if (pressed & 0x0080) ~= 0 then return "down" end
+  if (pressed & 0x0040) ~= 0 then return "up" end
+  if (pressed & 0x0020) ~= 0 then return "left" end
+  if (pressed & 0x0010) ~= 0 then return "right" end
+  return nil
+end
+
+--[[
   Convert unsigned 16-bit to signed 16-bit
   Camera offsets (gSpriteCoordOffsetX/Y) are s16 but read16 returns u16
 ]]

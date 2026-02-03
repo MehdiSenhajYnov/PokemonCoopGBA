@@ -272,6 +272,43 @@ Tasks/
 
 ---
 
+### done/P2_07A_EARLY_MOVEMENT_DETECTION.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Priorité:** ⭐ Haute
+**Description:** Detection anticipee de mouvement via double validation KEYINPUT + camera delta + duration timestamps
+
+**Résultat:**
+- `HAL.readKeyInput()` reads KEYINPUT I/O register for direction detection at frame 0
+- Double validation (input + camera delta same direction) sends predicted position ~15 frames early
+- Per-waypoint duration from timestamps replaces fixed `BASE_DURATION` (auto-adapts walk/run/bike/speedhack)
+- Idle sends (30 frames) for natural correction of rare false predictions
+- Tile confirmation on RAM change (match = deduplicate, mismatch = send correction)
+
+**Fichiers modifiés:**
+- ✅ `client/hal.lua` (+14 lines: `readKeyInput()`)
+- ✅ `client/interpolate.lua` (~15 net lines: `DEFAULT_DURATION`/`MIN`/`MAX`, `lastTimestamp`, per-waypoint duration)
+- ✅ `client/main.lua` (~80 net lines: `DIR_DELTA`, `cameraDeltaToDir`, `earlyDetect` state, double validation, tile confirmation, idle sends)
+
+---
+
+### done/P2_07B_INTERPOLATION_SMOOTHNESS.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Priorité:** ⭐ Haute
+**Description:** Fluidite du mouvement ghost — eliminer micro-saccades entre les pas et ralentissements a l'arrivee
+
+**Résultat:**
+- Fix 1: Receive deplace AVANT Interpolate.step() (elimine 1 frame idle systematique)
+- Fix 2: Padding de duree 1.08x (absorbe la latence reseau incompressible)
+- Fix 3: Priorite timestamp delta > camera hint (precision duree pas consecutifs)
+- Fix 4: os.clock() realDt au lieu de 16.67ms fixe (compense frame drops)
+- Fix 5: Courbe de catch-up plus douce `1 + 0.5*(N-1)` (lisse les transitions de vitesse)
+
+**Fichiers modifiés:**
+- ✅ `client/main.lua` (Fix 1: reorder frame loop, Fix 4: os.clock realDt)
+- ✅ `client/interpolate.lua` (Fix 2: 1.08x padding, Fix 3: dt>hint priority, Fix 5: soft catch-up)
+
+---
+
 ### todo/P2_07_OPTIMIZATION.md
 **Status:** 🔴 À faire
 **Tâche:** #11
@@ -419,11 +456,13 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 6a. ~~**P2_06A_SPRITE_DETECTION_RELIABILITY.md**~~ ✅ TERMINÉ (strict tileNum=0 filter + hysteresis locking)
 6b. ~~**P2_06B_GHOST_DEPTH_OCCLUSION.md**~~ ✅ TERMINÉ (Y-sorting + BG layer occlusion + ghosts opaques)
 6c. ~~**P2_04E_WAYPOINT_QUEUE_INTERPOLATION.md**~~ ✅ TERMINÉ (waypoint queue + catch-up adaptatif)
-7. **todo/P2_07_OPTIMIZATION.md**
-8. **todo/P2_08_FINAL_TESTING.md**
-9. **todo/P3_09_DUEL_WARP.md**
-10. **todo/P4_10_MULTI_ROM.md** (Radical Red, Unbound)
-11. **todo/P5_11_DOCUMENTATION.md**
+7. ~~**P2_07A_EARLY_MOVEMENT_DETECTION.md**~~ ✅ TERMINÉ (early detection + duration timestamps)
+7b. ~~**P2_07B_INTERPOLATION_SMOOTHNESS.md**~~ ✅ TERMINÉ (5 fixes: frame loop reorder + os.clock + dt priority + padding + soft catch-up)
+8. **todo/P2_07_OPTIMIZATION.md**
+9. **todo/P2_08_FINAL_TESTING.md**
+10. **todo/P3_09_DUEL_WARP.md**
+11. **todo/P4_10_MULTI_ROM.md** (Radical Red, Unbound)
+12. **todo/P5_11_DOCUMENTATION.md**
 
 **Workflow:**
 - Nouvelles tâches → `todo/`

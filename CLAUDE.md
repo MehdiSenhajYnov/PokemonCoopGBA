@@ -93,7 +93,7 @@ Avant d'écrire du code utilisant une API externe (mGBA Lua, Node.js, LuaSocket,
 Le joueur GBA est toujours centré à l'écran (120, 80). Le ghost est positionné par delta de tiles: `ghostScreen = (112, 72) + (ghostTile - playerTile) * 16`.
 
 **Features:**
-- Interpolation de mouvement (FIFO waypoint queue avec catch-up adaptatif `BASE_DURATION / queueLength`)
+- Interpolation de mouvement (FIFO waypoint queue avec catch-up adaptatif doux `duration / (1 + 0.5*(N-1))`, 8% padding, os.clock realDt)
 - Rendu via Painter API de mGBA (canvas overlay)
 - Sprites extraits dynamiquement de VRAM/OAM/Palette (tous états visuels: marche, course, vélo, surf)
 - Tailles sprite variables: 16x32 (marche/course) et 32x32 (vélo) détectées automatiquement via OAM shape/sizeCode
@@ -184,6 +184,7 @@ PokemonCoop/
 - [x] Ghost Y-sorting (drawAllGhosts sorts by Y ascending, correct depth order between ghosts)
 - [x] BG layer occlusion (occlusion.lua — reads BG1 tilemap, redraws cover tiles over ghosts via Painter API)
 - [x] Waypoint queue interpolation (FIFO queue + adaptive catch-up `BASE_DURATION / queueLength`, exact path fidelity at any speedhack rate)
+- [x] Interpolation smoothness (receive-before-step reorder, os.clock realDt, timestamp>hint priority, 1.08x padding, soft catch-up curve)
 
 ### Phase 3: Duel Warp
 - [ ] Système de trigger

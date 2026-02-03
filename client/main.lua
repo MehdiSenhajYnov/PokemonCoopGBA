@@ -31,10 +31,31 @@ local Occlusion = require("occlusion")
 local SERVER_HOST = "127.0.0.1"
 local SERVER_PORT = 8080
 local SEND_RATE_MOVING = 1     -- Send on exact frame position changes (tiles change ~once per walk anim)
-local SEND_RATE_IDLE = 0       -- 0 = no sends when idle
+local SEND_RATE_IDLE = 30      -- Send every 30 frames (~2x/sec) in idle for correction
 local IDLE_THRESHOLD = 30      -- Frames without movement to consider idle (~0.5sec)
 local MAX_MESSAGES_PER_FRAME = 10 -- Limit messages processed per frame
 local ENABLE_DEBUG = true
+
+-- Early detection constants
+local INPUT_CAMERA_MAX_GAP = 3     -- Max frames between input and camera for validation
+local INPUT_TIMEOUT = 5            -- Frames before abandoning input without camera confirm
+
+-- Direction delta table (direction name -> tile offset)
+local DIR_DELTA = {
+  up    = { dx = 0, dy = -1 },
+  down  = { dx = 0, dy =  1 },
+  left  = { dx = -1, dy = 0 },
+  right = { dx =  1, dy = 0 },
+}
+
+-- Convert camera pixel delta to direction string
+local function cameraDeltaToDir(dcx, dcy)
+  if dcy < 0 then return "up" end
+  if dcy > 0 then return "down" end
+  if dcx < 0 then return "left" end
+  if dcx > 0 then return "right" end
+  return nil
+end
 
 -- State
 local State = {
@@ -55,7 +76,16 @@ local State = {
   isMoving = false,
   lastMoveFrame = 0,
   sendCooldown = 0,
-  lastSentPosition = nil
+  lastSentPosition = nil,
+  -- Early movement detection
+  earlyDetect = {
+    inputDir = nil,         -- KEYINPUT direction ("up"/"down"/"left"/"right")
+    inputFrame = 0,         -- frame when input was detected
+    prevCameraX = nil,      -- camera X from previous frame
+    prevCameraY = nil,      -- camera Y from previous frame
+    predictedPos = nil,     -- predicted position sent (to avoid duplicates)
+    predictedFrame = 0,     -- frame when prediction was sent
+  }
 }
 
 -- Canvas and painter for overlay
@@ -63,6 +93,9 @@ local overlay = nil
 local painter = nil
 local W = 240
 local H = 160
+
+-- Real delta time tracking (Fix 4: os.clock based)
+local lastClock = os.clock()
 
 -- ROM Detection
 local detectedRomId = nil
@@ -377,30 +410,15 @@ end
   Main update loop (called every frame)
 ]]
 local function update()
+  -- Fix 4: Real delta time via os.clock() instead of fixed 16.67ms
+  local now = os.clock()
+  local realDt = math.max(5, math.min(50, (now - lastClock) * 1000))  -- ms, clamped [5, 50]
+  lastClock = now
+
   State.frameCounter = State.frameCounter + 1
-  State.timeMs = State.timeMs + 16.67  -- ~60fps = 16.67ms/frame
+  State.timeMs = State.timeMs + realDt
 
-  -- Advance ghost interpolation
-  Interpolate.step(16.67)
-
-  -- Read current position
-  local currentPos = readPlayerPosition()
-
-  -- Capture local player sprite from VRAM (only rebuilds image when sprite changes)
-  Sprite.captureLocalPlayer()
-
-  -- Send sprite update if sprite changed
-  if Sprite.hasChanged() and State.connected then
-    local spriteData = Sprite.getLocalSpriteData()
-    if spriteData then
-      Network.send({
-        type = "sprite_update",
-        data = spriteData
-      })
-    end
-  end
-
-  -- Detect disconnection
+  -- Detect disconnection (before receive to avoid processing on dead socket)
   if State.connected and not Network.isConnected() then
     State.connected = false
     log("Connection lost — will attempt reconnection")
@@ -429,7 +447,9 @@ local function update()
     end
   end
 
-  -- Receive messages from server (limit per frame to avoid lag)
+  -- Fix 1: Receive messages BEFORE Interpolate.step() so new waypoints are
+  -- available in the queue before the ghost advances. Eliminates the 1-frame
+  -- idle gap between consecutive steps.
   if State.connected then
     for i = 1, MAX_MESSAGES_PER_FRAME do
       local message = Network.receive()
@@ -437,8 +457,8 @@ local function update()
 
       -- Handle different message types
       if message.type == "position" then
-        -- Feed interpolation buffer with timestamp
-        Interpolate.update(message.playerId, message.data, message.t)
+        -- Feed interpolation buffer with timestamp + duration hint
+        Interpolate.update(message.playerId, message.data, message.t, message.dur)
         -- Store raw data as backup + update last seen
         State.otherPlayers[message.playerId] = message.data
 
@@ -467,10 +487,33 @@ local function update()
 
       end
     end
+  end
 
+  -- Advance ghost interpolation (after receive so new waypoints are in the queue)
+  Interpolate.step(realDt)
+
+  -- Read current position
+  local currentPos = readPlayerPosition()
+
+  -- Capture local player sprite from VRAM (only rebuilds image when sprite changes)
+  Sprite.captureLocalPlayer()
+
+  -- Send sprite update if sprite changed
+  if Sprite.hasChanged() and State.connected then
+    local spriteData = Sprite.getLocalSpriteData()
+    if spriteData then
+      Network.send({
+        type = "sprite_update",
+        data = spriteData
+      })
+    end
   end
 
   if currentPos then
+    -- Read camera early (needed for early movement detection AND render)
+    local cameraX = HAL.readCameraX()
+    local cameraY = HAL.readCameraY()
+
     -- Detect movement state
     if positionChanged(currentPos, State.lastPosition) then
       -- Check for map change → immediate send + clear caches
@@ -482,6 +525,9 @@ local function update()
         State.lastSentPosition = currentPos
         State.sendCooldown = SEND_RATE_MOVING
         Occlusion.clearCache()
+        -- Reset early detection on map change
+        State.earlyDetect.inputDir = nil
+        State.earlyDetect.predictedPos = nil
       end
 
       State.isMoving = true
@@ -492,28 +538,124 @@ local function update()
       end
     end
 
-    -- Adaptive send: only send when moving and cooldown expired
-    local sendRate = State.isMoving and SEND_RATE_MOVING or SEND_RATE_IDLE
+    -- === Early movement detection (KEYINPUT + camera delta double validation) ===
+    local ed = State.earlyDetect
+    local inputDir = HAL.readKeyInput()
 
-    if sendRate > 0 and State.sendCooldown <= 0 then
-      if positionChanged(currentPos, State.lastPosition) then
-        sendPositionUpdate(currentPos)
-        State.lastPosition = currentPos
-        State.lastSentPosition = currentPos
-        State.sendCooldown = sendRate
+    -- Track input direction (only when no prediction pending)
+    if inputDir and not ed.predictedPos then
+      if ed.inputDir ~= inputDir then
+        ed.inputDir = inputDir
+        ed.inputFrame = State.frameCounter
+      end
+    elseif not inputDir and not ed.predictedPos then
+      ed.inputDir = nil
+      ed.inputFrame = 0
+    end
+
+    -- Camera delta detection (hoisted for use in duration estimation)
+    local cameraDir = nil
+    local cameraDX, cameraDY = 0, 0
+    if ed.prevCameraX and cameraX and cameraY then
+      cameraDX = cameraX - ed.prevCameraX
+      cameraDY = cameraY - ed.prevCameraY
+      if cameraDX ~= 0 or cameraDY ~= 0 then
+        cameraDir = cameraDeltaToDir(cameraDX, cameraDY)
+      end
+    end
+    ed.prevCameraX = cameraX
+    ed.prevCameraY = cameraY
+
+    -- Double validation: input + camera agree on direction, gap <= INPUT_CAMERA_MAX_GAP
+    if ed.inputDir and cameraDir and not ed.predictedPos then
+      if ed.inputDir == cameraDir then
+        local gap = State.frameCounter - ed.inputFrame
+        if gap <= INPUT_CAMERA_MAX_GAP then
+          -- CONFIRMED: compute destination and send immediately
+          local delta = DIR_DELTA[ed.inputDir]
+          if delta then
+            ed.predictedPos = {
+              x = currentPos.x + delta.dx,
+              y = currentPos.y + delta.dy,
+              mapId = currentPos.mapId,
+              mapGroup = currentPos.mapGroup,
+              facing = currentPos.facing
+            }
+            ed.predictedFrame = State.frameCounter
+
+            if State.connected then
+              -- Estimate step duration from camera scroll rate:
+              -- pixels/frame → frames to cross 1 tile (16px) → ms
+              local pxPerFrame = math.max(1, math.abs(cameraDX ~= 0 and cameraDX or cameraDY))
+              local estimatedDur = math.floor((16 / pxPerFrame) * 16.67)
+
+              Network.send({
+                type = "position",
+                data = ed.predictedPos,
+                t = State.timeMs,
+                dur = estimatedDur
+              })
+              State.lastSentPosition = ed.predictedPos
+            end
+          end
+        end
       end
     end
 
-    -- Send 1 final update when stopping (so ghost lands at exact position)
-    if not State.isMoving and State.lastSentPosition and positionChanged(currentPos, State.lastSentPosition) then
+    -- Timeout input without camera confirmation (wall/blocked)
+    if ed.inputDir and not ed.predictedPos then
+      if State.frameCounter - ed.inputFrame > INPUT_TIMEOUT then
+        ed.inputDir = nil
+        ed.inputFrame = 0
+      end
+    end
+
+    -- === Tile confirmation + adaptive send ===
+    if ed.predictedPos and positionChanged(currentPos, State.lastPosition) then
+      -- Tile changed while prediction active: check match
+      if currentPos.x == ed.predictedPos.x
+        and currentPos.y == ed.predictedPos.y
+        and currentPos.mapId == ed.predictedPos.mapId
+        and currentPos.mapGroup == ed.predictedPos.mapGroup then
+        -- MATCH: prediction correct, no duplicate needed
+        State.lastPosition = currentPos
+        State.lastSentPosition = currentPos
+      else
+        -- MISMATCH (e.g. ledge jump): send actual position as normal update
+        sendPositionUpdate(currentPos)
+        State.lastPosition = currentPos
+        State.lastSentPosition = currentPos
+      end
+      -- Reset detection in all cases
+      ed.inputDir = nil
+      ed.predictedPos = nil
+    elseif not ed.predictedPos then
+      -- No prediction active: original adaptive send behavior
+      local sendRate = State.isMoving and SEND_RATE_MOVING or SEND_RATE_IDLE
+
+      if sendRate > 0 and State.sendCooldown <= 0 then
+        if positionChanged(currentPos, State.lastPosition) then
+          sendPositionUpdate(currentPos)
+          State.lastPosition = currentPos
+          State.lastSentPosition = currentPos
+          State.sendCooldown = sendRate
+        end
+      end
+    end
+
+    -- Idle correction: send when stopped but lastSentPosition differs (fixes false predictions)
+    if not State.isMoving and State.lastSentPosition
+      and positionChanged(currentPos, State.lastSentPosition)
+      and State.sendCooldown <= 0 then
       sendPositionUpdate(currentPos)
       State.lastSentPosition = currentPos
+      State.sendCooldown = SEND_RATE_IDLE
     end
 
     State.sendCooldown = math.max(0, State.sendCooldown - 1)
 
     -- Update sub-tile camera tracking for smooth ghost scrolling
-    Render.updateCamera(currentPos.x, currentPos.y, HAL.readCameraX(), HAL.readCameraY())
+    Render.updateCamera(currentPos.x, currentPos.y, cameraX, cameraY)
 
     -- Draw overlay
     drawOverlay(currentPos)
