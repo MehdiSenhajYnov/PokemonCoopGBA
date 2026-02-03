@@ -11,8 +11,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] Camera offset discovery for Run & Bun (IWRAM 0x03005DFC, 0x03005DF8)
 - [x] Ghost overlay rendering (render.lua) with Painter API
 - [x] Ghost positioning fixed (relative to screen center)
-- [ ] Movement interpolation
+- [x] Movement interpolation (interpolate.lua)
+- [x] Animate-toward-target interpolation (replaced buffered render-behind + dead reckoning)
+- [x] Adaptive send rate (zero sends idle, send on every tile change, immediate on map change)
+- [x] Sub-tile camera correction for smooth ghost scrolling during walk animations
+- [x] Smooth sub-tile rendering + direction marker + state debug colors
+- [x] Direct TCP networking (replaced file-based proxy with mGBA built-in socket API)
+- [x] Auto-generated player IDs (no more hardcoded IDs or client2/ copies)
+- [x] Removed proxy.js and client2/ (no longer needed)
 - [ ] Disconnection handling
+
+## [0.2.7-alpha] - 2026-02-03
+
+### Changed - Interpolation Rewrite & Camera Correction
+- **interpolate.lua**: Complete rewrite — replaced "render behind" buffered interpolation + dead reckoning with "animate toward target" approach
+  - When a new position snapshot arrives, ghost lerps from current visual position to new position
+  - Animation duration estimated from interval between consecutive snapshots (auto-adapts to walk/run/bike/surf)
+  - Removed: ring buffer, clock offset remapping, render delay, buffer purging, velocity tracking, extrapolation, smooth correction
+  - Removed: `setRenderDelay()`, `setLocalTime()` APIs
+  - Only two states remain: "interpolating" and "idle" (removed "extrapolating" and "correcting")
+  - Constants: DEFAULT_ANIM_DURATION=250ms, MIN=50ms, MAX=500ms, TELEPORT_THRESHOLD=10 tiles
+- **render.lua**: Sub-tile camera correction for smooth ghost scrolling
+  - Added `Render.updateCamera(playerX, playerY, cameraX, cameraY)` — tracks camera offset deltas between frames
+  - `ghostToScreen()` now uses tile-delta + sub-tile correction: `PLAYER_SCREEN_X + (ghostX - playerX) * TILE_SIZE + subTileX`
+  - Visual continuity on tile change: compensates for tile-delta jump before camera catches up
+  - Clamped to ±1 tile as safety net; resets on teleport (delta > 2 tiles)
+  - Removed "extrapolating" and "correcting" from STATE_COLORS/STATE_OUTLINES (only interpolating/idle remain)
+- **main.lua**: Tuned send rate and removed render delay
+  - `SEND_RATE_MOVING` changed from 6 to 1 (send on exact frame position changes)
+  - Removed `RENDER_DELAY` constant and `Interpolate.setRenderDelay()` / `Interpolate.setLocalTime()` calls
+  - Added `Render.updateCamera()` call each frame before drawing overlay
+
+## [0.2.6-alpha] - 2026-02-03
+
+### Added - Smooth Rendering & Visual Improvements (P2_04D)
+- **render.lua**: Sub-tile pixel-perfect ghost rendering
+  - `ghostToScreen()` uses `math.floor` to prevent sub-pixel flickering
+  - Interpolated float coordinates (from lerp) now render at exact pixel positions
+- **render.lua**: Facing direction marker on each ghost
+  - 4x4 white square indicator on the edge corresponding to facing direction
+  - Supports all 4 directions: Down (1), Up (2), Left (3), Right (4)
+- **render.lua**: State-based debug coloring
+  - STATE_COLORS/STATE_OUTLINES tables for debug coloring by interpolation state
+  - `drawGhost()` accepts optional `state` parameter for debug coloring
+  - Falls back to default green when no state provided
+  - `drawAllGhosts()` supports new `{pos=..., state=...}` format with backward compatibility
+- **main.lua**: Passes interpolation state to render pipeline
+  - `interpolatedPlayers` structure now includes `Interpolate.getState(playerId)`
+
+## [0.2.5-alpha] - 2026-02-03
+
+### Added - Dead Reckoning & Prediction (P2_04C) — *Superseded in 0.2.7*
+- **interpolate.lua**: Dead reckoning when buffer is exhausted
+  - Velocity tracking from buffer snapshots (tiles/ms)
+  - Extrapolation: ghost continues moving using last known velocity when no new network data
+  - Bounded extrapolation: max 500ms time, max 5 tiles distance
+  - Smooth correction: when real position arrives after extrapolation, blend smoothly instead of snapping
+  - State tracking: each ghost reports "interpolating", "extrapolating", "correcting", or "idle"
+  - `Interpolate.getState(playerId)` API for debug overlay integration
+  - Velocity/movement state reset on teleport detection
+- *Note: Dead reckoning was removed in 0.2.7 — caused overshoot when player stops. Replaced by animate-toward-target approach.*
+
+## [0.2.4-alpha] - 2026-02-03
+
+### Changed - Adaptive Send Rate (P2_04B)
+- **main.lua**: Replaced fixed `UPDATE_RATE` with adaptive send rate system
+  - `SEND_RATE_MOVING = 6` (~10 sends/sec while moving) — *Changed to 1 in 0.2.7*
+  - `SEND_RATE_IDLE = 0` (zero sends when idle)
+  - `IDLE_THRESHOLD = 30` (~0.5sec to consider player idle)
+  - Movement detection via `positionChanged()` comparison each frame
+  - Cooldown-based send throttling (resets after each send)
+  - Immediate send on map/warp change (bypasses cooldown)
+  - Final position update when player stops (ensures ghost lands at exact position)
+  - Added `State.isMoving`, `State.lastMoveFrame`, `State.sendCooldown`, `State.lastSentPosition`
+  - Removed `UPDATE_RATE` constant and its validation in `initialize()`
+
+## [0.2.3-alpha] - 2026-02-03
+
+### Changed - Buffered Interpolation (P2_04A) — *Superseded in 0.2.7*
+- **interpolate.lua**: Complete rewrite with temporal ring buffer
+  - Ring buffer of timestamped position snapshots per player
+  - Render delay system (~150ms behind real-time) for guaranteed smooth interpolation
+  - Clock offset remapping: sender timestamps converted to receiver's local timeline
+  - Teleport detection uses last raw buffer entry (not stale interpolated position)
+  - Configurable render delay via `setRenderDelay(ms)`
+  - Buffer purging to prevent memory leaks (snapshots older than 500ms past render time)
+  - Max buffer size cap (20 entries per player)
+- **main.lua**: Integration with buffered interpolation
+  - Added `State.timeMs` elapsed time counter (incremented ~16.67ms/frame)
+  - Timestamps (`t`) included in all outgoing position messages
+  - `Interpolate.setLocalTime()` called each frame for clock sync
+  - `Interpolate.step(16.67)` receives frame delta time
+  - `Interpolate.update()` receives `message.t` timestamp
+  - `UPDATE_RATE` reduced from 60 to 10 (~6 updates/sec for better interpolation)
+  - `RENDER_DELAY` config constant (150ms default)
+- **server.js**: Relays `t` (timestamp) field in position broadcasts
+- *Note: Ring buffer + render delay approach was superseded in 0.2.7 by "animate toward target" — tile-based Pokemon data is too infrequent for render-behind to produce smooth results.*
 
 ## [0.2.2-alpha] - 2026-02-03
 
@@ -149,6 +243,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **0.2.7-alpha** (2026-02-03): Interpolation rewrite — animate-toward-target, camera correction, removed dead reckoning
+- **0.2.6-alpha** (2026-02-03): Smooth rendering — sub-tile pixel-perfect, direction marker, state debug colors
+- **0.2.5-alpha** (2026-02-03): Dead reckoning — extrapolation, smooth correction, state tracking (superseded in 0.2.7)
+- **0.2.4-alpha** (2026-02-03): Adaptive send rate (zero idle, ~10/sec moving, immediate on map change)
+- **0.2.3-alpha** (2026-02-03): Buffered interpolation with temporal ring buffer
 - **0.2.2-alpha** (2026-02-03): Ghost positioning fix (relative screen-center approach)
 - **0.2.1-alpha** (2026-02-03): Ghost rendering system (render.lua, IWRAM support)
 - **0.2.0-alpha** (2026-02-03): TCP networking complete, file-based proxy, 2-player testing
@@ -161,7 +260,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### 0.3.0 - Ghosting System Complete (Phase 2)
 - [x] Camera offset discovery for Run & Bun
 - [x] Ghost overlay rendering (render.lua)
-- [ ] Movement interpolation (interpolate.lua)
+- [x] Movement interpolation (interpolate.lua)
 - [ ] Disconnection handling and ghost cleanup
 - [ ] Connection status improvements
 

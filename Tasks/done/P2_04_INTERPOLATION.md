@@ -1,6 +1,6 @@
 # Phase 2 - Interpolation de Mouvement
 
-> **Statut:** En attente (dépend de PHASE2_GHOSTING_RENDER.md)
+> **Statut:** Completed (2026-02-03)
 > **Type:** Feature — Mouvement fluide des ghosts
 > **Objectif:** Implémenter l'interpolation linéaire pour rendre les mouvements des ghosts fluides au lieu de saccadés.
 
@@ -75,7 +75,7 @@ players[playerId] = {
 
 ### Implémentation complète
 
-- [ ] **1.1** Créer fichier `client/interpolate.lua`:
+- [x] **1.1** Créer fichier `client/interpolate.lua`:
 
   ```lua
   --[[
@@ -276,7 +276,7 @@ players[playerId] = {
   return Interpolate
   ```
 
-- [ ] **1.2** Tester module isolément:
+- [x] **1.2** Tester module isolément:
 
   ```lua
   local Interpolate = require("interpolate")
@@ -303,12 +303,12 @@ players[playerId] = {
 
 **Fichier à modifier:** `client/main.lua`
 
-- [ ] **2.1** Ajouter require (ligne 12):
+- [x] **2.1** Ajouter require (ligne 12):
   ```lua
   local Interpolate = require("interpolate")
   ```
 
-- [ ] **2.2** Modifier réception positions réseau dans `update()`:
+- [x] **2.2** Modifier réception positions réseau dans `update()`:
 
   **Actuellement (après PHASE1):**
   ```lua
@@ -327,7 +327,7 @@ players[playerId] = {
     State.otherPlayers[message.playerId] = message.data
   ```
 
-- [ ] **2.3** Avancer interpolation chaque frame dans `update()` (ligne 173):
+- [x] **2.3** Avancer interpolation chaque frame dans `update()` (ligne 173):
 
   **Ajouter au début de la fonction `update()`:**
   ```lua
@@ -335,7 +335,7 @@ players[playerId] = {
   Interpolate.step()
   ```
 
-- [ ] **2.4** Créer fonction pour obtenir positions interpolées:
+- [x] **2.4** Créer fonction pour obtenir positions interpolées:
 
   **Ajouter nouvelle fonction (après `drawOtherPlayers()`):**
   ```lua
@@ -359,7 +359,7 @@ players[playerId] = {
   end
   ```
 
-- [ ] **2.5** Modifier `drawOtherPlayers()` pour utiliser positions interpolées:
+- [x] **2.5** Modifier `drawOtherPlayers()` pour utiliser positions interpolées:
 
   **Ligne actuelle:**
   ```lua
@@ -372,7 +372,7 @@ players[playerId] = {
   Render.drawAllGhosts(interpolatedPlayers, cameraX, cameraY, currentMap)
   ```
 
-- [ ] **2.6** Gérer déconnexions (nettoyer interpolation):
+- [x] **2.6** Gérer déconnexions (nettoyer interpolation):
 
   **Dans la gestion des messages serveur, ajouter:**
   ```lua
@@ -450,7 +450,7 @@ Pour rendre l'interpolation plus visible, on peut ajouter des détails visuels:
 
 L'interpolation peut être ajustée selon les préférences:
 
-- [ ] **4.1** Ajouter paramètres dans `main.lua` (section Configuration):
+- [x] **4.1** Ajouter paramètres dans `main.lua` (section Configuration):
 
   ```lua
   -- Interpolation settings
@@ -458,14 +458,14 @@ L'interpolation peut être ajustée selon les préférences:
   local TELEPORT_THRESHOLD = 10     -- Distance tiles = téléportation
   ```
 
-- [ ] **4.2** Passer paramètres à Interpolate:
+- [x] **4.2** Passer paramètres à Interpolate:
 
   ```lua
   Interpolate.setSpeed(INTERPOLATION_SPEED)
   Interpolate.setTeleportThreshold(TELEPORT_THRESHOLD)
   ```
 
-- [ ] **4.3** Implémenter setters dans `interpolate.lua`:
+- [x] **4.3** Implémenter setters dans `interpolate.lua`:
 
   ```lua
   function Interpolate.setSpeed(speed)

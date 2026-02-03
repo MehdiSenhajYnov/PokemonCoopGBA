@@ -135,11 +135,12 @@ function handleMessage(client, messageStr) {
 
         client.lastPosition = message.data;
 
-        // Relay to other clients in room
+        // Relay to other clients in room (include timestamp for interpolation)
         broadcastToRoom(client.roomId, client.id, {
           type: 'position',
           playerId: client.id,
-          data: message.data
+          data: message.data,
+          t: message.t
         });
         break;
 

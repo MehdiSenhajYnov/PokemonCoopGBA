@@ -1,10 +1,9 @@
 --[[
-  Pokémon Co-op Framework - Network Module (File-Based Version)
+  Pokémon Co-op Framework - Network Module (Direct TCP)
 
-  Handles communication with the relay server via file I/O
-  - No socket dependency required
-  - Works with proxy.js that bridges files <-> TCP server
-  - Same API as socket version for compatibility
+  Uses mGBA's built-in socket API (socket.tcp / socket.connect)
+  No external proxy or file I/O needed.
+  Protocol: JSON messages delimited by newline (\n)
 ]]
 
 -- Simple JSON encoder/decoder for Lua
@@ -15,7 +14,6 @@ function JSON.encode(obj)
     local valType = type(val)
 
     if valType == "string" then
-      -- Escape backslash FIRST, then other sequences
       return '"' .. val:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'):gsub('\t', '\\t') .. '"'
     elseif valType == "number" then
       return tostring(val)
@@ -47,7 +45,6 @@ function JSON.encode(obj)
 end
 
 function JSON.decode(str)
-  -- Remove leading/trailing whitespace
   str = str:match("^%s*(.-)%s*$")
 
   local pos = 1
@@ -63,14 +60,12 @@ function JSON.decode(str)
 
     local char = str:sub(pos, pos)
 
-    -- String
     if char == '"' then
       pos = pos + 1
       local start = pos
       while pos <= #str do
         if str:sub(pos, pos) == '"' and str:sub(pos - 1, pos - 1) ~= '\\' then
           local result = str:sub(start, pos - 1)
-          -- Unescape in reverse order of encoding
           result = result:gsub('\\t', '\t'):gsub('\\r', '\r'):gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
           pos = pos + 1
           return result
@@ -79,7 +74,6 @@ function JSON.decode(str)
       end
       error("Unterminated string")
 
-    -- Number
     elseif char:match("[%-0-9]") then
       local start = pos
       while pos <= #str and str:sub(pos, pos):match("[%-0-9.eE+]") do
@@ -87,7 +81,6 @@ function JSON.decode(str)
       end
       return tonumber(str:sub(start, pos - 1))
 
-    -- Boolean/null
     elseif str:sub(pos, pos + 3) == "true" then
       pos = pos + 4
       return true
@@ -98,7 +91,6 @@ function JSON.decode(str)
       pos = pos + 4
       return nil
 
-    -- Object
     elseif char == "{" then
       local obj = {}
       pos = pos + 1
@@ -112,7 +104,6 @@ function JSON.decode(str)
       while true do
         skip_whitespace()
 
-        -- Key
         if str:sub(pos, pos) ~= '"' then
           error("Expected string key")
         end
@@ -124,7 +115,6 @@ function JSON.decode(str)
         end
         pos = pos + 1
 
-        -- Value
         local value = decode_value()
         obj[key] = value
 
@@ -140,7 +130,6 @@ function JSON.decode(str)
         end
       end
 
-    -- Array
     elseif char == "[" then
       local arr = {}
       pos = pos + 1
@@ -177,45 +166,49 @@ end
 -- Network Module
 local Network = {}
 
--- Resolve script directory for absolute file paths
-local _scriptPath = debug.getinfo(1, "S").source:sub(2)
-local _scriptDir = _scriptPath:match("(.*[/\\])") or ""
-
--- File paths (absolute, based on script location)
-local OUTGOING_FILE = _scriptDir .. "client_outgoing.json"
-local INCOMING_FILE = _scriptDir .. "client_incoming.json"
-local STATUS_FILE = _scriptDir .. "client_status.json"
-
 -- Internal state
+local sock = nil
 local connected = false
-local playerId = nil
-local lastIncomingCheck = 0
-local incomingBuffer = {}
-local outgoingBuffer = {}
+local receiveBuffer = ""      -- Raw bytes buffer for incomplete lines
+local incomingMessages = {}   -- Decoded messages ready to be consumed
+local outgoingBuffer = {}     -- Messages queued for sending
 
 --[[
-  Connect to server (via proxy)
-  @param host string - Server hostname/IP (ignored, for API compatibility)
-  @param port number - Server port (ignored, for API compatibility)
-  @return boolean - True if connection successful
+  Connect to TCP server using mGBA built-in socket API
+  Note: socket.connect() is BLOCKING - mGBA freezes until connected or timeout
 ]]
 function Network.connect(host, port)
-  -- Create status file to signal proxy we want to connect
-  local success = pcall(function()
-    local file = io.open(STATUS_FILE, "w")
-    if file then
-      file:write(JSON.encode({
-        action = "connect",
-        host = host,
-        port = port,
-        timestamp = os.time()
-      }))
-      file:close()
-    end
+  local success, err = pcall(function()
+    sock = socket.connect(host, port)
   end)
 
-  if success then
+  if success and sock then
     connected = true
+
+    -- Register receive callback (fires once per frame when data available)
+    sock:add("received", function()
+      local data, error = sock:receive(4096)
+      if data then
+        receiveBuffer = receiveBuffer .. data
+
+        -- Process complete lines (newline-delimited JSON)
+        local lineEnd = receiveBuffer:find("\n")
+        while lineEnd do
+          local line = receiveBuffer:sub(1, lineEnd - 1):match("^%s*(.-)%s*$")
+          receiveBuffer = receiveBuffer:sub(lineEnd + 1)
+
+          if #line > 0 then
+            local ok, message = pcall(JSON.decode, line)
+            if ok and message then
+              table.insert(incomingMessages, message)
+            end
+          end
+
+          lineEnd = receiveBuffer:find("\n")
+        end
+      end
+    end)
+
     return true
   end
 
@@ -223,130 +216,49 @@ function Network.connect(host, port)
 end
 
 --[[
-  Send message to server (via file)
-  @param message table - Lua table to encode as JSON
-  @return boolean - True if sent successfully
+  Queue a message to be sent on next flush
 ]]
 function Network.send(message)
   if not connected then
     return false
   end
 
-  -- Add to outgoing buffer (flushed by Network.flush())
   table.insert(outgoingBuffer, message)
   return true
 end
 
 --[[
-  Flush outgoing buffer to file (call once per frame)
-  Writes all queued messages as a JSON array for the proxy to read
-  @return boolean - True if flushed successfully
+  Flush all queued messages over the socket
+  Call once per frame
 ]]
 function Network.flush()
-  if #outgoingBuffer == 0 then
+  if not connected or not sock or #outgoingBuffer == 0 then
     return true
   end
 
-  -- Encode buffer to JSON array
-  local success, jsonStr = pcall(function()
-    return JSON.encode(outgoingBuffer)
-  end)
-
-  if not success then
-    return false
-  end
-
-  -- Write to outgoing file (proxy will read it)
-  local writeSuccess = pcall(function()
-    local file = io.open(OUTGOING_FILE, "w")
-    if file then
-      file:write(jsonStr)
-      file:close()
-    else
-      error("Cannot open outgoing file")
+  for _, message in ipairs(outgoingBuffer) do
+    local ok, jsonStr = pcall(JSON.encode, message)
+    if ok then
+      sock:send(jsonStr .. "\n")
     end
-  end)
-
-  if writeSuccess then
-    outgoingBuffer = {}
   end
 
-  return writeSuccess
+  outgoingBuffer = {}
+  return true
 end
 
 --[[
-  Receive message from server (via file)
-  @return table|nil - Decoded message or nil if no message available
+  Return next received message, or nil if none available
 ]]
 function Network.receive()
-  if not connected then
-    return nil
+  if #incomingMessages > 0 then
+    return table.remove(incomingMessages, 1)
   end
-
-  -- If buffer has messages, return next one
-  if #incomingBuffer > 0 then
-    return table.remove(incomingBuffer, 1)
-  end
-
-  -- Read incoming file (written by proxy as JSON array)
-  local success, data = pcall(function()
-    local file = io.open(INCOMING_FILE, "r")
-    if not file then
-      return nil
-    end
-
-    local content = file:read("*all")
-    file:close()
-
-    if content and #content > 0 then
-      return content
-    end
-    return nil
-  end)
-
-  if not success or not data then
-    return nil
-  end
-
-  -- Clear the file immediately (so we don't re-read)
-  pcall(function()
-    local file = io.open(INCOMING_FILE, "w")
-    if file then
-      file:write("")
-      file:close()
-    end
-  end)
-
-  -- Decode JSON
-  local decodeSuccess, messages = pcall(function()
-    return JSON.decode(data)
-  end)
-
-  if not decodeSuccess or not messages then
-    return nil
-  end
-
-  -- If it's an array, buffer all messages
-  if type(messages) == "table" and #messages > 0 then
-    for _, msg in ipairs(messages) do
-      table.insert(incomingBuffer, msg)
-    end
-  elseif type(messages) == "table" then
-    -- Single object (backward compat)
-    table.insert(incomingBuffer, messages)
-  end
-
-  -- Return first message from buffer
-  if #incomingBuffer > 0 then
-    return table.remove(incomingBuffer, 1)
-  end
-
   return nil
 end
 
 --[[
-  Check if connected to server
-  @return boolean - True if connection active
+  Check if connected
 ]]
 function Network.isConnected()
   return connected
@@ -356,28 +268,14 @@ end
   Disconnect from server
 ]]
 function Network.disconnect()
-  if connected then
-    -- Write disconnect status
-    pcall(function()
-      local file = io.open(STATUS_FILE, "w")
-      if file then
-        file:write(JSON.encode({
-          action = "disconnect",
-          timestamp = os.time()
-        }))
-        file:close()
-      end
-    end)
+  if sock then
+    pcall(function() sock:close() end)
+    sock = nil
   end
-
   connected = false
-  playerId = nil
-
-  -- Clean up files
-  pcall(function()
-    os.remove(OUTGOING_FILE)
-    os.remove(INCOMING_FILE)
-  end)
+  receiveBuffer = ""
+  incomingMessages = {}
+  outgoingBuffer = {}
 end
 
 return Network

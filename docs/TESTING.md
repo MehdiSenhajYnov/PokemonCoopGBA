@@ -86,36 +86,25 @@ Pokémon Co-op Framework v0.2.0
 [PokéCoop] Connecting to server 127.0.0.1:8080...
 ```
 
-### Test 4: Full 2-Player Test (File-based Proxy)
+### Test 4: Full 2-Player Test (Direct TCP)
 
-**Terminal 1 - Server:**
+**Terminal - Server:**
 ```bash
 cd server
 node server.js
-```
-
-**Terminal 2 - Proxy Client 1:**
-```bash
-cd client
-node proxy.js
-```
-
-**Terminal 3 - Proxy Client 2:**
-```bash
-cd client2
-node proxy.js
 ```
 
 **mGBA Instance 1:**
 - Load ROM → Tools → Scripting → Load `client/main.lua`
 
 **mGBA Instance 2:**
-- Load ROM → Tools → Scripting → Load `client2/main.lua`
+- Load ROM → Tools → Scripting → Load `client/main.lua`
 
 **Expected:**
-- Both clients connect via their proxies
+- Both clients connect directly to server (no proxy needed)
+- Each client gets a unique auto-generated player ID
 - Position updates appear in server logs
-- Each player sees the other's position in overlay
+- Each player sees the other's ghost on screen
 
 ### Test 5: Position Reading
 
@@ -178,7 +167,8 @@ lsof -ti:8080 | xargs kill -9
    ├── main.lua
    ├── hal.lua
    ├── network.lua
-   ├── proxy.js
+   ├── render.lua
+   ├── interpolate.lua
    └── config/
        ├── emerald_us.lua
        └── run_and_bun.lua
@@ -203,15 +193,6 @@ print(string.format("X: %d", emu.memory.wram:read16(0x00024CBC)))
 print(string.format("Y: %d", emu.memory.wram:read16(0x00024CBE)))
 ```
 
-### Proxy won't connect
-
-**Issue:** `Connection refused` in proxy.js
-
-**Checks:**
-1. Verify server is running (`node server.js`)
-2. Check port matches (default: 8080)
-3. Check firewall settings
-
 ### ROM Detection Fails
 
 **Issue:** `Failed to detect ROM`
@@ -234,7 +215,7 @@ Phase 1 (Complete):
 - [x] Position coordinates display on screen overlay
 - [x] Position logs appear in console
 - [x] HAL memory reads work (Run & Bun offsets)
-- [x] File-based proxy connects Lua client to TCP server
+- [x] Direct TCP socket connects Lua client to server (no proxy)
 - [x] 2 clients can connect simultaneously
 
 Phase 2 (In Progress):
@@ -242,7 +223,7 @@ Phase 2 (In Progress):
 - [x] Ghost sprite renders on screen (semi-transparent green rectangle)
 - [x] Two clients see each other's ghost on the map
 - [x] Ghost position correct on all maps (relative screen-center positioning)
-- [ ] Movement interpolation smooth
+- [x] Movement interpolation smooth
 - [ ] Disconnection handled gracefully
 
 Phase 3 (Future):
@@ -291,7 +272,7 @@ When reporting issues, include:
 
 2. **Logs:**
    - Server console output
-   - Proxy console output
+   - Server console output (connections, messages)
    - mGBA scripting console output
    - Error messages
 

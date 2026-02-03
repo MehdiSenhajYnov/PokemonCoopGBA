@@ -103,23 +103,86 @@ Tasks/
 
 ---
 
-### todo/P2_04_INTERPOLATION.md
-**Status:** 🔴 À faire
+### done/P2_04_INTERPOLATION.md
+**Status:** 🟢 Terminé (2026-02-03)
 **Tâches groupées:** #7 + #8
 **Description:** Mouvement fluide des ghosts via interpolation linéaire
 
+**Résultat:**
+- `client/interpolate.lua` créé (lerp, teleport detection, per-frame step)
+- Intégré dans `main.lua` (Interpolate.step() chaque frame, positions interpolées pour rendu)
+- Gestion déconnexion (Interpolate.remove sur player_disconnected)
+- Partie 3 (flèches/trails render.lua) skippée — optionnelle, uses gui.* API qui n'existe pas dans mGBA
+
+**Fichiers créés/modifiés:**
+- ✅ Créé: `client/interpolate.lua`
+- ✅ Modifié: `client/main.lua` (require, Interpolate.step, interpolated rendering, disconnect handling)
+
+---
+
+### done/P2_04A_BUFFERED_INTERPOLATION.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Description:** Remplacement de l'interpolation naïve par un buffer temporel ("render behind")
+
 **Contenu:**
-- Partie 1: Créer `client/interpolate.lua` (lerp, gestion téléportations)
-- Partie 2: Intégrer dans `main.lua` (step chaque frame, positions interpolées)
-- Partie 3: Améliorer `render.lua` avec flèches direction et trails
+- Ring buffer de positions horodatées par joueur
+- Interpolation temporelle entre deux snapshots connus (toujours fluide)
+- Timestamps dans les messages position (client + serveur)
+- Délai de rendu configurable (~150ms)
+- Augmentation du taux d'envoi (UPDATE_RATE 60 → 10)
 
 **Fichiers:**
-- ✨ Créer: `client/interpolate.lua`
-- 📝 Modifier: `client/main.lua` (ligne 12, 173+, réception positions, drawOtherPlayers)
+- 📝 Réécrire: `client/interpolate.lua` (buffer temporel)
+- 📝 Modifier: `client/main.lua` (timestamps, dt, config)
+- 📝 Modifier: `server/server.js` (relayer timestamp)
 
-**Paramètres:**
-- `INTERPOLATION_SPEED = 0.15` (15% par frame)
-- `TELEPORT_THRESHOLD = 10` (tiles)
+---
+
+### done/P2_04B_ADAPTIVE_SEND_RATE.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Description:** Envoi adaptatif : fréquent en mouvement, zéro en idle
+
+**Résultat:**
+- Replaced fixed `UPDATE_RATE` with adaptive `SEND_RATE_MOVING` / `SEND_RATE_IDLE`
+- Movement detection via `positionChanged()` with `IDLE_THRESHOLD` (30 frames)
+- ~10 sends/sec while moving, 0 sends/sec when idle
+- Immediate send on map change (warp/teleport)
+- Final position update sent when player stops
+
+**Fichiers modifiés:**
+- ✅ `client/main.lua` (adaptive send logic, movement state tracking, config constants)
+
+---
+
+### done/P2_04C_DEAD_RECKONING.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Description:** Prédiction de mouvement quand le buffer est vide + correction douce
+
+**Résultat:**
+- Velocity tracking from buffer snapshots
+- Extrapolation when buffer exhausted (max 500ms, max 5 tiles)
+- Smooth correction on position error after extrapolation
+- State tracking API (`Interpolate.getState()`)
+
+**Fichiers modifiés:**
+- ✅ Modifié: `client/interpolate.lua` (vélocité, extrapolation, correction, state)
+
+---
+
+### done/P2_04D_SMOOTH_RENDERING.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Description:** Rendu sub-tile pixel par pixel + indicateur de direction + couleurs debug par état
+
+**Résultat:**
+- `ghostToScreen()` avec `math.floor` pour positionnement pixel-perfect
+- Marqueur de direction 4x4 blanc sur chaque ghost (facing 1-4)
+- Couleurs d'état debug: vert (interpolating/idle), jaune (extrapolating), orange (correcting)
+- `drawAllGhosts()` supporte format `{pos=..., state=...}` avec fallback ancien format
+- `main.lua` passe l'état d'interpolation au système de rendu
+
+**Fichiers modifiés:**
+- ✅ `client/render.lua` (math.floor, direction marker, state colors, drawAllGhosts format)
+- ✅ `client/main.lua` (interpolatedPlayers structure avec state)
 
 ---
 
@@ -258,7 +321,7 @@ Tasks/
 ```
 Phase 0 - Memory Discovery    [██████████] 100% ✅ COMPLETE
 Phase 1 - Foundation          [██████████] 100% ✅ COMPLETE
-Phase 2 - Ghosting            [███░░░░░░░] 30%  (render.lua done)
+Phase 2 - Ghosting            [████████░░] 80%  (render + animate-toward-target interp + camera correction + smooth rendering done)
 Phase 3 - Duel Warp           [░░░░░░░░░░]  0%
 Phase 4 - Multi-ROM           [░░░░░░░░░░]  0%
 Phase 5 - Documentation       [░░░░░░░░░░]  0%
@@ -276,8 +339,12 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 1. ~~**P1_01_TCP_NETWORK.md**~~ ✅ TERMINÉ
 2. **todo/P1_02_TCP_TESTING.md** (tests approfondis optionnels)
 3. ~~**P2_03_GHOSTING_RENDER.md**~~ ✅ TERMINÉ
-4. **todo/P2_04_INTERPOLATION.md** ⭐ ← **PROCHAINE ÉTAPE**
-5. **todo/P2_05_NETWORK_POLISH.md**
+4. ~~**P2_04_INTERPOLATION.md**~~ ✅ TERMINÉ (interpolation naïve)
+5. ~~**P2_04A_BUFFERED_INTERPOLATION.md**~~ ✅ SUPERSEDED (replaced by animate-toward-target in 0.2.7)
+6. ~~**P2_04B_ADAPTIVE_SEND_RATE.md**~~ ✅ TERMINÉ (SEND_RATE_MOVING tuned to 1 in 0.2.7)
+7. ~~**P2_04C_DEAD_RECKONING.md**~~ ✅ REMOVED (caused overshoot, removed in 0.2.7)
+8. ~~**P2_04D_SMOOTH_RENDERING.md**~~ ✅ TERMINÉ (sub-tile rendering + camera correction + direction marker)
+9. **todo/P2_05_NETWORK_POLISH.md** ⭐ ← **PROCHAINE ÉTAPE**
 6. **todo/P2_06_OPTIMIZATION.md**
 7. **todo/P2_07_FINAL_TESTING.md**
 8. **todo/P3_08_DUEL_WARP.md**
@@ -317,5 +384,5 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 ---
 
 **Dernière mise à jour:** 2026-02-03
-**Version projet:** 0.2.1-alpha
-**Phase actuelle:** Phase 0+1 Complete ✅ | Phase 2 (Ghosting) In Progress — Render done
+**Version projet:** 0.2.7-alpha
+**Phase actuelle:** Phase 0+1 Complete ✅ | Phase 2 (Ghosting) In Progress — Render + Animate-Toward-Target Interp + Camera Correction + Smooth Rendering done

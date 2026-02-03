@@ -42,7 +42,7 @@ Avant d'écrire du code utilisant une API externe (mGBA Lua, Node.js, LuaSocket,
 | mGBA 0.10 Scripting (stable) | https://mgba.io/docs/scripting.html | PAS de support overlay |
 | mGBA example scripts | https://github.com/mgba-emu/mgba/tree/master/res/scripts | Exemples officiels fonctionnels |
 | Node.js net module | https://nodejs.org/api/net.html | TCP server/client |
-| LuaSocket | http://w3.impa.br/~diego/software/luasocket/ | socket.tcp() pour mGBA |
+| mGBA Socket API | https://mgba.io/docs/dev/scripting.html | socket.connect(), sock:send/receive (intégré, PAS LuaSocket) |
 
 ### Version mGBA requise
 - **Minimum: mGBA 0.11+ dev build** pour le support overlay (canvas API)
@@ -51,9 +51,9 @@ Avant d'écrire du code utilisant une API externe (mGBA Lua, Node.js, LuaSocket,
 
 ## 2. STACK TECHNIQUE
 
-- **Client**: Script Lua s'exécutant dans mGBA
+- **Client**: Script Lua s'exécutant dans mGBA (socket TCP intégré de mGBA, pas de proxy)
 - **Serveur**: Node.js + TCP Socket pour relais de données
-- **Communication**: JSON via TCP brut (mGBA Lua ne supporte pas WebSocket nativement)
+- **Communication**: JSON via TCP brut (socket intégré mGBA → serveur Node.js directement)
 - **Cible**: Pokémon Run & Bun (moteur Émeraude fortement modifié)
 
 ## 3. ARCHITECTURE MODULAIRE
@@ -118,8 +118,9 @@ PokemonCoop/
 ├── client/                   # Script Lua mGBA
 │   ├── main.lua
 │   ├── hal.lua              # Hardware Abstraction Layer (WRAM + IWRAM, static + dynamic)
-│   ├── network.lua          # TCP client module (JSON + socket)
-│   ├── render.lua           # Ghost player rendering (Painter API)
+│   ├── network.lua          # Direct TCP client (mGBA built-in socket API)
+│   ├── render.lua           # Ghost player rendering (Painter API + camera correction)
+│   ├── interpolate.lua      # Smooth ghost movement (animate-toward-target interpolation)
 │   ├── core.lua             # Core Engine
 │   └── README.md
 ├── config/                   # Profils ROM
@@ -163,7 +164,10 @@ PokemonCoop/
 - [x] Overlay graphique (render.lua) — Painter API, map filtering
 - [x] Positionnement ghost corrigé — approche relative (screen center + delta tiles)
 - [x] Test 2 joueurs — ghosts visibles et correctement positionnés sur toutes les cartes
-- [ ] Interpolation mouvement
+- [x] Interpolation mouvement — animate-toward-target (lerp from current to new snapshot, auto-adaptive duration)
+- [x] Taux d'envoi adaptatif (0 en idle, envoi à chaque changement de tile, immédiat sur changement de map)
+- [x] Correction caméra sub-tile (tracking delta camera offsets pour scrolling fluide pendant animations marche)
+- [x] Rendu sub-tile (math.floor pixel-perfect, marqueur direction, couleurs debug par état)
 - [ ] Gestion déconnexion
 
 ### Phase 3: Duel Warp
@@ -258,7 +262,7 @@ Messages envoyés ligne par ligne (délimités par `\n`)
 }
 ```
 
-**Note**: TCP brut utilisé au lieu de WebSocket car mGBA Lua supporte uniquement `socket.tcp()`
+**Note**: TCP brut via l'API socket intégrée de mGBA (pas LuaSocket — c'est l'implémentation propre à mGBA)
 
 ## 8. DÉPENDANCES
 
@@ -267,10 +271,11 @@ Messages envoyés ligne par ligne (délimités par `\n`)
 - net (built-in TCP library)
 
 ### Client
-- mGBA 0.11+ dev build (REQUIS pour overlay/canvas API — 0.10 ne supporte PAS le dessin à l'écran)
+- mGBA 0.11+ dev build (REQUIS pour overlay/canvas API + socket TCP intégré)
 - Support Lua activé
-- LuaSocket (socket.tcp()) disponible dans mGBA
+- Socket TCP via API mGBA intégrée (socket.connect, sock:send, sock:receive)
 - Custom JSON encoder/decoder (built-in, no external dependencies)
+- Pas de proxy ni de dépendance externe côté client
 
 ## 9. SÉCURITÉ
 
@@ -303,5 +308,5 @@ Run & Bun étant un ROM hack avec modifications majeures:
 ---
 
 **Dernière mise à jour**: 2026-02-03
-**Version**: 0.2.2-alpha
-**Status**: Phase 2 - Ghost Rendering Working
+**Version**: 0.2.7-alpha
+**Status**: Phase 2 - Ghosting + Animate-Toward-Target Interpolation + Camera Correction + Direct TCP

@@ -22,12 +22,15 @@ end
 local HAL = require("hal")
 local Network = require("network")
 local Render = require("render")
+local Interpolate = require("interpolate")
 -- GameConfig will be loaded dynamically via ROM detection
 
 -- Configuration
 local SERVER_HOST = "127.0.0.1"
 local SERVER_PORT = 8080
-local UPDATE_RATE = 60 -- Frames between position updates
+local SEND_RATE_MOVING = 1     -- Send on exact frame position changes (tiles change ~once per walk anim)
+local SEND_RATE_IDLE = 0       -- 0 = no sends when idle
+local IDLE_THRESHOLD = 30      -- Frames without movement to consider idle (~0.5sec)
 local MAX_MESSAGES_PER_FRAME = 10 -- Limit messages processed per frame
 local ENABLE_DEBUG = true
 
@@ -37,6 +40,7 @@ local State = {
   connected = false,
   roomId = "default",
   frameCounter = 0,
+  timeMs = 0,  -- Elapsed time in ms (incremented ~16.67ms per frame at 60fps)
   lastPosition = {
     x = 0,
     y = 0,
@@ -45,7 +49,11 @@ local State = {
     facing = 0
   },
   otherPlayers = {},
-  showGhosts = true
+  showGhosts = true,
+  isMoving = false,
+  lastMoveFrame = 0,
+  sendCooldown = 0,
+  lastSentPosition = nil
 }
 
 -- Canvas and painter for overlay
@@ -68,12 +76,11 @@ end
 
 --[[
   Generate unique player ID
-  TODO: Make this more unique when we figure out what APIs mGBA has
+  Uses timestamp + random to avoid collisions between instances
 ]]
 local function generatePlayerId()
-  -- For now, use a simple static ID
-  -- Change this manually if you want to run multiple clients
-  return "player_1"
+  math.randomseed(os.time())
+  return string.format("player_%x_%x", os.time() % 0xFFFF, math.random(0, 0xFFF))
 end
 
 --[[
@@ -139,12 +146,6 @@ local readPlayerPosition
 local function initialize()
   log("Initializing Pokémon Co-op Framework...")
 
-  -- Validate configuration
-  if UPDATE_RATE <= 0 then
-    log("ERROR: UPDATE_RATE must be > 0, using default 60")
-    UPDATE_RATE = 60
-  end
-
   -- Detect ROM and load appropriate config
   local detectedConfig = detectROM()
 
@@ -191,9 +192,11 @@ local function initialize()
     if initPos then
       Network.send({
         type = "position",
-        data = initPos
+        data = initPos,
+        t = State.timeMs
       })
       State.lastPosition = initPos
+      State.lastSentPosition = initPos
     end
 
     -- Flush register + join + initial position immediately
@@ -246,7 +249,8 @@ local function sendPositionUpdate(position)
   if State.connected then
     Network.send({
       type = "position",
-      data = position
+      data = position,
+      t = State.timeMs
     })
   end
 
@@ -334,14 +338,24 @@ local function drawOverlay(currentPos)
     end
   end
 
-  -- Draw ghost players on the game screen
+  -- Draw ghost players using interpolated positions
   if State.showGhosts and playerCount > 0 and currentPos then
     local currentMap = {
       mapId = currentPos.mapId,
       mapGroup = currentPos.mapGroup
     }
 
-    Render.drawAllGhosts(painter, State.otherPlayers, currentPos, currentMap)
+    -- Build interpolated position table for rendering (with state for debug coloring)
+    local interpolatedPlayers = {}
+    for playerId, rawPosition in pairs(State.otherPlayers) do
+      local interpolated = Interpolate.getPosition(playerId)
+      interpolatedPlayers[playerId] = {
+        pos = interpolated or rawPosition,
+        state = Interpolate.getState(playerId)
+      }
+    end
+
+    Render.drawAllGhosts(painter, interpolatedPlayers, currentPos, currentMap)
   end
 
   overlay:update()
@@ -352,6 +366,10 @@ end
 ]]
 local function update()
   State.frameCounter = State.frameCounter + 1
+  State.timeMs = State.timeMs + 16.67  -- ~60fps = 16.67ms/frame
+
+  -- Advance ghost interpolation
+  Interpolate.step(16.67)
 
   -- Read current position
   local currentPos = readPlayerPosition()
@@ -364,8 +382,15 @@ local function update()
 
       -- Handle different message types
       if message.type == "position" then
-        -- Update other player's position
+        -- Feed interpolation buffer with timestamp
+        Interpolate.update(message.playerId, message.data, message.t)
+        -- Store raw data as backup
         State.otherPlayers[message.playerId] = message.data
+
+      elseif message.type == "player_disconnected" then
+        Interpolate.remove(message.playerId)
+        State.otherPlayers[message.playerId] = nil
+        log("Player " .. message.playerId .. " disconnected")
 
       elseif message.type == "registered" then
         log("Registered with ID: " .. message.playerId)
@@ -386,13 +411,48 @@ local function update()
   end
 
   if currentPos then
-    -- Send update at configured rate
-    if State.frameCounter % UPDATE_RATE == 0 then
+    -- Detect movement state
+    if positionChanged(currentPos, State.lastPosition) then
+      -- Check for map change → immediate send
+      local mapChanged = currentPos.mapId ~= State.lastPosition.mapId
+                      or currentPos.mapGroup ~= State.lastPosition.mapGroup
+      if mapChanged then
+        sendPositionUpdate(currentPos)
+        State.lastPosition = currentPos
+        State.lastSentPosition = currentPos
+        State.sendCooldown = SEND_RATE_MOVING
+      end
+
+      State.isMoving = true
+      State.lastMoveFrame = State.frameCounter
+    else
+      if State.frameCounter - State.lastMoveFrame > IDLE_THRESHOLD then
+        State.isMoving = false
+      end
+    end
+
+    -- Adaptive send: only send when moving and cooldown expired
+    local sendRate = State.isMoving and SEND_RATE_MOVING or SEND_RATE_IDLE
+
+    if sendRate > 0 and State.sendCooldown <= 0 then
       if positionChanged(currentPos, State.lastPosition) then
         sendPositionUpdate(currentPos)
         State.lastPosition = currentPos
+        State.lastSentPosition = currentPos
+        State.sendCooldown = sendRate
       end
     end
+
+    -- Send 1 final update when stopping (so ghost lands at exact position)
+    if not State.isMoving and State.lastSentPosition and positionChanged(currentPos, State.lastSentPosition) then
+      sendPositionUpdate(currentPos)
+      State.lastSentPosition = currentPos
+    end
+
+    State.sendCooldown = math.max(0, State.sendCooldown - 1)
+
+    -- Update sub-tile camera tracking for smooth ghost scrolling
+    Render.updateCamera(currentPos.x, currentPos.y, HAL.readCameraX(), HAL.readCameraY())
 
     -- Draw overlay
     drawOverlay(currentPos)
@@ -427,6 +487,11 @@ callbacks:add("frame", update)
 
 -- Cleanup on exit
 callbacks:add("shutdown", function()
+  -- Clean up interpolation for all tracked players
+  for _, playerId in ipairs(Interpolate.getPlayers()) do
+    Interpolate.remove(playerId)
+  end
+
   if State.connected then
     log("Disconnecting from server...")
     Network.disconnect()
