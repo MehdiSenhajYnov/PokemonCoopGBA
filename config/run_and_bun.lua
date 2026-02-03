@@ -5,7 +5,8 @@
   Game ID: BPEE (same as Emerald)
 
   Offsets found via mGBA memory scanning on: 2026-02-02
-  Method: STATIC (direct WRAM addresses)
+  Camera offsets found on: 2026-02-03
+  Method: STATIC (player in EWRAM, camera in IWRAM)
 ]]
 
 return {
@@ -18,7 +19,11 @@ return {
     playerY = 0x02024CBE,     -- 16-bit
     mapGroup = 0x02024CC0,    -- 8-bit
     mapId = 0x02024CC1,       -- 8-bit
-    facing = 0x02036934,      -- 8-bit
+    facing = 0x02036934,      -- 8-bit, EWRAM
+
+    -- Camera offsets (IWRAM 0x03000000 region - read via emu.memory.iwram)
+    cameraX = 0x03005DFC,     -- s16, IWRAM (gSpriteCoordOffsetX)
+    cameraY = 0x03005DF8,     -- s16, IWRAM (gSpriteCoordOffsetY)
   },
 
   facing = {

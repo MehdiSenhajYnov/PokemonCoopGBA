@@ -89,10 +89,13 @@ Avant d'écrire du code utilisant une API externe (mGBA Lua, Node.js, LuaSocket,
 - MapID, MapGroup
 - FacingDirection
 
+**Positionnement:** Relatif au centre de l'écran (pas d'offsets caméra).
+Le joueur GBA est toujours centré à l'écran (120, 80). Le ghost est positionné par delta de tiles: `ghostScreen = (112, 72) + (ghostTile - playerTile) * 16`.
+
 **Features:**
 - Interpolation de mouvement
-- Rendu via API gui de mGBA
-- Sprite/carré représentatif
+- Rendu via Painter API de mGBA (canvas overlay)
+- Carré semi-transparent vert (14x14) avec label joueur
 
 ### C. Duel Warp (Feature Signature)
 **Trigger:** Bouton A près du ghost ou interface souris
@@ -114,8 +117,9 @@ PokemonCoop/
 │   └── README.md
 ├── client/                   # Script Lua mGBA
 │   ├── main.lua
-│   ├── hal.lua              # Hardware Abstraction Layer (supporte static + dynamic)
+│   ├── hal.lua              # Hardware Abstraction Layer (WRAM + IWRAM, static + dynamic)
 │   ├── network.lua          # TCP client module (JSON + socket)
+│   ├── render.lua           # Ghost player rendering (Painter API)
 │   ├── core.lua             # Core Engine
 │   └── README.md
 ├── config/                   # Profils ROM
@@ -155,7 +159,10 @@ PokemonCoop/
 
 ### Phase 2: Ghosting (CURRENT)
 - [x] Synchronisation positions
-- [ ] Overlay graphique
+- [x] Offsets caméra trouvés (IWRAM 0x03005DFC, 0x03005DF8)
+- [x] Overlay graphique (render.lua) — Painter API, map filtering
+- [x] Positionnement ghost corrigé — approche relative (screen center + delta tiles)
+- [x] Test 2 joueurs — ghosts visibles et correctement positionnés sur toutes les cartes
 - [ ] Interpolation mouvement
 - [ ] Gestion déconnexion
 
@@ -190,12 +197,15 @@ PokemonCoop/
 **⚠️ IMPORTANT pour Run & Bun:**
 Ces adresses sont celles d'Émeraude vanilla. Run & Bun modifiant énormément le code, ces offsets sont à considérer comme des POINTS DE DÉPART pour la recherche, pas des valeurs définitives. Il faudra utiliser Cheat Engine ou des outils de memory scanning pour trouver les vrais offsets de Run & Bun.
 
-#### Pokémon Run & Bun (À déterminer)
-- **PlayerX**: TBD (voir méthodologie ci-dessous)
-- **PlayerY**: TBD
-- **MapID**: TBD
-- **MapGroup**: TBD
-- **FacingDirection**: TBD
+#### Pokémon Run & Bun (Trouvés 2026-02-02/03)
+- **PlayerX**: 0x02024CBC (16-bit, EWRAM)
+- **PlayerY**: 0x02024CBE (16-bit, EWRAM)
+- **MapGroup**: 0x02024CC0 (8-bit, EWRAM)
+- **MapID**: 0x02024CC1 (8-bit, EWRAM)
+- **FacingDirection**: 0x02036934 (8-bit, EWRAM)
+- **CameraX**: IWRAM+0x5DFC (s16, gSpriteCoordOffsetX)
+- **CameraY**: IWRAM+0x5DF8 (s16, gSpriteCoordOffsetY)
+- **Mode**: STATIQUE (pas de pointeurs dynamiques)
 
 ### ⚠️ CRITIQUE: Adresses Dynamiques vs Statiques
 
@@ -292,6 +302,6 @@ Run & Bun étant un ROM hack avec modifications majeures:
 
 ---
 
-**Dernière mise à jour**: 2026-02-02
-**Version**: 0.1.0-alpha
-**Status**: Phase 1 - TCP Networking Complete
+**Dernière mise à jour**: 2026-02-03
+**Version**: 0.2.2-alpha
+**Status**: Phase 2 - Ghost Rendering Working

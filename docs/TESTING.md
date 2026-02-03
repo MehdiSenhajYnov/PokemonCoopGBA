@@ -2,37 +2,25 @@
 
 How to test and verify the Pokémon Co-op Framework components.
 
-## Phase 1: Foundation Testing (Current)
+## Phase 1: Foundation Testing
 
-### Test 1: Server Installation
+### Test 1: Server Startup
 
 ```bash
 cd server
-npm install
-```
-
-**Expected output:**
-```
-added 2 packages
-```
-
-### Test 2: Server Startup
-
-```bash
-npm start
+node server.js
 ```
 
 **Expected output:**
 ```
 ╔═══════════════════════════════════════════════════════╗
-║   Pokémon Co-op Framework - WebSocket Server         ║
+║   Pokémon Co-op Framework - TCP Relay Server          ║
 ╚═══════════════════════════════════════════════════════╝
 [Server] Listening on port 8080
-[Server] WebSocket URL: ws://localhost:8080
-[Server] Ready to accept connections
+[Server] Ready to accept TCP connections
 ```
 
-### Test 3: Server Connection Test
+### Test 2: Server Connection Test
 
 **In a new terminal** (keep server running):
 
@@ -44,7 +32,7 @@ node test-connection.js
 **Expected output:**
 ```
 ===========================================
-WebSocket Connection Test
+TCP Connection Test
 ===========================================
 
 ✅ Connected to server
@@ -75,10 +63,10 @@ WebSocket Connection Test
 🔌 Connection closed
 ```
 
-### Test 4: Lua Script Loading
+### Test 3: Lua Script Loading
 
-1. Start mGBA
-2. Load Pokémon Emerald (US) ROM
+1. Start mGBA (dev build 0.11+)
+2. Load Pokémon Run & Bun (or Emerald US) ROM
 3. Go to **Tools → Scripting**
 4. Click **File → Load Script...**
 5. Select `client/main.lua`
@@ -86,18 +74,48 @@ WebSocket Connection Test
 **Expected output in console:**
 ```
 ======================================
-Pokémon Co-op Framework v0.1.0
+Pokémon Co-op Framework v0.2.0
 ======================================
 [PokéCoop] Initializing Pokémon Co-op Framework...
-[HAL] Initialized with config: Pokémon Emerald (US)
-[PokéCoop] Detected ROM: BPEE
-[PokéCoop] Player ID: player_12345_abc
-[PokéCoop] WebSocket connection not yet implemented
-[PokéCoop] Server URL: ws://localhost:8080
-[PokéCoop] Initialization complete!
-[PokéCoop] Script loaded successfully!
-[PokéCoop] Press Ctrl+L to reload this script
+[PokéCoop] Detected ROM ID: BPEE
+[PokéCoop] Detected ROM Title: POKEMON EMER (or RUN & BUN)
+[PokéCoop] Loading Run & Bun config (BPEE detected)
+[HAL] Initialized with config: Pokémon Run & Bun
+[PokéCoop] Using config: Pokémon Run & Bun
+[PokéCoop] Player ID: player_1
+[PokéCoop] Connecting to server 127.0.0.1:8080...
 ```
+
+### Test 4: Full 2-Player Test (File-based Proxy)
+
+**Terminal 1 - Server:**
+```bash
+cd server
+node server.js
+```
+
+**Terminal 2 - Proxy Client 1:**
+```bash
+cd client
+node proxy.js
+```
+
+**Terminal 3 - Proxy Client 2:**
+```bash
+cd client2
+node proxy.js
+```
+
+**mGBA Instance 1:**
+- Load ROM → Tools → Scripting → Load `client/main.lua`
+
+**mGBA Instance 2:**
+- Load ROM → Tools → Scripting → Load `client2/main.lua`
+
+**Expected:**
+- Both clients connect via their proxies
+- Position updates appear in server logs
+- Each player sees the other's position in overlay
 
 ### Test 5: Position Reading
 
@@ -108,12 +126,11 @@ With script loaded and game running:
 3. Check the screen for overlay text
 
 **Expected on-screen display:**
-- Bottom-left corner: `X:10 Y:15` (your coordinates)
-- Below that: `Map:3:1` (your current map)
+- Top bar: `Players: 1  ONLINE  X:10 Y:15 M:0:3`
 
 **Expected console output** (every 3 seconds):
 ```
-[PokéCoop] Position: X=10 Y=15 Map=3:1 Facing=1
+[PokéCoop] Position: X=10 Y=15 Map=0:3 Facing=1
 ```
 
 ### Test 6: HAL Memory Safety
@@ -129,8 +146,7 @@ HAL.testMemoryAccess()
 [HAL] Testing memory access...
 [HAL] WRAM access: OK
 [HAL] Invalid address protection: OK
-[HAL] Config loaded: Pokémon Emerald (US)
-[HAL] PlayerX offset: 0x02024844
+[HAL] Config loaded: Pokémon Run & Bun
 ```
 
 ---
@@ -160,28 +176,41 @@ lsof -ti:8080 | xargs kill -9
    ```
    client/
    ├── main.lua
-   └── hal.lua
-   config/
-   └── emerald_us.lua
+   ├── hal.lua
+   ├── network.lua
+   ├── proxy.js
+   └── config/
+       ├── emerald_us.lua
+       └── run_and_bun.lua
    ```
 2. Ensure you're loading from the correct working directory
 3. Check that Lua paths are relative from `client/main.lua`
 
 ### No position data
 
-**Issue:** Coordinates show as `X:nil Y:nil`
+**Issue:** Coordinates show as nil or don't update
 
 **Checks:**
-1. Verify ROM is Pokémon Emerald **US version** (not UK/JP)
+1. Verify ROM is loaded (Run & Bun or Emerald US)
 2. Check ROM header in console - should show `BPEE`
 3. Try loading a save file (new game might have unstable coordinates)
 4. Walk around - coordinates update on movement
 
 **Debug command:**
 ```lua
--- In mGBA console
-print(string.format("0x%08X", memory.read32(0x02024844)))
+-- In mGBA console (Run & Bun offsets)
+print(string.format("X: %d", emu.memory.wram:read16(0x00024CBC)))
+print(string.format("Y: %d", emu.memory.wram:read16(0x00024CBE)))
 ```
+
+### Proxy won't connect
+
+**Issue:** `Connection refused` in proxy.js
+
+**Checks:**
+1. Verify server is running (`node server.js`)
+2. Check port matches (default: 8080)
+3. Check firewall settings
 
 ### ROM Detection Fails
 
@@ -190,30 +219,31 @@ print(string.format("0x%08X", memory.read32(0x02024844)))
 **Solution:**
 1. Verify ROM is loaded in mGBA
 2. Check ROM header at 0x080000AC
-3. Try reloading the script (Ctrl+L)
+3. Try reloading the script (Ctrl+R)
 
 ---
 
 ## Verification Checklist
 
-Phase 1 (Current):
+Phase 1 (Complete):
 
-- [ ] Server installs without errors
-- [ ] Server starts and listens on port 8080
-- [ ] test-connection.js completes all tests
-- [ ] Lua script loads without errors
-- [ ] ROM detection shows "BPEE"
-- [ ] Position coordinates display on screen
-- [ ] Position logs appear in console
-- [ ] HAL memory test passes
-- [ ] Can reload script with Ctrl+L
+- [x] Server starts and listens on port 8080 (TCP)
+- [x] test-connection.js completes all tests
+- [x] Lua script loads without errors
+- [x] ROM detection shows "BPEE"
+- [x] Position coordinates display on screen overlay
+- [x] Position logs appear in console
+- [x] HAL memory reads work (Run & Bun offsets)
+- [x] File-based proxy connects Lua client to TCP server
+- [x] 2 clients can connect simultaneously
 
-Phase 2 (Future):
+Phase 2 (In Progress):
 
-- [ ] WebSocket connects from Lua
-- [ ] Position updates reach server
-- [ ] Ghost sprite renders on screen
-- [ ] Two clients see each other
+- [x] Ghost sprite renders on screen (semi-transparent green rectangle)
+- [x] Two clients see each other's ghost on the map
+- [x] Ghost position correct on all maps (relative screen-center positioning)
+- [ ] Movement interpolation smooth
+- [ ] Disconnection handled gracefully
 
 Phase 3 (Future):
 
@@ -229,8 +259,7 @@ Phase 3 (Future):
 ### Server Performance
 
 ```bash
-# Measure memory usage
-node --expose-gc server.js
+node server.js
 ```
 
 **Expected:**
@@ -250,21 +279,6 @@ node --expose-gc server.js
 
 ---
 
-## Automated Testing (Future)
-
-```bash
-# Run all server tests
-npm test
-
-# Run integration tests
-npm run test:integration
-
-# Run Lua unit tests
-lua test/test_hal.lua
-```
-
----
-
 ## Bug Reporting
 
 When reporting issues, include:
@@ -272,11 +286,12 @@ When reporting issues, include:
 1. **Environment:**
    - OS and version
    - Node.js version (`node --version`)
-   - mGBA version
+   - mGBA version (dev build number)
    - ROM version (check header)
 
 2. **Logs:**
    - Server console output
+   - Proxy console output
    - mGBA scripting console output
    - Error messages
 
@@ -289,7 +304,3 @@ When reporting issues, include:
    - Error messages
    - Console output
    - In-game display (if relevant)
-
----
-
-**Next:** See [QUICKSTART.md](QUICKSTART.md) for initial setup guide.

@@ -29,35 +29,21 @@ Tasks/
 
 ## Phase 0 - Memory Offset Discovery 🔍
 
-### todo/P0_00_MEMORY_OFFSET_DISCOVERY.md
-**Status:** 🔴 À faire ⭐ **PRIORITÉ CRITIQUE**
-**Description:** Identifier et documenter les offsets mémoire de Run & Bun (statiques ou dynamiques)
+### done/features/P0_00_MEMORY_OFFSET_DISCOVERY.md
+**Status:** 🟢 Terminé (2026-02-02)
+**Description:** Offsets mémoire Run & Bun identifiés et documentés
 
-**Problématique:**
-Run & Bun modifie énormément Émeraude. Les offsets vanilla ne fonctionneront probablement PAS. On doit:
-1. Tester si offsets Emerald vanilla fonctionnent (test rapide)
-2. Si non, scanner avec debugger Lua mGBA
-3. Identifier si offsets statiques (0x02xxxxxx) ou dynamiques (via pointeurs SaveBlock)
-4. Créer profil `config/run_and_bun.lua`
-5. Adapter HAL si mode dynamique
+**Résultat:**
+- Offsets vanilla Émeraude: NE fonctionnent PAS pour Run & Bun
+- Scan WRAM via mGBA Lua: 5 offsets trouvés
+- Mode: **STATIQUE** (pas de pointeurs dynamiques)
+- Config `config/run_and_bun.lua` rempli
+- Documentation mise à jour dans `docs/RUN_AND_BUN.md`
 
-**Contenu:**
-- 0.1: Test rapide offsets vanilla (2 min)
-- 0.2: Scan Lua WRAM si échec (scripts fournis)
-- 0.3: Identifier type (statique vs dynamique)
-- 0.4: Créer profil ROM
-- 0.5: Adapter HAL si dynamique
-- 0.6: Tests validation
-- 0.7: Améliorer detection ROM
-
-**Fichiers:**
-- ✨ Créer: `config/run_and_bun.lua`
-- 📝 Modifier (optionnel): `client/hal.lua:140-173`, `client/main.lua:59-79`
-- 📝 Documenter: `docs/RUN_AND_BUN.md`
-
-**Référence complète:** `docs/MEMORY_SCANNING_GUIDE.md`
-
-**⚠️ BLOQUANT:** Cette phase DOIT être terminée avant Phase 1 (impossible de lire positions sinon)
+**Offsets découverts:**
+- PlayerX: `0x02024CBC` | PlayerY: `0x02024CBE`
+- MapGroup: `0x02024CC0` | MapID: `0x02024CC1`
+- Facing: `0x02036934`
 
 ---
 
@@ -99,25 +85,21 @@ Run & Bun modifie énormément Émeraude. Les offsets vanilla ne fonctionneront 
 
 ## Phase 2 - Ghosting System 👻
 
-### todo/P2_03_GHOSTING_RENDER.md
-**Status:** 🔴 À faire
+### done/P2_03_GHOSTING_RENDER.md
+**Status:** 🟢 Terminé (2026-02-03)
 **Tâches groupées:** #4 + #5 + #6
 **Description:** Système complet d'affichage visuel des autres joueurs
 
-**Contenu:**
-- Partie 1: Rechercher offsets caméra (Cheat Engine)
-- Partie 2: Créer `client/render.lua` (conversion coordonnées, gui.drawRectangle)
-- Partie 3: Intégrer dans `main.lua` (boucle update)
+**Résultat:**
+- Camera offsets trouvés: IWRAM 0x03005DFC (X), 0x03005DF8 (Y)
+- `client/render.lua` créé (Painter API, conversion coordonnées monde→écran)
+- HAL étendu avec support IWRAM + readCameraX/Y + conversion s16
+- Intégré dans main.lua (drawOverlay avec ghost rendering)
 
-**Fichiers:**
-- ✨ Créer: `client/render.lua`
-- 📝 Modifier: `config/emerald_us.lua` (cameraX/Y), `client/hal.lua` (readCamera), `client/main.lua`
-
-**Features:**
-- Carrés colorés représentant ghosts
-- Noms affichés au-dessus
-- Filtrage par map
-- Toggle visibilité (F3)
+**Fichiers créés/modifiés:**
+- ✅ Créé: `client/render.lua`
+- ✅ Modifié: `client/hal.lua` (IWRAM support, readCameraX/Y, toSigned16)
+- ✅ Modifié: `client/main.lua` (require render, drawOverlay avec ghosts)
 
 ---
 
@@ -276,7 +258,7 @@ Run & Bun modifie énormément Émeraude. Les offsets vanilla ne fonctionneront 
 ```
 Phase 0 - Memory Discovery    [██████████] 100% ✅ COMPLETE
 Phase 1 - Foundation          [██████████] 100% ✅ COMPLETE
-Phase 2 - Ghosting            [░░░░░░░░░░]  0%
+Phase 2 - Ghosting            [███░░░░░░░] 30%  (render.lua done)
 Phase 3 - Duel Warp           [░░░░░░░░░░]  0%
 Phase 4 - Multi-ROM           [░░░░░░░░░░]  0%
 Phase 5 - Documentation       [░░░░░░░░░░]  0%
@@ -290,11 +272,11 @@ Global                        [███░░░░░░░] 33%
 
 Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 
-0. **todo/P0_00_MEMORY_OFFSET_DISCOVERY.md** ⭐ ← **COMMENCER ICI (BLOQUANT)**
-1. **todo/P1_01_TCP_NETWORK.md**
-2. **todo/P1_02_TCP_TESTING.md**
-3. **todo/P2_03_GHOSTING_RENDER.md**
-4. **todo/P2_04_INTERPOLATION.md**
+0. ~~**P0_00_MEMORY_OFFSET_DISCOVERY.md**~~ ✅ TERMINÉ
+1. ~~**P1_01_TCP_NETWORK.md**~~ ✅ TERMINÉ
+2. **todo/P1_02_TCP_TESTING.md** (tests approfondis optionnels)
+3. ~~**P2_03_GHOSTING_RENDER.md**~~ ✅ TERMINÉ
+4. **todo/P2_04_INTERPOLATION.md** ⭐ ← **PROCHAINE ÉTAPE**
 5. **todo/P2_05_NETWORK_POLISH.md**
 6. **todo/P2_06_OPTIMIZATION.md**
 7. **todo/P2_07_FINAL_TESTING.md**
@@ -329,11 +311,11 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 
 **Références:**
 - `CLAUDE.md` - Spécifications complètes
-- `docs/PHASE2_PLAN.md` - Plan détaillé Phase 2
-- `docs/PROJECT_STRUCTURE.md` - Architecture système
+- `Tasks/todo/PHASE2_DETAILED_PLAN.md` - Plan détaillé Phase 2
+- `docs/MEMORY_GUIDE.md` - Guide scanning mémoire
 
 ---
 
-**Dernière mise à jour:** 2026-02-02
-**Version projet:** 0.2.0-alpha
-**Phase actuelle:** Phase 1 Complete ✅ | Phase 2 (Ghosting) Ready to Start
+**Dernière mise à jour:** 2026-02-03
+**Version projet:** 0.2.1-alpha
+**Phase actuelle:** Phase 0+1 Complete ✅ | Phase 2 (Ghosting) In Progress — Render done

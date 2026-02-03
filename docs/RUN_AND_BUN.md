@@ -1,8 +1,8 @@
 # Pokémon Run & Bun - Memory Offsets Documentation
 
-> **Status:** 🔴 Offsets NOT YET DISCOVERED
-> **Last Updated:** [DATE TBD]
-> **Method Used:** [TBD - Static or Dynamic]
+> **Status:** Offsets DISCOVERED and IMPLEMENTED
+> **Last Updated:** 2026-02-02
+> **Method Used:** Static (direct WRAM addresses)
 
 ---
 
@@ -10,144 +10,163 @@
 
 Pokémon Run & Bun is a heavily modified ROM hack based on Pokémon Emerald. Due to extensive code modifications, **Emerald vanilla memory offsets DO NOT work** directly.
 
-This document records the discovered memory offsets specific to Run & Bun after completing the memory scanning procedure.
+The offsets below were discovered via mGBA Lua memory scanning and are confirmed working.
 
 ---
 
 ## Memory Offset Discovery Process
 
-### Date: [TBD]
+### Date: 2026-02-02
 ### Tools Used:
-- mGBA version: [TBD]
-- Run & Bun ROM version: [TBD]
-- Scripts: `scripts/scan_*.lua`
+- mGBA dev build #8977 (2026-02-02)
+- Scripts: `scripts/scan_wram.lua`, `scripts/validate_offsets.lua`
 
 ### Method:
 
 **Step 1: Test Vanilla Offsets**
-- [ ] Ran `scripts/scan_vanilla_offsets.lua`
-- [ ] Result: ✅ Worked / ❌ Failed
+- [x] Ran `scripts/scan_vanilla_offsets.lua`
+- [x] Result: Failed - Emerald vanilla offsets do NOT work for Run & Bun
 
-**Step 2: Manual Scanning (if needed)**
-- [ ] Used `scripts/scan_wram.lua` to find PlayerX
-- [ ] Used `scripts/scan_wram.lua` to find PlayerY
-- [ ] Used `scripts/scan_wram.lua` to find MapID
-- [ ] Used `scripts/scan_wram.lua` to find MapGroup
-- [ ] Used `scripts/scan_wram.lua` to find Facing
+**Step 2: Manual Scanning**
+- [x] Used `scripts/scan_wram.lua` to find PlayerX
+- [x] Used `scripts/scan_wram.lua` to find PlayerY
+- [x] Used `scripts/scan_wram.lua` to find MapID
+- [x] Used `scripts/scan_wram.lua` to find MapGroup
+- [x] Used `scripts/scan_wram.lua` to find Facing
 
 **Step 3: Static vs Dynamic**
-- [ ] Tested persistence across sessions
-- [ ] Result: ✅ Static / ❌ Dynamic
+- [x] Tested persistence across sessions
+- [x] Result: **STATIC** - addresses are fixed, no pointer chains needed
 
-**Step 4: SaveBlock Pointers (if dynamic)**
-- [ ] Ran `scripts/find_saveblock_pointers.lua`
-- [ ] Found SaveBlock1 pointer at: [ADDRESS TBD]
-- [ ] Dumped structure and located offsets
+**Step 4: SaveBlock Pointers**
+- N/A - offsets are static, no dynamic pointers required
 
 ---
 
 ## Discovered Offsets
 
 ### Configuration Mode
-- **Type:** [STATIC or DYNAMIC - TBD]
-- **ROM Game ID:** [TBD - detected from 0x080000AC]
-- **ROM Title:** [TBD - detected from 0x080000A0]
+- **Type:** STATIC (direct WRAM addresses)
+- **ROM Game ID:** BPEE (same as Emerald)
+- **ROM Title:** Detected from header (contains "RUN" or "BUN")
 
-### Static Offsets (if applicable)
+### Static Offsets
 
 ```lua
 -- Memory addresses in WRAM (0x02000000 - 0x0203FFFF)
-playerX      = 0x02??????  -- [TBD] (16-bit)
-playerY      = 0x02??????  -- [TBD] (16-bit)
-mapId        = 0x02??????  -- [TBD] (8-bit)
-mapGroup     = 0x02??????  -- [TBD] (8-bit)
-facing       = 0x02??????  -- [TBD] (8-bit)
+playerX      = 0x02024CBC  -- 16-bit (Emerald vanilla: 0x02024844)
+playerY      = 0x02024CBE  -- 16-bit (Emerald vanilla: 0x02024846)
+mapGroup     = 0x02024CC0  -- 8-bit  (Emerald vanilla: 0x02024843)
+mapId        = 0x02024CC1  -- 8-bit  (Emerald vanilla: 0x02024842)
+facing       = 0x02036934  -- 8-bit  (Emerald vanilla: 0x02024848)
 ```
 
-### Dynamic Offsets (if applicable)
+### Camera Offsets (found 2026-02-03)
 
 ```lua
--- Pointer addresses in IWRAM
-saveBlock1Ptr = 0x03??????  -- [TBD]
-
--- Offsets from SaveBlock1 base
-playerX_offset      = 0x????  -- [TBD]
-playerY_offset      = 0x????  -- [TBD]
-mapId_offset        = 0x????  -- [TBD]
-mapGroup_offset     = 0x????  -- [TBD]
-facing_offset       = 0x????  -- [TBD]
+-- Camera offsets in IWRAM (0x03000000 - 0x03007FFF)
+cameraX      = 0x03005DFC  -- s16, IWRAM (gSpriteCoordOffsetX)
+cameraY      = 0x03005DF8  -- s16, IWRAM (gSpriteCoordOffsetY)
 ```
 
----
+Found via `scripts/scan_camera_auto.lua` (automatic differential IWRAM scanner).
+Verified with `scripts/verify_camera.lua`: delta = exactly ±16 per tile moved.
 
-## Validation Test Results
+Note: Camera offsets are in **IWRAM** (not EWRAM like player data). Read via `emu.memory.iwram:read16(offset)`.
 
-### Test 1: Movement Validation
-Date: [TBD]
-
-| Action | Expected | Actual | Result |
-|--------|----------|--------|--------|
-| Move UP | Y decreases | [TBD] | ✅ / ❌ |
-| Move DOWN | Y increases | [TBD] | ✅ / ❌ |
-| Move LEFT | X decreases | [TBD] | ✅ / ❌ |
-| Move RIGHT | X increases | [TBD] | ✅ / ❌ |
-
-### Test 2: Map Change Validation
-Date: [TBD]
-
-| Action | MapID Before | MapID After | MapGroup Before | MapGroup After | Result |
-|--------|--------------|-------------|-----------------|----------------|--------|
-| Enter building | [TBD] | [TBD] | [TBD] | [TBD] | ✅ / ❌ |
-| Exit building | [TBD] | [TBD] | [TBD] | [TBD] | ✅ / ❌ |
-| Change route | [TBD] | [TBD] | [TBD] | [TBD] | ✅ / ❌ |
-
-### Test 3: Facing Direction Validation
-Date: [TBD]
-
-| Direction | Expected Value | Actual Value | Result |
-|-----------|----------------|--------------|--------|
-| Down | 1 | [TBD] | ✅ / ❌ |
-| Up | 2 | [TBD] | ✅ / ❌ |
-| Left | 3 | [TBD] | ✅ / ❌ |
-| Right | 4 | [TBD] | ✅ / ❌ |
-
-### Test 4: Persistence Test (for static offsets)
-Date: [TBD]
-
-1. Read values: X=[TBD] Y=[TBD] Map=[TBD]:[TBD]
-2. Close mGBA, reopen, load save
-3. Read values: X=[TBD] Y=[TBD] Map=[TBD]:[TBD]
-4. **Result:** ✅ Values match (Static) / ❌ Values different (Dynamic)
+### Key Observations
+- PlayerX/Y/MapGroup/MapId are grouped together (0x02024CBC-0x02024CC1), offset ~0x878 from Emerald
+- Facing direction is stored much further in memory (0x02036934 vs 0x02024848), offset ~0x120EC from Emerald
+- Camera offsets are in IWRAM (0x03000000 region), separate from player data in EWRAM
+- All player addresses are within valid WRAM range
 
 ---
 
-## Implementation in Code
+## Validation Results
+
+### Movement Validation (2026-02-02)
+
+| Action | Expected | Result |
+|--------|----------|--------|
+| Move UP | Y decreases | Confirmed |
+| Move DOWN | Y increases | Confirmed |
+| Move LEFT | X decreases | Confirmed |
+| Move RIGHT | X increases | Confirmed |
+
+### Map Change Validation (2026-02-02)
+
+| Action | Result |
+|--------|--------|
+| Enter building | MapID and MapGroup change correctly |
+| Exit building | MapID and MapGroup restore correctly |
+| Change route | Values update on zone transition |
+
+### Facing Direction Validation (2026-02-02)
+
+| Direction | Expected Value | Result |
+|-----------|----------------|--------|
+| Down | 1 | Confirmed |
+| Up | 2 | Confirmed |
+| Left | 3 | Confirmed |
+| Right | 4 | Confirmed |
+
+### Persistence Test (Static Offsets)
+- Addresses are consistent across save/load cycles
+- Confirmed as static (no pointer indirection needed)
+
+---
+
+## Implementation
+
+### Config File: `config/run_and_bun.lua`
+
+```lua
+return {
+  name = "Pokémon Run & Bun",
+  gameId = "BPEE",
+  version = "1.0",
+
+  offsets = {
+    playerX = 0x02024CBC,     -- 16-bit
+    playerY = 0x02024CBE,     -- 16-bit
+    mapGroup = 0x02024CC0,    -- 8-bit
+    mapId = 0x02024CC1,       -- 8-bit
+    facing = 0x02036934,      -- 8-bit
+  },
+
+  -- ... validation, facing constants
+}
+```
 
 ### Files Modified
-
-- `config/run_and_bun.lua` - Memory offsets configuration
-- `client/hal.lua` - [Modified if dynamic] / [No changes if static]
-- `client/main.lua` - [Modified for ROM detection] / [No changes needed]
-
-### Changes to HAL (if dynamic mode)
-
-**File:** `client/hal.lua`
-
-[DOCUMENT ANY CHANGES MADE HERE]
+- `config/run_and_bun.lua` - Filled with discovered offsets
+- `client/config/run_and_bun.lua` - Mirror copy
+- `client/hal.lua` - No changes needed (static mode)
+- `client/main.lua` - ROM detection for Run & Bun added
 
 ---
 
 ## Known Limitations
 
-### Current Implementation
-- [ ] PlayerX, PlayerY, MapID, MapGroup, Facing - ✅ Working / ❌ Not found
-- [ ] Camera X/Y - ⏳ Not yet searched
-- [ ] Player name - ⏳ Not yet searched
-- [ ] Player sprite - ⏳ Not yet searched
-- [ ] Movement state (walk/run/bike) - ⏳ Not yet searched
+### Found and Working
+- [x] PlayerX, PlayerY, MapID, MapGroup, Facing - All working
+- [x] Camera X/Y - Found in IWRAM (0x03005DFC, 0x03005DF8)
+- [x] Ghost rendering - Working via relative screen-center positioning (no camera offsets needed)
+
+### Ghost Rendering Note
+Camera offsets (gSpriteCoordOffsetX/Y) were found but are **not used** for ghost positioning.
+The tile coordinates are map-local, so `tile*16 + cameraOffset` produces map-dependent results.
+Instead, ghost rendering uses **relative positioning**: `ghostScreen = screenCenter + (ghostTile - playerTile) * 16`.
+This works because the GBA camera always centers on the player sprite.
+
+### Not Yet Searched (needed for Phase 2+)
+- [ ] Player sprite ID - For correct ghost visual (Phase 2)
+- [ ] Player name - For ghost labels (Phase 2)
+- [ ] Movement state (walk/run/bike) - For animation (Phase 2)
+- [ ] Battle flag - For warp mode constraints (Phase 3)
+- [ ] Warp target addresses - For duel room teleportation (Phase 3)
 
 ### Future Work
-- Find camera offsets for accurate ghost rendering (Phase 2)
 - Find player sprite ID for correct visual representation (Phase 2)
 - Find battle flag for warp mode constraints (Phase 3)
 
@@ -157,73 +176,36 @@ Date: [TBD]
 
 ### Run & Bun Differences from Emerald
 
-[DOCUMENT ANY OBSERVATIONS ABOUT HOW RUN & BUN DIFFERS]
-
-Examples:
-- Map structure appears different: [DETAILS TBD]
-- SaveBlock layout modified: [DETAILS TBD]
-- Additional data structures: [DETAILS TBD]
+- **Player data block shifted**: Core player position data is at 0x02024CBC instead of 0x02024844 (shifted +0x878 bytes)
+- **Facing direction relocated**: Stored at 0x02036934, far from the position data block (in Emerald it's at 0x02024848, right next to position)
+- **Same game ID**: Uses BPEE like vanilla Emerald, so ROM detection relies on title string matching
+- **Static offsets**: Despite heavy modifications, the offset mode is still static (no SaveBlock pointer chains needed)
 
 ---
 
-## Scanning Session Notes
+## Quick Debug Commands
 
-### Session 1: [DATE TBD]
-
-**Objective:** [e.g., Find PlayerX offset]
-
-**Process:**
-1. [STEP BY STEP NOTES]
-2. [WHAT WORKED]
-3. [WHAT DIDN'T WORK]
-
-**Result:** [SUCCESS/FAILURE + DETAILS]
-
----
-
-### Session 2: [DATE TBD]
-
-[REPEAT FOR EACH MAJOR SCANNING SESSION]
-
----
-
-## Troubleshooting
-
-### Issues Encountered
-
-#### Issue 1: [TITLE TBD]
-- **Problem:** [DESCRIPTION]
-- **Solution:** [WHAT FIXED IT]
-
----
-
-## Appendix: Scan Commands Used
-
-### Commands that worked:
 ```lua
--- [PASTE ACTUAL COMMANDS THAT SUCCESSFULLY FOUND OFFSETS]
+-- Run these in mGBA scripting console to verify offsets
+print(string.format("X: %d", emu.memory.wram:read16(0x00024CBC)))
+print(string.format("Y: %d", emu.memory.wram:read16(0x00024CBE)))
+print(string.format("MapGroup: %d", emu.memory.wram:read8(0x00024CC0)))
+print(string.format("MapId: %d", emu.memory.wram:read8(0x00024CC1)))
+print(string.format("Facing: %d", emu.memory.wram:read8(0x00036934)))
 ```
 
-### Commands that didn't work:
-```lua
--- [PASTE COMMANDS THAT FAILED, FOR FUTURE REFERENCE]
-```
+Note: WRAM reads use offset from base (0x02000000), so 0x02024CBC becomes 0x00024CBC.
 
 ---
 
 ## Sign-off
 
-- [ ] All 5 critical offsets found and validated
-- [ ] Config file updated with correct addresses
-- [ ] HAL modified (if needed for dynamic mode)
-- [ ] ROM detection added to main.lua (if needed)
-- [ ] All tests pass (movement, map changes, facing)
-- [ ] Documentation complete
+- [x] All 5 critical offsets found and validated
+- [x] Config file updated with correct addresses
+- [x] HAL works in static mode (no modifications needed)
+- [x] ROM detection added to main.lua
+- [x] All tests pass (movement, map changes, facing)
+- [x] Documentation complete
 
-**Completed by:** [YOUR NAME]
-**Date:** [DATE]
-**Verification:** Offsets tested with `scripts/validate_offsets.lua` ✅
-
----
-
-**Next Phase:** Phase 1 - TCP Network Implementation
+**Completed:** 2026-02-02
+**Verification:** Offsets tested via mGBA Lua scripting console and live gameplay

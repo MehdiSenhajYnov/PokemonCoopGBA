@@ -1,6 +1,6 @@
 # Phase 1 - Tests Bout en Bout
 
-> **Statut:** En attente (dépend de PHASE1_TCP_NETWORK.md)
+> **Statut:** ✅ COMPLÉTÉ (2026-02-03)
 > **Type:** Testing — Validation intégration client-serveur
 > **Objectif:** Vérifier que deux clients mGBA peuvent se connecter au serveur et échanger leurs positions en temps réel.
 

@@ -21,6 +21,7 @@ end
 -- Load modules
 local HAL = require("hal")
 local Network = require("network")
+local Render = require("render")
 -- GameConfig will be loaded dynamically via ROM detection
 
 -- Configuration
@@ -43,7 +44,8 @@ local State = {
     mapGroup = 0,
     facing = 0
   },
-  otherPlayers = {}
+  otherPlayers = {},
+  showGhosts = true
 }
 
 -- Canvas and painter for overlay
@@ -66,6 +68,7 @@ end
 
 --[[
   Generate unique player ID
+  TODO: Make this more unique when we figure out what APIs mGBA has
 ]]
 local function generatePlayerId()
   return "player_2"
@@ -125,6 +128,9 @@ local function detectROM()
   return nil
 end
 
+-- Forward declarations
+local readPlayerPosition
+
 --[[
   Initialize client
 ]]
@@ -149,6 +155,9 @@ local function initialize()
   -- Initialize HAL with detected config
   HAL.init(detectedConfig)
   log("Using config: " .. (detectedConfig.name or "Unknown"))
+
+  -- Initialize rendering
+  Render.init(detectedConfig)
 
   -- Generate player ID
   State.playerId = generatePlayerId()
@@ -199,7 +208,7 @@ end
   Read current player position
   Returns table with position data or nil on error
 ]]
-local function readPlayerPosition()
+readPlayerPosition = function()
   local pos = {
     x = HAL.readPlayerX(),
     y = HAL.readPlayerY(),
@@ -279,7 +288,7 @@ end
 --[[
   Draw overlay with player information
 ]]
-local function drawOverlay()
+local function drawOverlay(currentPos)
   if not painter or not overlay then
     return
   end
@@ -316,23 +325,21 @@ local function drawOverlay()
     end
 
     -- Debug: Current position
-    if ENABLE_DEBUG then
-      local pos = readPlayerPosition()
-      if pos then
-        painter:setFillColor(0xFFFFFFFF)
-        painter:drawText(string.format("X:%d Y:%d M:%d:%d", pos.x, pos.y, pos.mapGroup, pos.mapId), 130, 1)
-      end
+    if ENABLE_DEBUG and currentPos then
+      painter:setFillColor(0xFFFFFFFF)
+      painter:drawText(string.format("X:%d Y:%d M:%d:%d",
+        currentPos.x, currentPos.y, currentPos.mapGroup, currentPos.mapId), 130, 1)
     end
   end
 
-  -- Draw other player indicators
-  local yOffset = 20
-  for playerId, position in pairs(State.otherPlayers) do
-    painter:setFillColor(0xFFFFFF00)
-    painter:drawText(string.format("%s: X=%d Y=%d Map=%d:%d",
-      playerId, position.x or 0, position.y or 0,
-      position.mapGroup or 0, position.mapId or 0), 4, yOffset)
-    yOffset = yOffset + 10
+  -- Draw ghost players on the game screen
+  if State.showGhosts and playerCount > 0 and currentPos then
+    local currentMap = {
+      mapId = currentPos.mapId,
+      mapGroup = currentPos.mapGroup
+    }
+
+    Render.drawAllGhosts(painter, State.otherPlayers, currentPos, currentMap)
   end
 
   overlay:update()
@@ -386,7 +393,7 @@ local function update()
     end
 
     -- Draw overlay
-    drawOverlay()
+    drawOverlay(currentPos)
   else
     -- Position read failed
     if State.frameCounter % 300 == 0 then -- Every 5 seconds

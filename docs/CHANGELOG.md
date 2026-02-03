@@ -7,93 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Phase 2 - Ghosting System (In Progress)
+- [x] Camera offset discovery for Run & Bun (IWRAM 0x03005DFC, 0x03005DF8)
+- [x] Ghost overlay rendering (render.lua) with Painter API
+- [x] Ghost positioning fixed (relative to screen center)
+- [ ] Movement interpolation
+- [ ] Disconnection handling
+
+## [0.2.2-alpha] - 2026-02-03
+
+### Fixed - Ghost Positioning
+- **render.lua**: Replaced camera-based coordinate conversion with relative screen-center positioning
+  - Old formula `tile*16 + cameraOffset` was map-dependent (different maps have different origins)
+  - New formula: `ghostScreen = (112, 72) + (ghostTile - playerTile) * 16`
+  - Player is always at screen center (120, 80), ghost rendered as tile delta
+  - No longer depends on camera offsets (IWRAM reads)
+  - Works consistently across all maps (overworld, buildings, rooms)
+- **main.lua**: Simplified ghost rendering call
+  - Passes player position to `Render.drawAllGhosts()` instead of camera offsets
+  - Removed camera read + fallback logic from `drawOverlay()`
+- **client2/**: Synchronized with client/ fixes
+
+## [0.2.1-alpha] - 2026-02-03
+
+### Added - Phase 2: Ghost Rendering System
+- **client/render.lua**: Ghost player rendering module
+  - Coordinate conversion (initially camera-based, fixed in 0.2.2)
+  - Semi-transparent green rectangles for ghost players
+  - Player name labels above ghosts
+  - Map-based filtering (only show ghosts on same map)
+  - Off-screen culling
+- **hal.lua**: IWRAM memory read support
+  - `safeReadIWRAM()` for 0x03xxxxxx addresses
+  - `HAL.readCameraX()` / `HAL.readCameraY()` with signed s16 conversion
+  - `toSigned16()` for u16→s16 conversion (camera offsets are negative)
+- **main.lua**: Ghost rendering integration
+  - `require("render")` and `Render.init()` in initialization
+  - Ghost drawing in `drawOverlay()`
+  - `State.showGhosts` toggle flag
+  - Fixed forward-declaration bug for `readPlayerPosition()`
+  - `drawOverlay()` now receives `currentPos` parameter (avoids duplicate memory reads)
+
+## [0.2.0-alpha] - 2026-02-03
+
+### Added - Phase 1 Complete: TCP Networking
+- **network.lua**: File-based TCP communication module for mGBA
+  - Custom JSON encoder/decoder (pure Lua, no external dependencies)
+  - Three-file architecture: `client_outgoing.json`, `client_incoming.json`, `client_status.json`
+  - Non-blocking async communication via file I/O
+  - Functions: `connect()`, `send()`, `receive()`, `flush()`, `disconnect()`
+- **proxy.js**: File-to-TCP bridge (Node.js)
+  - Bridges Lua file I/O to TCP socket communication
+  - Automatic reconnection with 2-second backoff
+  - Message caching for session recovery (register + join)
+  - Watches outgoing file, writes incoming file
+- **client2/**: Complete second client for 2-player testing
+  - Mirror of client/ with `playerID = "player_2"`
+  - Separate proxy.js instance
+- **FILE_BASED_SETUP.md**: Architecture documentation for file-based proxy system
+- **QUICKSTART.md**: French quick-start guide with 2-player testing instructions
+
+### Changed - 2026-02-03
+- **main.lua** upgraded to v0.2.0:
+  - Integrated network.lua for TCP communication
+  - Canvas overlay with player count, connection status, position display
+  - Message handling: register, join, position broadcasts, ping/pong
+  - Frame-based update loop with configurable UPDATE_RATE
+  - ROM detection defaults to Run & Bun config for BPEE
+- **End-to-end connection tested**: Server + Proxy + Lua client working together
+
 ### Changed - 2026-02-02 (Update 5: Task Files Reorganization)
 - **TASK FILES REORGANIZED**: Complete overhaul of task management system
-  - **Renamed all tasks**: Old format `PHASE1_TCP_NETWORK.md` → New format `P1_01_TCP_NETWORK.md`
-  - **Organized into folders**:
-    - `Tasks/todo/` - All pending tasks (11 files currently)
-    - `Tasks/done/` - Completed tasks (empty for now)
-    - `Tasks/updates/` - Future updates and improvements
-  - **Benefits**:
-    - Clear global order: 00 → 01 → 02 → ... → 10
-    - Phase visible: P0, P1, P2, P3, P4, P5
-    - Easy to track progress: move from todo/ to done/
-    - Easy to insert tasks: use decimals (P1_01.5) or renumber
-    - Automatic correct sorting in file explorers
-  - **Created P0_00_MEMORY_OFFSET_DISCOVERY.md**: Critical Phase 0 task (blocks Phase 1)
-  - **Updated Tasks/README.md**: New organization structure documented
+  - Renamed all tasks: Old format `PHASE1_TCP_NETWORK.md` -> New format `P1_01_TCP_NETWORK.md`
+  - Organized into folders: `Tasks/todo/`, `Tasks/done/`, `Tasks/updates/`
+  - Created P0_00_MEMORY_OFFSET_DISCOVERY.md: Critical Phase 0 task
 
 ### Changed - 2026-02-02 (Update 4: Documentation Cleanup)
-- **MAJOR DOCUMENTATION REORGANIZATION**: Reduced markdown files from 12 to 8 (-33%)
-  - Merged MEMORY_SCANNING_GUIDE.md + RUN_AND_BUN.md → docs/MEMORY_GUIDE.md (consolidated all memory scanning info)
-  - Integrated QUICKSTART.md into README.md (eliminated redundancy)
-  - Moved PHASE2_PLAN.md → Tasks/PHASE2_DETAILED_PLAN.md (belongs with task files)
-  - Deleted INDEX.md (unnecessary navigation file)
-  - Deleted PROJECT_STRUCTURE.md (redundant with CLAUDE.md)
-  - Simplified README.md to focus on quick start and essential links
-  - Result: Cleaner structure, less confusion, easier to navigate
+- Reduced markdown files from 12 to 8 (-33%)
+- Merged scanning guides into docs/MEMORY_GUIDE.md
+- Simplified README.md
 
-### Changed - 2026-02-02 (Update 3)
-- **CRITICAL FIX**: Memory scanning methodology completely revised
-  - Identified issue: addresses can be dynamic (via pointers) or static
-  - Changed from Cheat Engine to mGBA Lua debugger (recommended)
-  - Added MEMORY_SCANNING_GUIDE.md with comprehensive strategies
-  - Updated code to handle both static offsets and dynamic pointers
-  - HAL.readSafePointer() exists but not used - will be activated if needed
+### Changed - 2026-02-02 (Update 3: Memory Scanning)
+- Memory scanning methodology revised for mGBA Lua debugger
+- HAL updated to support both static and dynamic offset modes
+- Added MEMORY_SCANNING_GUIDE.md
 
-### Added - 2026-02-02 (Update 3)
-- MEMORY_SCANNING_GUIDE.md - Complete memory scanning guide
-  - Static vs Dynamic addresses explained
-  - mGBA Lua debugger scripts (ready to copy-paste)
-  - SaveBlock1/2 pointer detection methods
-  - 3-phase testing strategy
-  - Code adaptation examples for both modes
-
-### Changed - 2026-02-02 (Update 2)
-- **Documentation Update**: Clarified Run & Bun as primary target
-  - Run & Bun heavily modifies Emerald base ROM
-  - Emerald offsets are reference only, NOT directly usable
-  - Added RUN_AND_BUN.md with offset scanning methodology
-  - Updated CLAUDE.md with memory scanning guide
-  - Added Phase 1 task: scan and find Run & Bun specific offsets
-  - Updated all documentation to reflect Run & Bun focus
-
-### Added - 2026-02-02 (Update 2)
-- RUN_AND_BUN.md - Comprehensive guide for Run & Bun specifics
-  - Memory offset scanning methodology (updated to reference new guide)
-  - Offset validation procedures
-  - ROM profile template
-  - Development checklist
-
-### Changed - 2026-02-02 (Update 1)
-- **BREAKING CHANGE**: Switched from WebSocket to raw TCP sockets
-  - Reason: mGBA Lua only supports `socket.tcp()`, no native WebSocket
+### Changed - 2026-02-02 (Update 1: TCP Migration)
+- **BREAKING**: Switched from WebSocket to raw TCP sockets
+  - mGBA Lua only supports `socket.tcp()`, no native WebSocket
   - Protocol: JSON messages delimited by `\n` over TCP
-  - Server now uses Node.js `net` module instead of `ws`
-  - Simplified communication layer
-  - All documentation updated to reflect TCP usage
+  - Server uses Node.js `net` module
 
-### Planned - Immediate Priority
-- **CRITICAL**: Scan and find Run & Bun memory offsets (PlayerX, PlayerY, MapID, MapGroup, Facing)
-- Create config/run_and_bun.lua with discovered offsets
-- Validate offsets in mGBA Lua
+## [0.1.1-alpha] - 2026-02-02
 
-### Planned - Phase 2
-- Lua TCP client implementation
-- Ghost overlay rendering system
-- Movement interpolation
-- Duel warp trigger UI
-- Additional ROM profiles (Radical Red, Unbound)
+### Added - Phase 0 Complete: Memory Offset Discovery
+- **Run & Bun offsets discovered and validated**:
+  - PlayerX: `0x02024CBC` (16-bit)
+  - PlayerY: `0x02024CBE` (16-bit)
+  - MapGroup: `0x02024CC0` (8-bit)
+  - MapID: `0x02024CC1` (8-bit)
+  - Facing: `0x02036934` (8-bit)
+- **Offset mode: STATIC** (no dynamic pointers needed)
+- **config/run_and_bun.lua** filled with discovered addresses
+- Memory scanning scripts used successfully
+- docs/RUN_AND_BUN.md updated with results
 
 ## [0.1.0-alpha] - 2026-02-02
 
 ### Added - Phase 1: Foundation
 - Initial project structure and documentation
-- TCP relay server skeleton (Node.js + net)
-  - Room-based multiplayer sessions (protocol defined)
-  - Position broadcast system (protocol defined)
-  - Heartbeat/keepalive mechanism (protocol defined)
-  - Duel request/accept protocol (protocol defined)
+- TCP relay server (Node.js + net)
+  - Room-based multiplayer sessions
+  - Position broadcast system
+  - Heartbeat/keepalive mechanism (30s)
+  - Duel request/accept protocol (prepared)
 - Lua client framework for mGBA
   - Hardware Abstraction Layer (HAL) with safe memory access
   - ROM detection from game header
@@ -103,83 +130,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pokémon Emerald (US) configuration profile
   - Complete memory offset mapping
   - Position validation functions
-  - Map location database
-- Comprehensive documentation
-  - CLAUDE.md (full project specs)
-  - README.md (project overview)
-  - QUICKSTART.md (setup guide)
-  - PROJECT_STRUCTURE.md (architecture)
-- Development tools
-  - .gitignore (ROM protection)
-  - test-connection.js (server testing)
-  - Modular code architecture
+- Memory scanning scripts (4 scripts in scripts/)
+  - scan_vanilla_offsets.lua
+  - scan_wram.lua
+  - find_saveblock_pointers.lua
+  - validate_offsets.lua
+- Comprehensive documentation (CLAUDE.md, README.md, MEMORY_GUIDE.md)
+- Development tools (.gitignore, test-connection.js)
 
 ### Technical Details
 - Safe memory access using pcall protection
 - WRAM range validation (0x02000000-0x0203FFFF)
 - Position update throttling (60 frames default)
-- Console logging for debugging
 - Generic config system for multi-ROM support
-
-### Known Limitations
-- TCP connection not yet implemented in Lua client
-- Server still uses old WebSocket code (needs TCP rewrite)
-- Ghost rendering not yet implemented
-- Duel warp system not yet implemented
-- Only Pokémon Emerald (US) configuration available
-- No GUI for configuration
-
-### Development Environment
-- Node.js 18+ (with built-in `net` module)
-- mGBA 0.10.0+ (with `socket.tcp()` support)
-- Lua 5.4 (mGBA embedded)
+- mGBA dev build #8977 included via Git LFS
 
 ---
 
 ## Version History
 
+- **0.2.2-alpha** (2026-02-03): Ghost positioning fix (relative screen-center approach)
+- **0.2.1-alpha** (2026-02-03): Ghost rendering system (render.lua, IWRAM support)
+- **0.2.0-alpha** (2026-02-03): TCP networking complete, file-based proxy, 2-player testing
+- **0.1.1-alpha** (2026-02-02): Run & Bun offsets discovered
 - **0.1.0-alpha** (2026-02-02): Initial framework foundation
 - **0.0.0** (Concept): Project planning and specification
 
 ## Upcoming Versions
 
-### 0.2.0 - Ghosting System
-- [ ] Lua TCP client integration
-- [ ] Server rewrite for TCP protocol
-- [ ] Network position synchronization
-- [ ] Ghost sprite overlay rendering
-- [ ] Movement interpolation
-- [ ] Connection status indicators
+### 0.3.0 - Ghosting System Complete (Phase 2)
+- [x] Camera offset discovery for Run & Bun
+- [x] Ghost overlay rendering (render.lua)
+- [ ] Movement interpolation (interpolate.lua)
+- [ ] Disconnection handling and ghost cleanup
+- [ ] Connection status improvements
 
-### 0.3.0 - Duel Warp System
+### 0.4.0 - Duel Warp System (Phase 3)
 - [ ] Click/button trigger system
 - [ ] RAM write implementation
 - [ ] Input locking during warp
 - [ ] Battle room teleportation
 - [ ] Duel acceptance UI
 
-### 0.4.0 - Multi-ROM Support
-- [ ] Run & Bun configuration (PRIMARY TARGET - Phase 1)
-- [ ] Radical Red configuration (future)
-- [ ] Unbound configuration (future)
-- [ ] Automatic ROM detection
-- [ ] Dynamic config loading
+### 0.5.0 - Multi-ROM Support (Phase 4)
+- [ ] Radical Red configuration
+- [ ] Unbound configuration
+- [ ] Improved ROM auto-detection
 
-### 0.5.0 - Polish & Release Candidate
+### 0.6.0 - Polish & Release Candidate (Phase 5)
 - [ ] Error handling improvements
 - [ ] Performance optimization
 - [ ] Complete API documentation
 - [ ] Configuration UI/tool
-- [ ] Unit tests
-- [ ] Integration tests
 
 ### 1.0.0 - Stable Release
 - [ ] All core features complete
 - [ ] Multi-ROM fully tested
 - [ ] Production-ready
 - [ ] Complete documentation
-- [ ] Tutorial videos
 
 ---
 
-**Maintainers**: See [CLAUDE.md](CLAUDE.md) for development roadmap
+**Maintainers**: See [CLAUDE.md](../CLAUDE.md) for development roadmap

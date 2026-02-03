@@ -12,6 +12,8 @@ local HAL = {}
 -- GBA Memory Regions
 local WRAM_START = 0x00000000  -- WRAM is accessed at offset 0 in emu.memory.wram
 local WRAM_SIZE = 0x00040000   -- 256KB
+local IWRAM_START = 0x00000000 -- IWRAM is accessed at offset 0 in emu.memory.iwram
+local IWRAM_SIZE = 0x00008000  -- 32KB
 
 -- Current game configuration
 local config = nil
@@ -66,6 +68,55 @@ local function safeRead(address, size)
       return emu.memory.wram:read16(offset)
     elseif size == 4 then
       return emu.memory.wram:read32(offset)
+    end
+  end)
+
+  if success then
+    return value
+  end
+
+  return nil
+end
+
+--[[
+  Check if address is within valid IWRAM range (0x03000000 - 0x03007FFF)
+  @param address Absolute GBA IWRAM address
+  @return boolean
+]]
+local function isValidIWRAM(address)
+  local offset = address - 0x03000000
+  return offset >= IWRAM_START and offset < IWRAM_SIZE
+end
+
+--[[
+  Convert absolute GBA IWRAM address to IWRAM offset
+  @param address Absolute address (e.g., 0x03005DFC)
+  @return offset Relative offset (e.g., 0x5DFC)
+]]
+local function toIWRAMOffset(address)
+  return address - 0x03000000
+end
+
+--[[
+  Safe IWRAM read with error handling
+  @param address Absolute GBA IWRAM address (0x03xxxxxx)
+  @param size Read size: 1 (byte), 2 (halfword), 4 (word)
+  @return value or nil on error
+]]
+local function safeReadIWRAM(address, size)
+  if not isValidIWRAM(address) then
+    return nil
+  end
+
+  local offset = toIWRAMOffset(address)
+
+  local success, value = pcall(function()
+    if size == 1 then
+      return emu.memory.iwram:read8(offset)
+    elseif size == 2 then
+      return emu.memory.iwram:read16(offset)
+    elseif size == 4 then
+      return emu.memory.iwram:read32(offset)
     end
   end)
 
@@ -222,6 +273,45 @@ function HAL.readFacing()
     return nil
   end
   return readOffset(config.offsets.facing, 1)
+end
+
+--[[
+  Convert unsigned 16-bit to signed 16-bit
+  Camera offsets (gSpriteCoordOffsetX/Y) are s16 but read16 returns u16
+]]
+local function toSigned16(value)
+  if value and value >= 0x8000 then
+    return value - 0x10000
+  end
+  return value
+end
+
+function HAL.readCameraX()
+  if not config or not config.offsets.cameraX then
+    return nil
+  end
+  local addr = config.offsets.cameraX
+  local raw
+  if addr >= 0x03000000 and addr < 0x03008000 then
+    raw = safeReadIWRAM(addr, 2)
+  else
+    raw = safeRead(addr, 2)
+  end
+  return toSigned16(raw)
+end
+
+function HAL.readCameraY()
+  if not config or not config.offsets.cameraY then
+    return nil
+  end
+  local addr = config.offsets.cameraY
+  local raw
+  if addr >= 0x03000000 and addr < 0x03008000 then
+    raw = safeReadIWRAM(addr, 2)
+  else
+    raw = safeRead(addr, 2)
+  end
+  return toSigned16(raw)
 end
 
 --[[
