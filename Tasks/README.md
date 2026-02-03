@@ -205,9 +205,76 @@ Tasks/
 
 ---
 
-### todo/P2_06_OPTIMIZATION.md
-**Status:** 🔴 À faire
+### done/P2_06_GHOST_SPRITE_RENDERING.md
+**Status:** 🟢 Terminé (2026-02-03)
 **Tâche:** #10
+**Description:** Remplacer les carres verts par les vrais sprites GBA extraits dynamiquement de la VRAM/OAM/Palette
+
+**Résultat:**
+- `client/sprite.lua` créé (extraction VRAM/OAM/Palette, reconstruction Image, cache, serialisation réseau)
+- `client/hal.lua` étendu (readOAMEntry, readSpriteTiles, readSpritePalette)
+- `client/render.lua` modifié (drawImage avec fallback rectangle, overlay.image passé en paramètre)
+- `client/main.lua` modifié (capture sprite local, envoi/réception sprite_update)
+- `server/server.js` modifié (relayer sprite_update avec cache)
+
+**Fichiers créés/modifiés:**
+- ✅ Créé: `client/sprite.lua`
+- ✅ Modifié: `client/hal.lua`, `client/render.lua`, `client/main.lua`, `server/server.js`
+
+---
+
+### done/P2_06A_SPRITE_DETECTION_RELIABILITY.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Priorité:** ⭐ Haute
+**Description:** La detection OAM du sprite joueur echoue parfois (prend un NPC ou reflet d'eau)
+
+**Résultat:**
+- `findPlayerOAM()` rewritten with two-pass approach: strict tileNum filter (pass 1) + fallback scoring (pass 2)
+- Hysteresis locking system: `lockedTileNum` locks after 30 frames, unlocks after 10 frames of absence
+- OAM priority discrimination: player (pri=2) beats water reflection (pri=3) — reflection has same tileNum=0 and vFlip=false
+- `parseOAMEntry()` now extracts `priority` field (attr2 bits 10-11)
+- `Sprite.init()` resets all locking state on map change
+
+**Fichiers modifiés:** `client/sprite.lua`
+
+---
+
+### done/P2_06B_GHOST_DEPTH_OCCLUSION.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Priorité:** ⭐ Haute
+**Description:** Le ghost s'affiche au-dessus des batiments au lieu d'etre cache derriere
+
+**Résultat:**
+- Y-sorting: `drawAllGhosts()` trie par Y croissant (ghosts derriere dessines en premier)
+- BG layer occlusion: `occlusion.lua` lit la tilemap BG1, decode les tiles 4bpp, redessine les pixels de couverture par-dessus les ghosts via Painter API
+- HAL etendu: 6 nouvelles fonctions BG/IO (readIOReg16, readBGControl, readBGScroll, readBGTilemapEntry, readBGTileData, readBGPalette)
+- Ghosts opaques (`GHOST_ALPHA = 0xFF`) — l'occlusion gere la profondeur, semi-transparence plus necessaire
+
+**Fichiers créés/modifiés:** `client/occlusion.lua` (nouveau), `client/hal.lua`, `client/render.lua`, `client/sprite.lua`, `client/main.lua`
+
+---
+
+### done/P2_04E_WAYPOINT_QUEUE_INTERPOLATION.md
+**Status:** 🟢 Terminé (2026-02-03)
+**Priorite:** ⭐ Haute
+**Description:** Remplacer l'interpolation "animate toward target" par une file de waypoints avec catch-up adaptatif universel (`BASE_DURATION / queueLength`)
+
+**Résultat:**
+- Queue FIFO: chaque position recue est ajoutee a la queue, consommee dans l'ordre
+- Formule universelle: `segmentDuration = BASE_DURATION / max(1, queueLength)` — scale de 1x a 1000x+
+- Consommation multi-waypoints par frame (boucle while dans step())
+- Auto-regulation: le ghost suit le parcours exact a toute vitesse
+- Deduplication et teleport detection contre dernier element de la queue
+- API publique inchangee (zero modification dans main.lua/render.lua)
+
+**Fichiers modifiés:**
+- ✅ `client/interpolate.lua` (refactoring complet)
+
+---
+
+### todo/P2_07_OPTIMIZATION.md
+**Status:** 🔴 À faire
+**Tâche:** #11
 **Description:** Profiling et optimisation performance
 
 **Cibles:**
@@ -227,7 +294,7 @@ Tasks/
 
 ---
 
-### todo/P2_07_FINAL_TESTING.md
+### todo/P2_08_FINAL_TESTING.md
 **Status:** 🔴 À faire
 **Tâche:** #15
 **Description:** Suite complète tests validation Phase 2
@@ -248,7 +315,7 @@ Tasks/
 
 ## Phase 3 - Duel Warp ⚔️
 
-### todo/P3_08_DUEL_WARP.md
+### todo/P3_09_DUEL_WARP.md
 **Status:** 🔴 À faire
 **Tâches groupées:** #11 + #12
 **Description:** Téléportation synchronisée vers salle de combat
@@ -277,7 +344,7 @@ Tasks/
 
 ## Phase 4 - Multi-ROM 🌐
 
-### todo/P4_09_MULTI_ROM.md
+### todo/P4_10_MULTI_ROM.md
 **Status:** 🔴 À faire
 **Tâche:** #13
 **Description:** Support Radical Red et Unbound
@@ -299,7 +366,7 @@ Tasks/
 
 ## Phase 5 - Documentation 📚
 
-### todo/P5_10_DOCUMENTATION.md
+### todo/P5_11_DOCUMENTATION.md
 **Status:** 🔴 À faire
 **Tâche:** #14
 **Description:** Documentation complète utilisateur final
@@ -324,7 +391,7 @@ Tasks/
 ```
 Phase 0 - Memory Discovery    [██████████] 100% ✅ COMPLETE
 Phase 1 - Foundation          [██████████] 100% ✅ COMPLETE
-Phase 2 - Ghosting            [█████████░] 90%  (render + interp + camera + smooth rendering + network polish done)
+Phase 2 - Ghosting            [██████████] 100% ✅ COMPLETE (render + interp + camera + smooth + network + sprites + BG occlusion)
 Phase 3 - Duel Warp           [░░░░░░░░░░]  0%
 Phase 4 - Multi-ROM           [░░░░░░░░░░]  0%
 Phase 5 - Documentation       [░░░░░░░░░░]  0%
@@ -348,11 +415,15 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 7. ~~**P2_04C_DEAD_RECKONING.md**~~ ✅ REMOVED (caused overshoot, removed in 0.2.7)
 8. ~~**P2_04D_SMOOTH_RENDERING.md**~~ ✅ TERMINÉ (sub-tile rendering + camera correction + direction marker)
 9. ~~**P2_05_NETWORK_POLISH.md**~~ ✅ TERMINÉ
-6. **todo/P2_06_OPTIMIZATION.md** ⭐ ← **PROCHAINE ÉTAPE**
-7. **todo/P2_07_FINAL_TESTING.md**
-8. **todo/P3_08_DUEL_WARP.md**
-9. **todo/P4_09_MULTI_ROM.md** (Radical Red, Unbound)
-10. **todo/P5_10_DOCUMENTATION.md**
+6. ~~**P2_06_GHOST_SPRITE_RENDERING.md**~~ ✅ TERMINÉ (VRAM sprite extraction + network sync)
+6a. ~~**P2_06A_SPRITE_DETECTION_RELIABILITY.md**~~ ✅ TERMINÉ (strict tileNum=0 filter + hysteresis locking)
+6b. ~~**P2_06B_GHOST_DEPTH_OCCLUSION.md**~~ ✅ TERMINÉ (Y-sorting + BG layer occlusion + ghosts opaques)
+6c. ~~**P2_04E_WAYPOINT_QUEUE_INTERPOLATION.md**~~ ✅ TERMINÉ (waypoint queue + catch-up adaptatif)
+7. **todo/P2_07_OPTIMIZATION.md**
+8. **todo/P2_08_FINAL_TESTING.md**
+9. **todo/P3_09_DUEL_WARP.md**
+10. **todo/P4_10_MULTI_ROM.md** (Radical Red, Unbound)
+11. **todo/P5_11_DOCUMENTATION.md**
 
 **Workflow:**
 - Nouvelles tâches → `todo/`
@@ -387,5 +458,5 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 ---
 
 **Dernière mise à jour:** 2026-02-03
-**Version projet:** 0.2.8-alpha
-**Phase actuelle:** Phase 0+1 Complete ✅ | Phase 2 (Ghosting) In Progress — Render + Interp + Camera + Smooth Rendering + Network Polish done
+**Version projet:** 0.3.0-alpha
+**Phase actuelle:** Phase 0+1+2 Complete ✅ | Phase 3 (Duel Warp) Next

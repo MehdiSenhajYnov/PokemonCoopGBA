@@ -7,12 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Phase 2 - Ghosting System (In Progress)
+### Phase 2 - Ghosting System (Complete)
 - [x] Camera offset discovery for Run & Bun (IWRAM 0x03005DFC, 0x03005DF8)
 - [x] Ghost overlay rendering (render.lua) with Painter API
 - [x] Ghost positioning fixed (relative to screen center)
 - [x] Movement interpolation (interpolate.lua)
 - [x] Animate-toward-target interpolation (replaced buffered render-behind + dead reckoning)
+- [x] Waypoint queue interpolation (FIFO queue + adaptive catch-up, replaces single-target)
 - [x] Adaptive send rate (zero sends idle, send on every tile change, immediate on map change)
 - [x] Sub-tile camera correction for smooth ghost scrolling during walk animations
 - [x] Smooth sub-tile rendering + direction marker + state debug colors
@@ -20,6 +21,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] Auto-generated player IDs (no more hardcoded IDs or client2/ copies)
 - [x] Removed proxy.js and client2/ (no longer needed)
 - [x] Disconnection handling (auto-reconnect, server broadcast, UI status)
+- [x] Ghost sprite rendering (VRAM/OAM/Palette extraction, network sync)
+- [x] Sprite detection reliability (lowest-tileIndex sort, variable size 16x32/32x32)
+- [x] BG layer occlusion (ghosts hidden behind buildings/trees)
+- [x] Bike sprite support (32x32 OAM detection + centered rendering)
+
+## [0.3.2-alpha] - 2026-02-03
+
+### Fixed - Bike Sprite Detection & Rendering
+- **sprite.lua**: Replaced hysteresis-based sprite detection with sort-based approach
+  - Removed tileNum locking system (lockedTileNum, candidateTileNum, lockConfidence, LOCK/UNLOCK_THRESHOLD)
+  - New strategy: sort all candidates by tileIndex ascending → priority ascending → distance to center
+  - Player always wins: tiles loaded first in VRAM = lowest tileIndex
+  - Instant state transitions: walk ↔ bike ↔ surf with zero delay (no lock/unlock frames)
+  - Eliminates NPC sprite contamination (NPCs have higher tileIndex)
+- **sprite.lua**: Accept variable sprite sizes
+  - Filter now accepts 16x32 (shape=2, sizeCode=2) for walk/run AND 32x32 (shape=0, sizeCode=2) for bike
+  - Previously only 16x32 was accepted, causing bike sprite (32x32) to be invisible
+- **render.lua**: Center variable-width sprites on tile
+  - `drawX = screenX - floor((spriteW - TILE_SIZE) / 2)` centers 32x32 bike sprites
+  - Label and occlusion bounding box also use centered position
+  - 16x32 sprites unaffected (offset = 0)
+
+### Technical Notes - OAM Findings (Run & Bun)
+- Walking sprite: shape=2 (tall), sizeCode=2 → 16x32, tileIndex=0, pos=(112,56)
+- Bike sprite: shape=0 (square), sizeCode=2 → 32x32, tileIndex=0, pos=(104,56)
+- Both share tileIndex=0, palBank=0, priority=2
+- NPCs use tileIndex=20+ and palBank=1, clearly distinguishable
+
+## [0.3.1-alpha] - 2026-02-03
+
+### Changed - Waypoint Queue Interpolation (P2_04E)
+- **interpolate.lua**: Complete rewrite — replaced "animate toward target" (single overwritten target) with FIFO waypoint queue + adaptive catch-up
+  - Each network snapshot enqueued instead of overwriting a single `animTo` target
+  - Ghost consumes waypoints one-by-one in order, preserving exact path fidelity at any speed
+  - Adaptive catch-up formula: `segmentDuration = BASE_DURATION / max(1, queueLength)` — single expression handles 1x–1000x+
+  - Multi-waypoint consumption per frame: `while` loop in `step()` can consume multiple waypoints when queue is large
+  - Deduplication: identical consecutive positions ignored (facing-only changes update directly when idle)
+  - Teleport detection compares against last queued position (not stale interpolated position)
+  - Queue overflow safety: MAX_QUEUE_SIZE=1000, flushes and snaps with warning on overflow
+  - dt <= 0 early return for safety
+  - Removed: `lastReceived`, `lastTimestamp`, `animTo`, `animDuration` fields
+  - Removed: `DEFAULT_ANIM_DURATION`, `MIN_ANIM_DURATION`, `MAX_ANIM_DURATION` constants
+  - New constants: `BASE_DURATION=250ms`, `MAX_QUEUE_SIZE=1000`
+  - Public API unchanged: zero modifications needed in main.lua or render.lua
+
+## [0.3.0-alpha] - 2026-02-03
+
+### Added - BG Layer Occlusion (P2_06B Phase 3)
+- **occlusion.lua**: New module for depth-correct ghost rendering
+  - Reads BG1 (cover layer) control registers and scroll offsets each frame
+  - For each ghost, identifies overlapping BG1 tilemap tiles from VRAM
+  - Decodes 4bpp tile pixel data + BG palette (BGR555 → ARGB conversion)
+  - Redraws non-transparent cover tile pixels on overlay using Painter API (1x1 drawRectangle)
+  - Pixel cache grouped by color to minimize `setFillColor` calls (max 256 tiles cached)
+  - Cache cleared on map change
+  - Supports hFlip/vFlip tilemap flags and multi-screenblock layouts (32x32, 64x32, 32x64, 64x64)
+- **hal.lua**: 6 new BG/IO read functions
+  - `HAL.readIOReg16(offset)` — Read 16-bit I/O register via `emu.memory.io`
+  - `HAL.readBGControl(bgIndex)` — Parse BGnCNT (priority, charBase, screenBase, screenSize, 8bpp flag)
+  - `HAL.readBGScroll(bgIndex)` — Read BGnHOFS/VOFS (9-bit masked)
+  - `HAL.readBGTilemapEntry(screenBase, tileX, tileY, screenSize)` — Read 16-bit tilemap entry with multi-screenblock support
+  - `HAL.readBGTileData(charBase, tileId)` — Read 32 bytes 4bpp tile data from BG VRAM (offset 0x0000)
+  - `HAL.readBGPalette(palBank)` — Read 16-color BG palette from palette RAM (offset 0x000, not 0x200)
+- **render.lua**: Occlusion integration
+  - `Render.setOcclusion(module)` setter (same pattern as `setSprite`)
+  - After drawing each ghost + name label, calls `Occlusion.drawOcclusionForGhost(painter, ...)`
+- **main.lua**: Occlusion wiring
+  - `require("occlusion")`, `Occlusion.init()`, `Render.setOcclusion(Occlusion)`
+  - `Occlusion.beginFrame()` called before ghost rendering each frame
+  - `Occlusion.clearCache()` on map change
+
+### Changed - Ghost Opacity
+- **sprite.lua**: `GHOST_ALPHA` changed from `0xB0` (69% opaque) to `0xFF` (fully opaque)
+  - Ghosts are now rendered at full opacity since BG occlusion handles depth correctly
+  - Semi-transparency is no longer needed as a workaround
+
+### Technical Notes - mGBA Canvas API Limitations
+- `canvas:newLayer().image` does NOT support `setPixel` or `drawImage` with `image.new`-created images
+  - Both throw "Invalid object" C-level error that bypasses Lua `pcall`
+  - Only the Painter API (`drawRectangle`, `drawText`, etc.) works for direct overlay drawing
+  - Sprite `drawImage` works because sprites are drawn via `overlayImage:drawImage(spriteImg, x, y)` which uses a different code path
+- Occlusion uses Painter `drawRectangle(x, y, 1, 1)` per pixel as workaround
 
 ## [0.2.8-alpha] - 2026-02-03
 
@@ -270,6 +353,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **0.3.2-alpha** (2026-02-03): Bike sprite support — 32x32 OAM detection, sort-based player identification, centered rendering
+- **0.3.1-alpha** (2026-02-03): Waypoint queue interpolation — FIFO queue + adaptive catch-up, exact path fidelity at any speedhack rate
+- **0.3.0-alpha** (2026-02-03): BG layer occlusion — ghosts hidden behind buildings/trees, fully opaque ghosts, HAL BG read functions
 - **0.2.8-alpha** (2026-02-03): Network polish — disconnection detection, auto-reconnect with backoff, ghost timeout, server broadcast
 - **0.2.7-alpha** (2026-02-03): Interpolation rewrite — animate-toward-target, camera correction, removed dead reckoning
 - **0.2.6-alpha** (2026-02-03): Smooth rendering — sub-tile pixel-perfect, direction marker, state debug colors
@@ -285,12 +371,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Upcoming Versions
 
-### 0.3.0 - Ghosting System Complete (Phase 2)
+### 0.3.0 - Ghosting System Complete (Phase 2) ✅
 - [x] Camera offset discovery for Run & Bun
 - [x] Ghost overlay rendering (render.lua)
 - [x] Movement interpolation (interpolate.lua)
 - [x] Disconnection handling and ghost cleanup
 - [x] Connection status improvements
+- [x] VRAM sprite extraction and network sync
+- [x] BG layer occlusion (ghosts behind buildings/trees)
 
 ### 0.4.0 - Duel Warp System (Phase 3)
 - [ ] Click/button trigger system

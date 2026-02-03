@@ -93,9 +93,16 @@ Avant d'écrire du code utilisant une API externe (mGBA Lua, Node.js, LuaSocket,
 Le joueur GBA est toujours centré à l'écran (120, 80). Le ghost est positionné par delta de tiles: `ghostScreen = (112, 72) + (ghostTile - playerTile) * 16`.
 
 **Features:**
-- Interpolation de mouvement
+- Interpolation de mouvement (FIFO waypoint queue avec catch-up adaptatif `BASE_DURATION / queueLength`)
 - Rendu via Painter API de mGBA (canvas overlay)
-- Carré semi-transparent vert (14x14) avec label joueur
+- Sprites extraits dynamiquement de VRAM/OAM/Palette (tous états visuels: marche, course, vélo, surf)
+- Tailles sprite variables: 16x32 (marche/course) et 32x32 (vélo) détectées automatiquement via OAM shape/sizeCode
+- Détection sprite joueur: tri par tileIndex le plus bas + OAM priority (bat NPCs et reflets d'eau), transition instantanée entre états
+- Fallback vers carré semi-transparent vert (14x14) si extraction VRAM échoue
+- Ghosts opaques (GHOST_ALPHA=0xFF) — l'occlusion BG gère la profondeur
+- Y-sorting: ghosts triés par Y croissant (depth order correct entre ghosts)
+- BG layer occlusion: les tiles du layer BG1 (toits, arbres) sont redessinées par-dessus les ghosts via Painter API
+- Label joueur au-dessus du ghost
 
 ### C. Duel Warp (Feature Signature)
 **Trigger:** Bouton A près du ghost ou interface souris
@@ -117,10 +124,12 @@ PokemonCoop/
 │   └── README.md
 ├── client/                   # Script Lua mGBA
 │   ├── main.lua
-│   ├── hal.lua              # Hardware Abstraction Layer (WRAM + IWRAM, static + dynamic)
+│   ├── hal.lua              # Hardware Abstraction Layer (WRAM + IWRAM + VRAM/OAM/Palette + BG I/O registers, static + dynamic)
 │   ├── network.lua          # Direct TCP client (mGBA socket API, auto-reconnect with backoff)
-│   ├── render.lua           # Ghost player rendering (Painter API + camera correction)
-│   ├── interpolate.lua      # Smooth ghost movement (animate-toward-target interpolation)
+│   ├── render.lua           # Ghost player rendering (Painter API + camera correction + occlusion call)
+│   ├── sprite.lua           # VRAM sprite extraction (OAM scan, tile decode, palette, cache, network sync)
+│   ├── occlusion.lua        # BG layer occlusion (reads BG1 tilemap, redraws cover tiles over ghosts via Painter)
+│   ├── interpolate.lua      # Smooth ghost movement (FIFO waypoint queue + adaptive catch-up)
 │   ├── core.lua             # Core Engine
 │   └── README.md
 ├── config/                   # Profils ROM
@@ -169,6 +178,12 @@ PokemonCoop/
 - [x] Correction caméra sub-tile (tracking delta camera offsets pour scrolling fluide pendant animations marche)
 - [x] Rendu sub-tile (math.floor pixel-perfect, marqueur direction, couleurs debug par état)
 - [x] Gestion déconnexion (reconnexion auto avec backoff, server broadcast, UI statut)
+- [x] Ghost sprite rendering (extraction VRAM/OAM/Palette, reconstruction Image, sync réseau)
+- [x] Sprite detection reliability (lowest-tileIndex sort + OAM priority, supports 16x32 walk and 32x32 bike)
+- [x] Ghost semi-transparency (removed — ghosts now fully opaque, occlusion handles depth)
+- [x] Ghost Y-sorting (drawAllGhosts sorts by Y ascending, correct depth order between ghosts)
+- [x] BG layer occlusion (occlusion.lua — reads BG1 tilemap, redraws cover tiles over ghosts via Painter API)
+- [x] Waypoint queue interpolation (FIFO queue + adaptive catch-up `BASE_DURATION / queueLength`, exact path fidelity at any speedhack rate)
 
 ### Phase 3: Duel Warp
 - [ ] Système de trigger
@@ -262,6 +277,23 @@ Messages envoyés ligne par ligne (délimités par `\n`)
 }
 ```
 
+**Sprite synchronisation:**
+```json
+{
+  "type": "sprite_update",
+  "playerId": "unique-id",
+  "data": {
+    "width": 16,
+    "height": 32,
+    "__comment": "width/height are dynamic: 16x32 for walk/run, 32x32 for bike",
+    "hFlip": false,
+    "tiles": [0, 15, 240, ...],
+    "palette": [0, 4294901760, ...]
+  }
+}
+```
+Sent only when sprite changes (tile index, palette bank, or flip changes).
+
 **Note**: TCP brut via l'API socket intégrée de mGBA (pas LuaSocket — c'est l'implémentation propre à mGBA)
 
 ## 8. DÉPENDANCES
@@ -308,5 +340,5 @@ Run & Bun étant un ROM hack avec modifications majeures:
 ---
 
 **Dernière mise à jour**: 2026-02-03
-**Version**: 0.2.8-alpha
-**Status**: Phase 2 - Ghosting + Interpolation + Camera Correction + Network Polish + Direct TCP
+**Version**: 0.3.2-alpha
+**Status**: Phase 2 - Ghosting Complete (Interpolation + Camera + Network + Sprites + BG Occlusion + Waypoint Queue + Bike Sprite)

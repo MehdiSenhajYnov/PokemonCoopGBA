@@ -379,4 +379,226 @@ function HAL.testMemoryAccess()
   end
 end
 
+--[[
+  Read a single OAM entry (3x u16: attr0, attr1, attr2)
+  @param index OAM index (0-127)
+  @return attr0, attr1, attr2 or nil on error
+]]
+function HAL.readOAMEntry(index)
+  if not index or index < 0 or index > 127 then
+    return nil, nil, nil
+  end
+
+  local success, attr0, attr1, attr2 = pcall(function()
+    local base = index * 8
+    local a0 = emu.memory.oam:read16(base)
+    local a1 = emu.memory.oam:read16(base + 2)
+    local a2 = emu.memory.oam:read16(base + 4)
+    return a0, a1, a2
+  end)
+
+  if success then
+    return attr0, attr1, attr2
+  end
+  return nil, nil, nil
+end
+
+--[[
+  Read sprite tiles from VRAM (4bpp, 32 bytes per tile)
+  Sprites are stored in VRAM at offset 0x10000 (obj tile base)
+  @param tileIndex Starting tile index from OAM attr2
+  @param numTiles Number of tiles to read
+  @return string of raw tile bytes, or nil on error
+]]
+function HAL.readSpriteTiles(tileIndex, numTiles)
+  if not tileIndex or not numTiles or numTiles <= 0 then
+    return nil
+  end
+
+  local offset = 0x10000 + tileIndex * 32
+  local length = numTiles * 32
+
+  -- Validate range stays within sprite VRAM (0x10000-0x17FFF)
+  if offset < 0x10000 or (offset + length) > 0x18000 then
+    return nil
+  end
+
+  local success, data = pcall(function()
+    return emu.memory.vram:readRange(offset, length)
+  end)
+
+  if success and data then
+    return data
+  end
+  return nil
+end
+
+--[[
+  Read a sprite palette bank (16 colors, BGR555 format)
+  Sprite palettes start at palette RAM offset 0x200
+  @param bank Palette bank index (0-15)
+  @return table of 16 BGR555 values (indexed 0-15), or nil on error
+]]
+function HAL.readSpritePalette(bank)
+  if not bank or bank < 0 or bank > 15 then
+    return nil
+  end
+
+  local success, palette = pcall(function()
+    local pal = {}
+    local base = 0x200 + bank * 32
+    for i = 0, 15 do
+      pal[i] = emu.memory.palette:read16(base + i * 2)
+    end
+    return pal
+  end)
+
+  if success and palette then
+    return palette
+  end
+  return nil
+end
+
+--[[
+  Read a 16-bit I/O register from GBA I/O memory (0x04000000 region)
+  @param offset Register offset (e.g. 0x0008 for BG0CNT)
+  @return u16 value or nil on error
+]]
+function HAL.readIOReg16(offset)
+  local success, value = pcall(function()
+    return emu.memory.io:read16(offset)
+  end)
+  if success then
+    return value
+  end
+  return nil
+end
+
+--[[
+  Read and parse a BG control register (BGnCNT)
+  @param bgIndex BG layer index (0-3)
+  @return table {priority, charBaseBlock, is8bpp, screenBaseBlock, screenSize} or nil
+]]
+function HAL.readBGControl(bgIndex)
+  if not bgIndex or bgIndex < 0 or bgIndex > 3 then
+    return nil
+  end
+  local regOffset = 0x0008 + bgIndex * 2
+  local val = HAL.readIOReg16(regOffset)
+  if not val then
+    return nil
+  end
+  return {
+    priority = val & 0x3,
+    charBaseBlock = (val >> 2) & 0x3,
+    is8bpp = ((val >> 7) & 0x1) == 1,
+    screenBaseBlock = (val >> 8) & 0x1F,
+    screenSize = (val >> 14) & 0x3,
+  }
+end
+
+--[[
+  Read BG scroll registers (BGnHOFS / BGnVOFS)
+  @param bgIndex BG layer index (0-3)
+  @return scrollX, scrollY (9-bit masked) or nil, nil
+]]
+function HAL.readBGScroll(bgIndex)
+  if not bgIndex or bgIndex < 0 or bgIndex > 3 then
+    return nil, nil
+  end
+  local hofs = HAL.readIOReg16(0x0010 + bgIndex * 4)
+  local vofs = HAL.readIOReg16(0x0012 + bgIndex * 4)
+  if not hofs or not vofs then
+    return nil, nil
+  end
+  return hofs & 0x1FF, vofs & 0x1FF
+end
+
+--[[
+  Read a 16-bit tilemap entry from BG VRAM
+  Handles multi-screenblock layouts (32x32, 64x32, 32x64, 64x64)
+  @param screenBaseBlock Screen base block (from BGnCNT)
+  @param tileX Tile X coordinate in full map space
+  @param tileY Tile Y coordinate in full map space
+  @param screenSize Screen size code (0=32x32, 1=64x32, 2=32x64, 3=64x64)
+  @return u16 tilemap entry or nil
+]]
+function HAL.readBGTilemapEntry(screenBaseBlock, tileX, tileY, screenSize)
+  -- Each screenblock is 32x32 tiles = 2048 bytes
+  local sbOffset = 0
+  local localX = tileX % 32
+  local localY = tileY % 32
+
+  if screenSize == 1 then
+    -- 64x32: SB0 (left 32 cols), SB1 (right 32 cols)
+    if tileX >= 32 then sbOffset = 1 end
+  elseif screenSize == 2 then
+    -- 32x64: SB0 (top 32 rows), SB1 (bottom 32 rows)
+    if tileY >= 32 then sbOffset = 1 end
+  elseif screenSize == 3 then
+    -- 64x64: SB0 (TL), SB1 (TR), SB2 (BL), SB3 (BR)
+    if tileX >= 32 then sbOffset = sbOffset + 1 end
+    if tileY >= 32 then sbOffset = sbOffset + 2 end
+  end
+
+  local vramAddr = (screenBaseBlock + sbOffset) * 2048 + (localY * 32 + localX) * 2
+
+  local success, value = pcall(function()
+    return emu.memory.vram:read16(vramAddr)
+  end)
+  if success then
+    return value
+  end
+  return nil
+end
+
+--[[
+  Read 32 bytes of 4bpp tile pixel data from BG VRAM area
+  BG tiles start at VRAM offset 0x0000 (unlike sprites at 0x10000)
+  @param charBaseBlock Character base block (from BGnCNT, 0-3)
+  @param tileId Tile ID (0-1023)
+  @return string of 32 bytes, or nil
+]]
+function HAL.readBGTileData(charBaseBlock, tileId)
+  local offset = charBaseBlock * 0x4000 + tileId * 32
+
+  -- Validate stays within BG VRAM area (0x00000-0x0FFFF)
+  if offset < 0 or (offset + 32) > 0x10000 then
+    return nil
+  end
+
+  local success, data = pcall(function()
+    return emu.memory.vram:readRange(offset, 32)
+  end)
+  if success and data then
+    return data
+  end
+  return nil
+end
+
+--[[
+  Read a 16-color BG palette bank from palette RAM
+  BG palettes start at offset 0x000 (sprite palettes at 0x200)
+  @param palBank Palette bank index (0-15)
+  @return table of 16 BGR555 values (indexed 0-15), or nil
+]]
+function HAL.readBGPalette(palBank)
+  if not palBank or palBank < 0 or palBank > 15 then
+    return nil
+  end
+
+  local success, palette = pcall(function()
+    local pal = {}
+    local base = palBank * 32  -- BG palettes at 0x000 (not 0x200)
+    for i = 0, 15 do
+      pal[i] = emu.memory.palette:read16(base + i * 2)
+    end
+    return pal
+  end)
+  if success and palette then
+    return palette
+  end
+  return nil
+end
+
 return HAL

@@ -144,6 +144,20 @@ function handleMessage(client, messageStr) {
         });
         break;
 
+      case 'sprite_update':
+        // Sprite data relay
+        if (!client.roomId) return;
+
+        // Cache last sprite for late joiners
+        client.lastSprite = message.data;
+
+        broadcastToRoom(client.roomId, client.id, {
+          type: 'sprite_update',
+          playerId: client.id,
+          data: message.data
+        });
+        break;
+
       case 'duel_request':
         // Duel warp request
         if (!client.roomId) return;

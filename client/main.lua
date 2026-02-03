@@ -23,6 +23,8 @@ local HAL = require("hal")
 local Network = require("network")
 local Render = require("render")
 local Interpolate = require("interpolate")
+local Sprite = require("sprite")
+local Occlusion = require("occlusion")
 -- GameConfig will be loaded dynamically via ROM detection
 
 -- Configuration
@@ -159,8 +161,12 @@ local function initialize()
   HAL.init(detectedConfig)
   log("Using config: " .. (detectedConfig.name or "Unknown"))
 
-  -- Initialize rendering
+  -- Initialize rendering, sprite extraction, and occlusion
   Render.init(detectedConfig)
+  Sprite.init()
+  Occlusion.init()
+  Render.setSprite(Sprite)
+  Render.setOcclusion(Occlusion)
 
   -- Generate player ID
   State.playerId = generatePlayerId()
@@ -341,6 +347,9 @@ local function drawOverlay(currentPos)
     end
   end
 
+  -- Read BG cover-layer config for occlusion (once per frame)
+  Occlusion.beginFrame()
+
   -- Draw ghost players using interpolated positions
   if State.showGhosts and playerCount > 0 and currentPos then
     local currentMap = {
@@ -358,7 +367,7 @@ local function drawOverlay(currentPos)
       }
     end
 
-    Render.drawAllGhosts(painter, interpolatedPlayers, currentPos, currentMap)
+    Render.drawAllGhosts(painter, overlay.image, interpolatedPlayers, currentPos, currentMap)
   end
 
   overlay:update()
@@ -376,6 +385,20 @@ local function update()
 
   -- Read current position
   local currentPos = readPlayerPosition()
+
+  -- Capture local player sprite from VRAM (only rebuilds image when sprite changes)
+  Sprite.captureLocalPlayer()
+
+  -- Send sprite update if sprite changed
+  if Sprite.hasChanged() and State.connected then
+    local spriteData = Sprite.getLocalSpriteData()
+    if spriteData then
+      Network.send({
+        type = "sprite_update",
+        data = spriteData
+      })
+    end
+  end
 
   -- Detect disconnection
   if State.connected and not Network.isConnected() then
@@ -419,8 +442,12 @@ local function update()
         -- Store raw data as backup + update last seen
         State.otherPlayers[message.playerId] = message.data
 
+      elseif message.type == "sprite_update" then
+        Sprite.updateFromNetwork(message.playerId, message.data)
+
       elseif message.type == "player_disconnected" then
         Interpolate.remove(message.playerId)
+        Sprite.removePlayer(message.playerId)
         State.otherPlayers[message.playerId] = nil
         log("Player " .. message.playerId .. " disconnected")
 
@@ -446,7 +473,7 @@ local function update()
   if currentPos then
     -- Detect movement state
     if positionChanged(currentPos, State.lastPosition) then
-      -- Check for map change → immediate send
+      -- Check for map change → immediate send + clear caches
       local mapChanged = currentPos.mapId ~= State.lastPosition.mapId
                       or currentPos.mapGroup ~= State.lastPosition.mapGroup
       if mapChanged then
@@ -454,6 +481,7 @@ local function update()
         State.lastPosition = currentPos
         State.lastSentPosition = currentPos
         State.sendCooldown = SEND_RATE_MOVING
+        Occlusion.clearCache()
       end
 
       State.isMoving = true

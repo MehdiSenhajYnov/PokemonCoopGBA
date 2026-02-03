@@ -11,11 +11,14 @@
   while still producing pixel-smooth scrolling during walks.
 ]]
 
+local Sprite -- forward declaration, set via Render.setSprite()
+local Occlusion -- forward declaration, set via Render.setOcclusion()
+
 local Render = {}
 
 -- Configuration
 local TILE_SIZE = 16  -- Pixels per tile
-local GHOST_SIZE = 14 -- Ghost square size in pixels
+local GHOST_SIZE = 14 -- Ghost square size in pixels (fallback)
 local GHOST_COLOR = 0x8000FF00       -- Semi-transparent green (ARGB)
 local GHOST_OUTLINE = 0xFF00CC00     -- Opaque darker green for outline
 
@@ -144,23 +147,38 @@ local function isSameMap(pos, currentMap)
 end
 
 --[[
-  Check if screen coordinates are visible
+  Check if screen coordinates are visible (expanded for larger sprites)
 ]]
 local function isOnScreen(screenX, screenY)
-  return screenX >= -GHOST_SIZE and screenX <= SCREEN_WIDTH and
-         screenY >= -GHOST_SIZE and screenY <= SCREEN_HEIGHT
+  return screenX >= -64 and screenX <= SCREEN_WIDTH and
+         screenY >= -64 and screenY <= SCREEN_HEIGHT
+end
+
+--[[
+  Set the Sprite module reference (avoids circular require)
+]]
+function Render.setSprite(spriteModule)
+  Sprite = spriteModule
+end
+
+--[[
+  Set the Occlusion module reference (avoids circular require)
+]]
+function Render.setOcclusion(occlusionModule)
+  Occlusion = occlusionModule
 end
 
 --[[
   Draw a single ghost player on screen
   @param painter The mGBA Painter object
+  @param overlayImage The overlay Image object (for drawImage)
   @param playerId String identifier for this player
   @param position Table {x, y, mapId, mapGroup, facing}
   @param playerPos Table {x, y, mapId, mapGroup} of local player
   @param currentMap Table {mapId, mapGroup} of local player
   @param state (optional) Interpolation state string for debug coloring
 ]]
-function Render.drawGhost(painter, playerId, position, playerPos, currentMap, state)
+function Render.drawGhost(painter, overlayImage, playerId, position, playerPos, currentMap, state)
   if not position or not position.x or not position.y then
     return
   end
@@ -174,7 +192,7 @@ function Render.drawGhost(painter, playerId, position, playerPos, currentMap, st
     return
   end
 
-  -- Convert ghost tile coords to screen coords
+  -- Convert ghost tile coords to screen coords (top-left of the tile)
   local screenX, screenY = ghostToScreen(position.x, position.y, playerPos.x, playerPos.y)
 
   -- Skip if off-screen
@@ -182,38 +200,32 @@ function Render.drawGhost(painter, playerId, position, playerPos, currentMap, st
     return
   end
 
-  -- Select color based on interpolation state (debug) or default
-  local fillColor = (state and STATE_COLORS[state]) or GHOST_COLOR
-  local outlineColor = (state and STATE_OUTLINES[state]) or GHOST_OUTLINE
+  -- Try to draw actual sprite image
+  local spriteImg, spriteW, spriteH
+  if Sprite then
+    spriteImg, spriteW, spriteH = Sprite.getImageForPlayer(playerId)
+  end
 
-  -- Draw ghost rectangle (filled, semi-transparent)
-  painter:setFill(true)
-  painter:setStrokeWidth(0)
-  painter:setFillColor(fillColor)
-  painter:drawRectangle(screenX + 1, screenY + 1, GHOST_SIZE, GHOST_SIZE)
+  if spriteImg and overlayImage then
+    -- Anchor sprite so feet align with the tile position
+    -- Center horizontally on tile (handles 16x32 walk and 32x32 bike)
+    local drawX = screenX - math.floor((spriteW - TILE_SIZE) / 2)
+    local drawY = screenY - (spriteH - TILE_SIZE)
+    pcall(overlayImage.drawImage, overlayImage, spriteImg, drawX, drawY)
+  else
+    -- Fallback: colored rectangle (original behavior)
+    local fillColor = (state and STATE_COLORS[state]) or GHOST_COLOR
+    local outlineColor = (state and STATE_OUTLINES[state]) or GHOST_OUTLINE
 
-  -- Draw outline
-  painter:setFill(false)
-  painter:setStrokeWidth(1)
-  painter:setStrokeColor(outlineColor)
-  painter:drawRectangle(screenX + 1, screenY + 1, GHOST_SIZE, GHOST_SIZE)
-
-  -- Draw facing direction marker (4x4 white square)
-  if position.facing then
-    local markerX, markerY = screenX + 5, screenY + 5
-    if position.facing == 1 then       -- Down
-      markerY = screenY + GHOST_SIZE - 2
-    elseif position.facing == 2 then   -- Up
-      markerY = screenY - 2
-    elseif position.facing == 3 then   -- Left
-      markerX = screenX - 2
-    elseif position.facing == 4 then   -- Right
-      markerX = screenX + GHOST_SIZE - 2
-    end
     painter:setFill(true)
     painter:setStrokeWidth(0)
-    painter:setFillColor(0xFFFFFFFF)
-    painter:drawRectangle(markerX, markerY, 4, 4)
+    painter:setFillColor(fillColor)
+    painter:drawRectangle(screenX + 1, screenY + 1, GHOST_SIZE, GHOST_SIZE)
+
+    painter:setFill(false)
+    painter:setStrokeWidth(1)
+    painter:setStrokeColor(outlineColor)
+    painter:drawRectangle(screenX + 1, screenY + 1, GHOST_SIZE, GHOST_SIZE)
   end
 
   -- Reset to fill mode for text
@@ -222,28 +234,53 @@ function Render.drawGhost(painter, playerId, position, playerPos, currentMap, st
 
   -- Draw player name label above the ghost
   local label = string.sub(playerId, 1, 10)
+  local labelX = screenX
+  local labelY = screenY
+  if spriteImg then
+    labelX = screenX - math.floor((spriteW - TILE_SIZE) / 2)
+    labelY = screenY - (spriteH - TILE_SIZE)
+  end
   -- Text background
   painter:setFillColor(TEXT_BG_COLOR)
-  painter:drawRectangle(screenX - 2, screenY - 10, #label * 6 + 4, 10)
+  painter:drawRectangle(labelX - 2, labelY - 10, #label * 6 + 4, 10)
   -- Text
   painter:setFillColor(TEXT_COLOR)
-  painter:drawText(label, screenX, screenY - 10)
+  painter:drawText(label, labelX, labelY - 10)
+
+  -- Overdraw BG cover-layer tiles to hide ghost behind buildings/trees
+  if Occlusion then
+    local occX, occY, occW, occH
+    if spriteImg then
+      occX = screenX - math.floor((spriteW - TILE_SIZE) / 2)
+      occY = screenY - (spriteH - TILE_SIZE)
+      occW = spriteW
+      occH = spriteH
+    else
+      occX = screenX + 1
+      occY = screenY + 1
+      occW = GHOST_SIZE
+      occH = GHOST_SIZE
+    end
+    Occlusion.drawOcclusionForGhost(painter, occX, occY, occW, occH)
+  end
 end
 
 --[[
   Draw all ghost players from the otherPlayers table
   @param painter The mGBA Painter object
+  @param overlayImage The overlay Image object (for sprite drawImage)
   @param otherPlayers Table of {playerId => {pos=position, state=string}} or {playerId => position}
   @param playerPos Table {x, y, mapId, mapGroup} of local player
   @param currentMap Table {mapId, mapGroup}
   @return number of ghosts drawn
 ]]
-function Render.drawAllGhosts(painter, otherPlayers, playerPos, currentMap)
+function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos, currentMap)
   if not otherPlayers or not painter then
     return 0
   end
 
-  local count = 0
+  -- Collect ghosts into a sortable list
+  local ghostList = {}
   for playerId, data in pairs(otherPlayers) do
     local position, state
     if data.pos then
@@ -252,11 +289,23 @@ function Render.drawAllGhosts(painter, otherPlayers, playerPos, currentMap)
     else
       position = data
     end
-    Render.drawGhost(painter, playerId, position, playerPos, currentMap, state)
-    count = count + 1
+    ghostList[#ghostList + 1] = {
+      playerId = playerId,
+      position = position,
+      state = state,
+      y = (position and position.y) or 0
+    }
   end
 
-  return count
+  -- Y-sort: smaller Y drawn first (behind), larger Y drawn last (in front)
+  table.sort(ghostList, function(a, b) return a.y < b.y end)
+
+  -- Draw in sorted order
+  for _, ghost in ipairs(ghostList) do
+    Render.drawGhost(painter, overlayImage, ghost.playerId, ghost.position, playerPos, currentMap, ghost.state)
+  end
+
+  return #ghostList
 end
 
 return Render

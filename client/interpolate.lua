@@ -1,11 +1,18 @@
 --[[
-  Interpolation Module
-  Provides smooth ghost movement using "animate toward target" approach.
+  Interpolation Module — Waypoint Queue
+  Provides smooth ghost movement using a FIFO waypoint queue with
+  adaptive catch-up.
 
-  When a new position snapshot arrives, the ghost smoothly lerps from its
-  current visual position toward the new position. The animation duration
-  is estimated from the interval between consecutive snapshots, so it
-  automatically adapts to any movement speed (walk, run, bike, surf).
+  Each network snapshot is enqueued rather than overwriting a single target.
+  The ghost consumes waypoints one-by-one in order, guaranteeing the
+  displayed path matches the real player's path even at extreme speedhack
+  rates (mGBA 2x–250x+).
+
+  Catch-up formula:
+    segmentDuration = BASE_DURATION / max(1, queueLength)
+
+  This single expression handles all speeds from 1x to 1000x+ with no
+  thresholds, paliers, or special cases.
 
   Reference:
   - Gabriel Gambetta: Fast-Paced Multiplayer (entity interpolation)
@@ -14,10 +21,9 @@
 local Interpolate = {}
 
 -- Configuration
-local TELEPORT_THRESHOLD = 10      -- Tile distance considered a teleport
-local DEFAULT_ANIM_DURATION = 250  -- Default animation duration in ms (first move)
-local MIN_ANIM_DURATION = 50       -- Floor to prevent instant snapping
-local MAX_ANIM_DURATION = 500      -- Ceiling to prevent sluggish movement
+local TELEPORT_THRESHOLD = 10  -- Tile distance considered a teleport
+local BASE_DURATION = 250      -- Natural step duration in ms (~16 GBA frames)
+local MAX_QUEUE_SIZE = 1000    -- Safety cap on queue length
 
 -- Player data storage
 local players = {}
@@ -59,108 +65,159 @@ local function lerp(a, b, t)
 end
 
 --[[
-  Update target position for a player.
-  Called when a new network update arrives with a timestamp.
+  Check if two positions are identical (same tile + map)
+]]
+local function isSamePosition(pos1, pos2)
+  return pos1.x == pos2.x
+     and pos1.y == pos2.y
+     and pos1.mapId == pos2.mapId
+     and pos1.mapGroup == pos2.mapGroup
+end
 
-  @param playerId  string  Unique player identifier
-  @param newPosition  table  {x, y, mapId, mapGroup, facing}
-  @param timestamp  number  Sender's time in ms when position was captured
+--[[
+  Get the reference position for comparison (last queue element, or current)
+]]
+local function lastQueuedPos(player)
+  if #player.queue > 0 then
+    return player.queue[#player.queue]
+  end
+  return player.current
+end
+
+--[[
+  Update target position for a player.
+  Called when a new network update arrives.
+
+  @param playerId    string  Unique player identifier
+  @param newPosition table   {x, y, mapId, mapGroup, facing}
+  @param timestamp   number  (kept for API compat, not used internally)
 ]]
 function Interpolate.update(playerId, newPosition, timestamp)
   if not newPosition or not newPosition.x or not newPosition.y then
     return
   end
 
-  timestamp = timestamp or 0
-
-  -- First time seeing this player: snap to position, no animation
+  -- First time seeing this player: snap to position, empty queue
   if not players[playerId] then
     players[playerId] = {
       current = copyPos(newPosition),
-      lastReceived = copyPos(newPosition),
-      lastTimestamp = timestamp,
-      state = "idle",
-      -- Animation state
+      queue = {},
       animFrom = nil,
-      animTo = nil,
       animProgress = 0,
-      animDuration = 0,
+      state = "idle",
     }
     return
   end
 
   local player = players[playerId]
+  local ref = lastQueuedPos(player)
 
   -- Teleport detection: map change or large distance jump
-  if not isSameMap(player.lastReceived, newPosition)
-    or distance(player.lastReceived, newPosition) > TELEPORT_THRESHOLD then
-    -- Snap instantly, no animation
+  if not isSameMap(ref, newPosition)
+    or distance(ref, newPosition) > TELEPORT_THRESHOLD then
+    -- Flush queue and snap
     player.current = copyPos(newPosition)
-    player.lastReceived = copyPos(newPosition)
-    player.lastTimestamp = timestamp
-    player.animTo = nil
+    player.queue = {}
+    player.animFrom = nil
     player.animProgress = 0
     player.state = "idle"
     return
   end
 
-  -- Estimate animation duration from interval between this and last snapshot
-  local interval = timestamp - player.lastTimestamp
-  local duration = DEFAULT_ANIM_DURATION
-  if interval > 0 then
-    duration = interval
+  -- Deduplication: ignore if same tile + map as the reference position
+  if isSamePosition(ref, newPosition) then
+    -- Exception: if only facing changed and queue is empty, update directly
+    if ref.facing ~= newPosition.facing and #player.queue == 0 then
+      player.current.facing = newPosition.facing
+    end
+    return
   end
-  if duration < MIN_ANIM_DURATION then duration = MIN_ANIM_DURATION end
-  if duration > MAX_ANIM_DURATION then duration = MAX_ANIM_DURATION end
 
-  -- Start animation from current visual position toward new position
-  player.animFrom = copyPos(player.current)
-  player.animTo = copyPos(newPosition)
-  player.animProgress = 0
-  player.animDuration = duration
-  player.state = "interpolating"
+  -- Enqueue waypoint
+  table.insert(player.queue, copyPos(newPosition))
 
-  player.lastReceived = copyPos(newPosition)
-  player.lastTimestamp = timestamp
+  -- Queue overflow safety: flush and snap to latest
+  if #player.queue > MAX_QUEUE_SIZE then
+    local last = player.queue[#player.queue]
+    player.current = copyPos(last)
+    player.queue = {}
+    player.animFrom = nil
+    player.animProgress = 0
+    player.state = "idle"
+    console:log("[Interpolate] WARNING: queue overflow for " .. playerId .. ", snapping")
+  end
 end
 
 --[[
   Advance interpolation by dt milliseconds for all players.
-  Call this once per frame with dt = time since last frame (~16.67ms at 60fps).
+  Consumes multiple waypoints per frame when the queue is large (catch-up).
 
   @param dt  number  Elapsed time in ms since last frame
 ]]
 function Interpolate.step(dt)
   dt = dt or 16.67
+  if dt <= 0 then return end
 
   for _, player in pairs(players) do
-    if player.animTo and player.animDuration > 0 and player.animProgress < 1 then
-      player.animProgress = player.animProgress + dt / player.animDuration
+    if #player.queue == 0 then
+      player.state = "idle"
+      player.animFrom = nil
+      player.animProgress = 0
+    else
+      player.state = "interpolating"
+      local remaining = dt
 
-      if player.animProgress >= 1 then
-        -- Animation complete: snap to target
-        player.animProgress = 1
-        player.current.x = player.animTo.x
-        player.current.y = player.animTo.y
-        player.current.mapId = player.animTo.mapId
-        player.current.mapGroup = player.animTo.mapGroup
-        player.current.facing = player.animTo.facing
-        player.animTo = nil
-        player.state = "idle"
-      else
-        -- Mid-animation: lerp between start and target
-        local t = player.animProgress
-        player.current.x = lerp(player.animFrom.x, player.animTo.x, t)
-        player.current.y = lerp(player.animFrom.y, player.animTo.y, t)
-        player.current.mapId = player.animTo.mapId
-        player.current.mapGroup = player.animTo.mapGroup
-        -- Switch facing at halfway point
-        if t >= 0.5 then
-          player.current.facing = player.animTo.facing
-        else
-          player.current.facing = player.animFrom.facing
+      while remaining > 0 and #player.queue > 0 do
+        -- Initialize segment start if needed
+        if not player.animFrom then
+          player.animFrom = copyPos(player.current)
         end
-        player.state = "interpolating"
+
+        -- Adaptive duration: inversely proportional to queue size
+        local segDuration = BASE_DURATION / math.max(1, #player.queue)
+
+        -- Time left to finish this segment
+        local timeLeftInSegment = (1 - player.animProgress) * segDuration
+
+        if remaining >= timeLeftInSegment then
+          -- Segment completes within this frame
+          remaining = remaining - timeLeftInSegment
+
+          -- Snap to waypoint target
+          local target = player.queue[1]
+          player.current = copyPos(target)
+
+          -- Pop consumed waypoint
+          table.remove(player.queue, 1)
+
+          -- Reset for next segment
+          player.animFrom = copyPos(player.current)
+          player.animProgress = 0
+        else
+          -- Frame ends mid-segment
+          player.animProgress = player.animProgress + remaining / segDuration
+
+          local t = player.animProgress
+          local target = player.queue[1]
+          player.current.x = lerp(player.animFrom.x, target.x, t)
+          player.current.y = lerp(player.animFrom.y, target.y, t)
+          player.current.mapId = target.mapId
+          player.current.mapGroup = target.mapGroup
+
+          -- Switch facing at halfway point
+          if t >= 0.5 then
+            player.current.facing = target.facing
+          end
+
+          remaining = 0
+        end
+      end
+
+      -- After loop: if queue drained, go idle
+      if #player.queue == 0 then
+        player.state = "idle"
+        player.animFrom = nil
+        player.animProgress = 0
       end
     end
   end
