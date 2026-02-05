@@ -42,13 +42,23 @@ return {
     warpY = 0x02024D17,         -- Target Y for warp
   },
 
+  -- Duel room coordinates (MAP_BATTLE_COLOSSEUM_2P from pokeemerald decomp)
+  duelRoom = {
+    mapGroup = 28,
+    mapId = 24,
+    playerAX = 3,
+    playerAY = 5,
+    playerBX = 10,
+    playerBY = 5
+  },
+
   -- Known map locations (for reference and validation)
   maps = {
     -- Battle facilities
     battleColosseum = {
-      mapGroup = 7,
-      mapId = 4,
-      description = "Battle Colosseum (for Link battles)"
+      mapGroup = 28,
+      mapId = 24,
+      description = "Battle Colosseum 2P (MAP_BATTLE_COLOSSEUM_2P)"
     },
 
     -- Starting areas
@@ -109,15 +119,15 @@ return {
   end,
 
   --[[
-    Get spawn coordinates for duel warp
-    Returns coordinates in front of Battle Colosseum NPC
+    Get spawn coordinates for duel warp (player A side)
+    Returns coordinates inside Battle Colosseum 2P
   ]]
   getDuelWarpCoords = function(self)
     return {
-      mapGroup = self.maps.battleColosseum.mapGroup,
-      mapId = self.maps.battleColosseum.mapId,
-      x = 7,  -- Example coordinates (adjust based on actual map)
-      y = 8,
+      mapGroup = self.duelRoom.mapGroup,
+      mapId = self.duelRoom.mapId,
+      x = self.duelRoom.playerAX,
+      y = self.duelRoom.playerAY,
       facing = self.facing.UP
     }
   end

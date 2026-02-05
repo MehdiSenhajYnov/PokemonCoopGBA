@@ -13,9 +13,11 @@ local scriptDir = scriptPath:match("(.*/)")
 if not scriptDir then
   scriptDir = scriptPath:match("(.*\\)")
 end
+local configDir = ""
 if scriptDir then
   package.path = package.path .. ";" .. scriptDir .. "../?.lua"
   package.path = package.path .. ";" .. scriptDir .. "../?/init.lua"
+  configDir = scriptDir .. "../config/"
 end
 
 -- Load modules
@@ -25,6 +27,8 @@ local Render = require("render")
 local Interpolate = require("interpolate")
 local Sprite = require("sprite")
 local Occlusion = require("occlusion")
+local Duel = require("duel")
+local Battle = require("battle")
 -- GameConfig will be loaded dynamically via ROM detection
 
 -- Configuration
@@ -77,6 +81,15 @@ local State = {
   lastMoveFrame = 0,
   sendCooldown = 0,
   lastSentPosition = nil,
+  -- Duel warp state machine
+  inputsLocked = false,
+  unlockFrame = 0,
+  warpPhase = nil,       -- nil / "waiting_door" / "loading" / "waiting_party" / "in_battle" / "returning"
+  duelPending = nil,     -- {mapGroup, mapId, x, y, isMaster} when duel warp is pending
+  duelOrigin = nil,      -- {x, y, mapGroup, mapId} position before duel (for return)
+  opponentParty = nil,   -- 600-byte party data from opponent
+  sentChoice = false,    -- Whether we've sent our choice this turn
+  remoteChoiceTimeout = nil, -- Frame when we started waiting for remote choice
   -- Early movement detection
   earlyDetect = {
     inputDir = nil,         -- KEYINPUT direction ("up"/"down"/"left"/"right")
@@ -122,6 +135,16 @@ end
   Detect ROM from header
   Returns config module for the detected ROM
 ]]
+local function loadConfig(filename)
+  local path = configDir .. filename
+  local ok, result = pcall(dofile, path)
+  if ok and result then
+    return result
+  end
+  log("WARNING: dofile failed for " .. path .. ", falling back to require")
+  return nil
+end
+
 local function detectROM()
   -- Read game code from ROM header (0x080000AC)
   local success, gameId = pcall(function()
@@ -153,7 +176,7 @@ local function detectROM()
     -- Detect Run & Bun by title (adjust pattern if needed)
     if title:upper():find("RUN") or title:upper():find("BUN") then
       log("Loading Run & Bun config")
-      return require("config.run_and_bun")
+      return loadConfig("run_and_bun.lua")
     end
 
     -- BPEE = Emerald engine. Run & Bun uses the same game ID,
@@ -161,7 +184,7 @@ local function detectROM()
     -- Change this to emerald_us if you're testing vanilla Emerald.
     if gameId == "BPEE" then
       log("Loading Run & Bun config (BPEE detected)")
-      return require("config.run_and_bun")
+      return loadConfig("run_and_bun.lua")
     end
 
     log("Unknown ROM ID: " .. gameId)
@@ -187,12 +210,18 @@ local function initialize()
   if not detectedConfig then
     log("ERROR: Could not detect ROM or load config")
     log("Loading default Emerald US config as fallback")
-    detectedConfig = require("config.emerald_us")
+    detectedConfig = loadConfig("emerald_us.lua")
   end
 
   -- Initialize HAL with detected config
   HAL.init(detectedConfig)
   log("Using config: " .. (detectedConfig.name or "Unknown"))
+
+  -- Proactively scan for sWarpData (works if game loaded from save)
+  HAL.findSWarpData()
+
+  -- Setup warp watchpoint (monitors callback2 for CB2_LoadMap transitions)
+  HAL.setupWarpWatchpoint()
 
   -- Initialize rendering, sprite extraction, and occlusion
   Render.init(detectedConfig)
@@ -200,6 +229,14 @@ local function initialize()
   Occlusion.init()
   Render.setSprite(Sprite)
   Render.setOcclusion(Occlusion)
+
+  -- Initialize battle module
+  Battle.init(detectedConfig)
+  if Battle.isConfigured() then
+    log("Battle module configured")
+  else
+    log("Battle module not configured (scan addresses first)")
+  end
 
   -- Generate player ID
   State.playerId = generatePlayerId()
@@ -403,6 +440,31 @@ local function drawOverlay(currentPos)
     Render.drawAllGhosts(painter, overlay.image, interpolatedPlayers, currentPos, currentMap)
   end
 
+  -- Draw door fallback overlay when waiting for player to enter a door
+  if State.warpPhase == "waiting_door" and State.duelPending then
+    local boxW, boxH = 180, 20
+    local boxX = math.floor((W - boxW) / 2)
+    local boxY = H - 30
+
+    painter:setFill(true)
+    painter:setStrokeWidth(0)
+    painter:setFillColor(0xE0000000)
+    painter:drawRectangle(boxX, boxY, boxW, boxH)
+
+    painter:setFill(false)
+    painter:setStrokeWidth(1)
+    painter:setStrokeColor(0xFFFFFF00)
+    painter:drawRectangle(boxX, boxY, boxW, boxH)
+
+    painter:setFill(true)
+    painter:setStrokeWidth(0)
+    painter:setFillColor(0xFFFFFF00)
+    painter:drawText("Enter any door to start duel!", boxX + 4, boxY + 4)
+  end
+
+  -- Draw duel UI (request prompt / outgoing feedback)
+  Duel.drawUI(painter)
+
   overlay:update()
 end
 
@@ -418,9 +480,273 @@ local function update()
   State.frameCounter = State.frameCounter + 1
   State.timeMs = State.timeMs + realDt
 
+  -- === Watchpoint processing (flag-based, safe to read memory here) ===
+  if HAL.checkWarpWatchpoint() then
+    -- callback2 just transitioned to CB2_LoadMap (natural warp detected)
+    log("Watchpoint: callback2 -> CB2_LoadMap detected")
+
+    -- Capture golden state if not yet captured
+    if not HAL.hasGoldenState() then
+      HAL.captureGoldenState()
+    end
+
+    -- If a duel is pending in door fallback mode, overwrite destination
+    if State.duelPending and State.warpPhase == "waiting_door" then
+      local dp = State.duelPending
+      local ok = HAL.writeWarpData(dp.mapGroup, dp.mapId, dp.x, dp.y)
+      if ok then
+        log(string.format("Door fallback: destination overwritten to %d:%d (%d,%d)",
+          dp.mapGroup, dp.mapId, dp.x, dp.y))
+        -- Transition from waiting_door to loading
+        State.inputsLocked = true
+        State.warpPhase = "loading"
+        State.unlockFrame = State.frameCounter + 300
+      else
+        log("ERROR: Door fallback writeWarpData failed — aborting duel")
+        State.duelPending = nil
+        State.inputsLocked = false
+        State.warpPhase = nil
+      end
+    end
+  end
+
+  -- Warp state machine
+  if State.inputsLocked then
+    -- Phase "waiting_door": golden state not available, waiting for player to enter a door
+    if State.warpPhase == "waiting_door" then
+      -- The watchpoint above handles the actual interception when a door is entered.
+      -- Safety timeout
+      if State.frameCounter >= State.unlockFrame then
+        State.inputsLocked = false
+        State.warpPhase = nil
+        State.duelPending = nil
+        State.duelOrigin = nil
+        log("WARNING: waiting_door timeout — cancelled")
+      end
+      -- Continue normal game loop (player needs to walk to a door)
+      -- Don't return — let the rest of the frame execute normally
+
+    -- Phase "loading": CB2_LoadMap is running, wait for completion
+    elseif State.warpPhase == "loading" then
+      -- Check if map load finished (callback2 returned to CB2_Overworld)
+      if HAL.isWarpComplete() then
+        log("Warp complete! callback2 returned to Overworld")
+        -- Re-scan sWarpData for future warps (new map has fresh data)
+        HAL.findSWarpData()
+
+        -- If this is a duel warp and battle is configured, proceed to party exchange
+        if State.duelPending and Battle.isConfigured() then
+          -- Send our party data to opponent
+          local localParty = Battle.readLocalParty()
+          if localParty then
+            Network.send({ type = "duel_party", data = localParty })
+            log("Sent local party data")
+          end
+
+          -- Transition to waiting for opponent's party
+          State.warpPhase = "waiting_party"
+          State.unlockFrame = State.frameCounter + 600  -- 10 second timeout
+          State.inputsLocked = true  -- Keep inputs locked
+
+          -- If we already have opponent's party (they sent first), start battle immediately
+          if State.opponentParty then
+            local injected = Battle.injectEnemyParty(State.opponentParty)
+            if injected then
+              local started = Battle.startBattle(State.duelPending.isMaster, State.duelOrigin)
+              if started then
+                State.warpPhase = "in_battle"
+                State.sentChoice = false
+                log("PvP battle started (had party already)!")
+              end
+            end
+          end
+        else
+          -- No battle config or not a duel, just complete normally
+          State.inputsLocked = false
+          State.warpPhase = nil
+          State.duelPending = nil
+        end
+      elseif State.frameCounter >= State.unlockFrame then
+        -- Safety timeout — force unlock to prevent permanent freeze
+        State.inputsLocked = false
+        State.warpPhase = nil
+        State.duelPending = nil
+        State.duelOrigin = nil
+        log("WARNING: Warp timeout — force unlocked")
+      else
+        -- Diagnostic: log callback2 every 30 frames to track progress
+        if State.frameCounter % 30 == 0 then
+          local cb2 = HAL.readCallback2()
+          if cb2 then
+            log(string.format("Warp loading: callback2=0x%08X (waiting for 0x%08X)",
+              cb2, 0x080A89A5))
+          end
+        end
+      end
+
+      -- NO overlay drawing during map load
+      if State.connected then Network.flush() end
+      return
+
+    -- Phase "waiting_party": waiting for opponent's party data
+    elseif State.warpPhase == "waiting_party" then
+      -- Timeout check
+      if State.frameCounter >= State.unlockFrame then
+        log("WARNING: waiting_party timeout — aborting duel")
+        State.inputsLocked = false
+        State.warpPhase = nil
+        State.duelPending = nil
+        State.opponentParty = nil
+        -- TODO: could trigger return to origin here
+      end
+      -- Network messages are processed above; duel_party handler will transition to in_battle
+
+    -- Phase "in_battle": PvP battle in progress
+    elseif State.warpPhase == "in_battle" then
+      -- Tick the battle module
+      Battle.tick()
+
+      -- Capture our choice when we make it
+      if Battle.hasPlayerChosen() and not State.sentChoice then
+        local choice = Battle.captureLocalChoice()
+        if choice then
+          local rng = nil
+          if State.duelPending and State.duelPending.isMaster then
+            rng = Battle.readRng()
+          end
+          Network.send({
+            type = "duel_choice",
+            choice = choice,
+            rng = rng
+          })
+          State.sentChoice = true
+          log(string.format("Sent local choice: %s", choice.action))
+        end
+      end
+
+      -- Reset sent flag when new turn starts (based on turn count)
+      -- This is simplified; proper detection would track turn transitions
+      if not Battle.hasPlayerChosen() and State.sentChoice then
+        State.sentChoice = false
+      end
+
+      -- Timeout for remote choice (30 seconds)
+      if Battle.isWaitingForRemote() then
+        if not State.remoteChoiceTimeout then
+          State.remoteChoiceTimeout = State.frameCounter
+        end
+        if State.frameCounter - State.remoteChoiceTimeout > 1800 then
+          log("Remote choice timeout — using default action")
+          Battle.setRemoteChoice({ action = "move", slot = 0, target = 0 })
+          State.remoteChoiceTimeout = nil
+        end
+      else
+        State.remoteChoiceTimeout = nil
+      end
+
+      -- Check if battle finished
+      if Battle.isFinished() then
+        local outcome = Battle.getOutcome()
+        Network.send({ type = "duel_end", outcome = outcome })
+        log(string.format("Battle finished: %s", outcome or "unknown"))
+
+        -- Trigger return to origin
+        State.warpPhase = "returning"
+        Battle.reset()
+      end
+
+    -- Phase "returning": returning to origin after battle
+    elseif State.warpPhase == "returning" then
+      if State.duelOrigin and HAL.hasGoldenState() then
+        -- Use save state hijack to return
+        local savedData = HAL.saveGameData()
+        if savedData then
+          local loaded = HAL.loadGoldenState()
+          if loaded then
+            HAL.restoreGameData(savedData)
+            HAL.writeWarpData(
+              State.duelOrigin.mapGroup,
+              State.duelOrigin.mapId,
+              State.duelOrigin.x,
+              State.duelOrigin.y
+            )
+            log(string.format("Returning to origin: %d:%d (%d,%d)",
+              State.duelOrigin.mapGroup, State.duelOrigin.mapId,
+              State.duelOrigin.x, State.duelOrigin.y))
+
+            State.warpPhase = "loading_return"
+            State.unlockFrame = State.frameCounter + 300
+          else
+            log("ERROR: Failed to load golden state for return")
+            State.warpPhase = nil
+            State.inputsLocked = false
+          end
+        else
+          log("ERROR: Failed to save game data for return")
+          State.warpPhase = nil
+          State.inputsLocked = false
+        end
+      else
+        log("WARNING: No origin or golden state for return")
+        State.warpPhase = nil
+        State.inputsLocked = false
+        State.duelPending = nil
+        State.duelOrigin = nil
+      end
+
+    -- Phase "loading_return": loading map after return warp
+    elseif State.warpPhase == "loading_return" then
+      if HAL.isWarpComplete() then
+        -- Cleanup
+        State.warpPhase = nil
+        State.duelPending = nil
+        State.duelOrigin = nil
+        State.opponentParty = nil
+        State.inputsLocked = false
+        State.sentChoice = false
+        State.remoteChoiceTimeout = nil
+        Occlusion.clearCache()
+        HAL.findSWarpData()
+        log("Returned to origin after duel!")
+      elseif State.frameCounter >= State.unlockFrame then
+        -- Timeout
+        State.warpPhase = nil
+        State.duelPending = nil
+        State.duelOrigin = nil
+        State.opponentParty = nil
+        State.inputsLocked = false
+        log("WARNING: Return warp timeout — force unlocked")
+      end
+
+      if State.connected then Network.flush() end
+      return
+
+    -- Legacy fallback (non-warp input lock)
+    else
+      if State.frameCounter >= State.unlockFrame then
+        State.inputsLocked = false
+        State.warpPhase = nil
+        log("Inputs unlocked")
+      end
+      if State.connected then Network.flush() end
+      return
+    end
+  end
+
   -- Detect disconnection (before receive to avoid processing on dead socket)
   if State.connected and not Network.isConnected() then
     State.connected = false
+    Duel.reset()
+    Battle.reset()
+    -- Cancel pending duel on disconnect (any phase)
+    if State.duelPending then
+      State.duelPending = nil
+      State.duelOrigin = nil
+      State.opponentParty = nil
+      State.inputsLocked = false
+      State.warpPhase = nil
+      log("Duel pending cancelled (disconnected)")
+    end
     log("Connection lost — will attempt reconnection")
   end
 
@@ -478,6 +804,163 @@ local function update()
       elseif message.type == "joined" then
         log("Joined room: " .. message.roomId)
 
+      elseif message.type == "duel_request" then
+        -- Incoming duel request from another player
+        Duel.handleRequest(message.requesterId, message.requesterName, State.frameCounter)
+        log("Duel request from: " .. (message.requesterName or message.requesterId))
+
+      elseif message.type == "duel_warp" then
+        -- Server says warp to duel room
+        if not message.coords then
+          log("ERROR: duel_warp missing coords")
+        else
+          local coords = message.coords
+          local isMaster = message.isMaster or false
+          log(string.format("Duel warp received: %d:%d (%d,%d) master=%s",
+            coords.mapGroup, coords.mapId, coords.x, coords.y, tostring(isMaster)))
+          Duel.reset()
+
+          -- Save origin position for return after battle
+          local currentPos = readPlayerPosition()
+          if currentPos then
+            State.duelOrigin = {
+              x = currentPos.x,
+              y = currentPos.y,
+              mapGroup = currentPos.mapGroup,
+              mapId = currentPos.mapId
+            }
+          end
+
+          State.duelPending = {
+            mapGroup = coords.mapGroup,
+            mapId = coords.mapId,
+            x = coords.x,
+            y = coords.y,
+            isMaster = isMaster
+          }
+
+          if HAL.hasGoldenState() then
+            -- === MODE PRINCIPAL: Save State Hijack ===
+            log("Using save state hijack mode")
+
+            -- 1. Save current game data (team, inventory, flags, etc.)
+            local savedData = HAL.saveGameData()
+            if not savedData then
+              log("ERROR: Failed to save game data — aborting warp")
+              State.duelPending = nil
+              State.duelOrigin = nil
+            else
+              -- 2. Load golden state (clean mid-warp emulator state)
+              local loaded = HAL.loadGoldenState()
+              if not loaded then
+                log("ERROR: Failed to load golden state — aborting warp")
+                State.duelPending = nil
+                State.duelOrigin = nil
+              else
+                -- 3. Restore game data into the golden state's WRAM
+                HAL.restoreGameData(savedData)
+
+                -- 4. Write duel destination over SaveBlock1 location
+                HAL.writeWarpData(coords.mapGroup, coords.mapId, coords.x, coords.y)
+
+                -- 5. Activate loading state machine
+                State.inputsLocked = true
+                State.warpPhase = "loading"
+                State.unlockFrame = State.frameCounter + 300
+
+                log("Save state hijack complete — CB2_LoadMap will execute next frame")
+              end
+            end
+          else
+            -- === MODE FALLBACK: Door Interception ===
+            log("No golden state — using door fallback mode")
+            log("Enter any door to start the duel!")
+
+            State.inputsLocked = true
+            State.warpPhase = "waiting_door"
+            State.unlockFrame = State.frameCounter + 1800  -- 30 seconds to find a door
+          end
+
+          -- Reset early detection + occlusion cache
+          State.earlyDetect.inputDir = nil
+          State.earlyDetect.predictedPos = nil
+          Occlusion.clearCache()
+        end
+
+      elseif message.type == "duel_cancelled" then
+        -- Requester disconnected, clear our prompt and pending duel
+        Duel.reset()
+        if State.duelPending then
+          State.duelPending = nil
+          State.inputsLocked = false
+          State.warpPhase = nil
+        end
+        log("Duel cancelled (requester disconnected)")
+
+      elseif message.type == "duel_declined" then
+        log("Duel was declined")
+
+      elseif message.type == "duel_party" then
+        -- Received opponent's party data for PvP battle
+        State.opponentParty = message.data
+        log(string.format("Received opponent party data (%d bytes)", #message.data))
+
+        -- If we were waiting for party data to start battle, proceed
+        if State.warpPhase == "waiting_party" and State.duelPending and Battle.isConfigured() then
+          -- Inject opponent's party
+          local injected = Battle.injectEnemyParty(State.opponentParty)
+          if injected then
+            -- Start the battle
+            local started = Battle.startBattle(State.duelPending.isMaster, State.duelOrigin)
+            if started then
+              State.warpPhase = "in_battle"
+              State.sentChoice = false
+              log("PvP battle started!")
+            else
+              log("ERROR: Failed to start battle")
+              State.warpPhase = nil
+              State.duelPending = nil
+            end
+          else
+            log("ERROR: Failed to inject opponent party")
+          end
+        end
+
+      elseif message.type == "duel_choice" then
+        -- Received opponent's battle choice
+        if Battle.isActive() then
+          Battle.setRemoteChoice(message.choice)
+          if message.rng and not State.duelPending.isMaster then
+            Battle.onRngSync(message.rng)
+          end
+          log(string.format("Received remote choice: %s", message.choice.action))
+        end
+
+      elseif message.type == "duel_rng_sync" then
+        -- Received RNG sync from master
+        if Battle.isActive() then
+          Battle.onRngSync(message.rng)
+        end
+
+      elseif message.type == "duel_end" then
+        -- Opponent's battle ended
+        log(string.format("Opponent battle ended: %s", message.outcome or "unknown"))
+
+      elseif message.type == "duel_opponent_disconnected" then
+        -- Opponent disconnected during battle
+        log("Opponent disconnected during battle — returning to origin")
+        if Battle.isActive() then
+          Battle.reset()
+        end
+        -- Trigger return to origin
+        if State.duelOrigin then
+          State.warpPhase = "returning"
+        else
+          State.warpPhase = nil
+          State.duelPending = nil
+          State.inputsLocked = false
+        end
+
       elseif message.type == "ping" then
         -- Respond to heartbeat
         Network.send({ type = "pong" })
@@ -497,6 +980,34 @@ local function update()
 
   -- Capture local player sprite from VRAM (only rebuilds image when sprite changes)
   Sprite.captureLocalPlayer()
+
+  -- Duel module tick (expire timeouts)
+  Duel.tick(State.frameCounter)
+
+  -- Read A/B buttons for duel interaction
+  local keyA, keyB = HAL.readButtons()
+
+  -- Check for duel response (accept/decline) if prompt is showing
+  if Duel.hasPrompt() then
+    local response, reqId = Duel.checkResponse(keyA, keyB)
+    if response == "accept" and reqId and State.connected then
+      Network.send({ type = "duel_accept", requesterId = reqId })
+      log("Accepted duel from: " .. reqId)
+    elseif response == "decline" and reqId and State.connected then
+      Network.send({ type = "duel_decline", requesterId = reqId })
+      log("Declined duel from: " .. reqId)
+    end
+  else
+    -- Check for duel trigger (A near ghost) — only when no prompt is showing
+    if currentPos and State.connected then
+      local targetId = Duel.checkTrigger(currentPos, State.otherPlayers, keyA, State.frameCounter)
+      if targetId then
+        Network.send({ type = "duel_request", targetId = targetId })
+        Duel.onRequestSent(targetId, State.frameCounter)
+        log("Duel request sent to: " .. targetId)
+      end
+    end
+  end
 
   -- Send sprite update if sprite changed
   if Sprite.hasChanged() and State.connected then
@@ -525,6 +1036,9 @@ local function update()
         State.lastSentPosition = currentPos
         State.sendCooldown = SEND_RATE_MOVING
         Occlusion.clearCache()
+        Duel.reset()
+        -- Scan for sWarpData after natural map change (calibrates warp system)
+        HAL.findSWarpData()
         -- Reset early detection on map change
         State.earlyDetect.inputDir = nil
         State.earlyDetect.predictedPos = nil
@@ -694,6 +1208,9 @@ callbacks:add("shutdown", function()
   for _, playerId in ipairs(Interpolate.getPlayers()) do
     Interpolate.remove(playerId)
   end
+
+  -- Clean up battle state
+  Battle.reset()
 
   log("Disconnecting from server...")
   Network.disconnect()

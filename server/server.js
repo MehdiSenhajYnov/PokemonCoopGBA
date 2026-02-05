@@ -13,9 +13,23 @@ const net = require('net');
 const PORT = process.env.PORT || 8080;
 const HEARTBEAT_INTERVAL = 30000; // 30s
 
+// Duel room coordinates — TEST: Pokemon Center (map 2:2)
+// TODO: find correct Battle Colosseum map in Run & Bun
+const DUEL_ROOM = {
+  mapGroup: 2,
+  mapId: 2,
+  playerAX: 5,
+  playerAY: 4,
+  playerBX: 8,
+  playerBY: 4
+};
+
 // Client storage
 const clients = new Map();
 const rooms = new Map();
+
+// Active duels tracking (for battle synchronization)
+const activeDuels = new Map();  // duelId -> {playerA, playerB, state}
 
 /**
  * Client object structure
@@ -124,6 +138,32 @@ function handleMessage(client, messageStr) {
           type: 'joined',
           roomId: roomId
         });
+
+        // Send existing players' last known positions and sprites to the new client
+        const room = rooms.get(roomId);
+        if (room) {
+          room.forEach(existingId => {
+            if (existingId !== client.id) {
+              const existing = clients.get(existingId);
+              if (existing) {
+                if (existing.lastPosition) {
+                  sendToClient(client, {
+                    type: 'position',
+                    playerId: existingId,
+                    data: existing.lastPosition
+                  });
+                }
+                if (existing.lastSprite) {
+                  sendToClient(client, {
+                    type: 'sprite_update',
+                    playerId: existingId,
+                    data: existing.lastSprite
+                  });
+                }
+              }
+            }
+          });
+        }
         break;
 
       case 'position':
@@ -160,30 +200,162 @@ function handleMessage(client, messageStr) {
         break;
 
       case 'duel_request':
-        // Duel warp request
+        // Duel warp request — forward to target player only
         if (!client.roomId) return;
 
-        broadcastToRoom(client.roomId, client.id, {
-          type: 'duel_request',
-          playerId: client.id,
-          targetId: message.targetId
-        });
+        const targetClient = clients.get(message.targetId);
+        if (targetClient && targetClient.roomId === client.roomId) {
+          // Store pending duel on the requester
+          client.pendingDuel = { targetId: message.targetId };
 
-        console.log(`[Duel] Request from ${client.id} to ${message.targetId}`);
+          sendToClient(targetClient, {
+            type: 'duel_request',
+            requesterId: client.id,
+            requesterName: client.id
+          });
+
+          console.log(`[Duel] Request from ${client.id} to ${message.targetId}`);
+        }
         break;
 
-      case 'duel_accept':
-        // Duel warp accepted
+      case 'duel_accept': {
+        // Duel warp accepted — coordinate teleportation for both players
         if (!client.roomId) return;
 
-        broadcastToRoom(client.roomId, client.id, {
-          type: 'duel_accept',
-          playerId: client.id,
-          requesterId: message.requesterId
+        const requester = clients.get(message.requesterId);
+        if (!requester || !requester.pendingDuel) {
+          break;
+        }
+
+        // Verify the duel matches (requester targeted this accepter) and same room
+        if (requester.pendingDuel.targetId !== client.id
+          || requester.roomId !== client.roomId) {
+          break;
+        }
+
+        // Clear pending duel
+        requester.pendingDuel = null;
+
+        // Set up duel opponent relationship (for party/choice relay)
+        requester.duelOpponent = client.id;
+        client.duelOpponent = requester.id;
+
+        // Send warp command to both players with different spawn positions
+        // Requester is player A (master), accepter is player B (slave)
+        sendToClient(requester, {
+          type: 'duel_warp',
+          coords: {
+            mapGroup: DUEL_ROOM.mapGroup,
+            mapId: DUEL_ROOM.mapId,
+            x: DUEL_ROOM.playerAX,
+            y: DUEL_ROOM.playerAY
+          },
+          isMaster: true
         });
 
-        console.log(`[Duel] ${client.id} accepted duel from ${message.requesterId}`);
+        sendToClient(client, {
+          type: 'duel_warp',
+          coords: {
+            mapGroup: DUEL_ROOM.mapGroup,
+            mapId: DUEL_ROOM.mapId,
+            x: DUEL_ROOM.playerBX,
+            y: DUEL_ROOM.playerBY
+          },
+          isMaster: false
+        });
+
+        console.log(`[Duel] Warping ${requester.id} (master) and ${client.id} (slave) to Battle Colosseum`);
         break;
+      }
+
+      case 'duel_decline': {
+        // Duel declined — notify requester
+        if (!client.roomId) return;
+
+        const declinedRequester = clients.get(message.requesterId);
+        if (declinedRequester) {
+          declinedRequester.pendingDuel = null;
+          sendToClient(declinedRequester, {
+            type: 'duel_declined',
+            playerId: client.id
+          });
+        }
+
+        console.log(`[Duel] ${client.id} declined duel from ${message.requesterId}`);
+        break;
+      }
+
+      case 'duel_party': {
+        // Player sends their party data for PvP battle
+        if (!client.roomId) return;
+
+        // Store party data on client
+        client.duelParty = message.data;
+
+        // Relay to duel opponent
+        if (client.duelOpponent) {
+          const opponent = clients.get(client.duelOpponent);
+          if (opponent) {
+            sendToClient(opponent, {
+              type: 'duel_party',
+              playerId: client.id,
+              data: message.data
+            });
+            console.log(`[Duel] Party data relayed from ${client.id} to ${client.duelOpponent}`);
+          }
+        }
+        break;
+      }
+
+      case 'duel_choice': {
+        // Player sends their battle choice (move/switch)
+        if (!client.roomId || !client.duelOpponent) return;
+
+        const opponent = clients.get(client.duelOpponent);
+        if (opponent) {
+          sendToClient(opponent, {
+            type: 'duel_choice',
+            playerId: client.id,
+            choice: message.choice,
+            rng: message.rng
+          });
+        }
+        break;
+      }
+
+      case 'duel_rng_sync': {
+        // Master sends RNG sync to slave
+        if (!client.roomId || !client.duelOpponent) return;
+
+        const opponent = clients.get(client.duelOpponent);
+        if (opponent) {
+          sendToClient(opponent, {
+            type: 'duel_rng_sync',
+            rng: message.rng
+          });
+        }
+        break;
+      }
+
+      case 'duel_end': {
+        // Battle finished, cleanup duel state
+        if (client.duelOpponent) {
+          const opponent = clients.get(client.duelOpponent);
+          if (opponent) {
+            sendToClient(opponent, {
+              type: 'duel_end',
+              playerId: client.id,
+              outcome: message.outcome
+            });
+            opponent.duelOpponent = null;
+            opponent.duelParty = null;
+          }
+        }
+        client.duelOpponent = null;
+        client.duelParty = null;
+        console.log(`[Duel] Battle ended for ${client.id}, outcome: ${message.outcome}`);
+        break;
+      }
 
       case 'ping':
         // Client-initiated ping
@@ -219,6 +391,35 @@ function handleDisconnect(client) {
   if (client.id) {
     // Guard against double-disconnect (end + close both fire)
     if (!clients.has(client.id)) return;
+
+    // Clean up pending duel where this client was the requester
+    if (client.pendingDuel) {
+      const target = clients.get(client.pendingDuel.targetId);
+      if (target) {
+        sendToClient(target, { type: 'duel_cancelled', requesterId: client.id });
+      }
+      client.pendingDuel = null;
+    }
+
+    // Clean up active duel (opponent needs to be notified)
+    if (client.duelOpponent) {
+      const opponent = clients.get(client.duelOpponent);
+      if (opponent) {
+        sendToClient(opponent, { type: 'duel_opponent_disconnected', playerId: client.id });
+        opponent.duelOpponent = null;
+        opponent.duelParty = null;
+      }
+      client.duelOpponent = null;
+      client.duelParty = null;
+    }
+
+    // Clean up pending duels targeting this client (other players requested us)
+    clients.forEach((otherClient) => {
+      if (otherClient.pendingDuel && otherClient.pendingDuel.targetId === client.id) {
+        sendToClient(otherClient, { type: 'duel_declined', playerId: client.id });
+        otherClient.pendingDuel = null;
+      }
+    });
 
     // Broadcast disconnection to room BEFORE removing from room
     if (client.roomId) {
@@ -317,20 +518,44 @@ const heartbeatInterval = setInterval(() => {
 }, HEARTBEAT_INTERVAL);
 
 /**
- * Server shutdown handler
+ * Graceful shutdown
  */
-process.on('SIGINT', () => {
+let shuttingDown = false;
+
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
   console.log('\n[Shutdown] Closing server...');
   clearInterval(heartbeatInterval);
 
   clients.forEach((client) => {
-    client.socket.end();
+    client.socket.destroy();
   });
 
   server.close(() => {
     console.log('[Shutdown] Server closed');
     process.exit(0);
   });
+
+  // Force exit if server.close() hangs (e.g. stuck connections)
+  setTimeout(() => {
+    console.log('[Shutdown] Forced exit');
+    process.exit(0);
+  }, 2000);
+}
+
+// Ctrl+C
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+// stdin: type "q" or "quit" to stop
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (data) => {
+  const input = data.trim().toLowerCase();
+  if (input === 'q' || input === 'quit' || input === 'exit') {
+    shutdown();
+  }
 });
 
 /**
@@ -343,7 +568,8 @@ server.listen(PORT, () => {
   console.log(`[Server] Listening on port ${PORT}`);
   console.log(`[Server] Protocol: TCP with JSON line-delimited messages`);
   console.log(`[Server] Connect to: ${PORT}`);
-  console.log('[Server] Ready to accept connections\n');
+  console.log('[Server] Ready to accept connections');
+  console.log('[Server] Type "q" or "quit" to stop — Ctrl+C also works\n');
 });
 
 /**

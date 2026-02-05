@@ -26,6 +26,49 @@ return {
     cameraY = 0x03005DF8,     -- s16, IWRAM (gSpriteCoordOffsetY)
   },
 
+  -- Warp system addresses (found via scan_warp_addresses.lua on 2026-02-03)
+  warp = {
+    callback2Addr = 0x0202064C,  -- gMain.callback2 (EWRAM, offset +4 in gMain)
+    cb2LoadMap    = 0x08007441,  -- CB2_LoadMap ROM function pointer
+    cb2Overworld  = 0x080A89A5,  -- CB2_Overworld ROM function pointer (for completion detect)
+  },
+
+  -- Duel room coordinates (MAP_BATTLE_COLOSSEUM_2P — same as vanilla Emerald)
+  duelRoom = {
+    mapGroup = 28,
+    mapId = 24,
+    playerAX = 3,
+    playerAY = 5,
+    playerBX = 10,
+    playerBY = 5
+  },
+
+  -- Battle system addresses (for PvP combat)
+  -- Scanned using scripts/scan_battle_addresses.lua on 2026-02-05
+  battle = {
+    -- Party data (600 bytes each = 6 Pokemon x 100 bytes)
+    gPlayerParty = 0x020233D0,      -- FOUND (via HP at +0x56)
+    gEnemyParty = 0x02023458,       -- FOUND (via species scan)
+
+    -- Battle state
+    gBattleTypeFlags = 0x020090E8,  -- FOUND
+    gTrainerBattleOpponent_A = nil, -- TODO: scan
+    gBattleControllerExecFlags = 0x020239FC, -- FOUND
+    gBattleBufferB = 0x02022748,    -- FOUND (via delta prediction from gPlayerParty)
+    gBattleOutcome = nil,           -- Not found - using gMainInBattle as fallback
+
+    -- gMain struct fields
+    gMainInBattle = 0x020233E0,     -- FOUND (inBattle flag)
+
+    -- RNG (IWRAM)
+    gRngValue = 0x03005D90,         -- FOUND (changes every frame)
+
+    -- ROM function pointers (for triggering battles)
+    CB2_InitBattle = nil,           -- TODO: scan via watchpoint
+    CB2_ReturnToField = nil,        -- TODO: scan via watchpoint
+    CB2_WhiteOut = nil,             -- TODO: scan via watchpoint
+  },
+
   facing = {
     NONE = 0,
     DOWN = 1,

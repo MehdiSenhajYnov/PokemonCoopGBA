@@ -352,30 +352,79 @@ Tasks/
 
 ## Phase 3 - Duel Warp ⚔️
 
-### todo/P3_09_DUEL_WARP.md
-**Status:** 🔴 À faire
+### done/features/P3_09_DUEL_WARP.md
+**Status:** 🟢 Terminé (2026-02-03)
 **Tâches groupées:** #11 + #12
 **Description:** Téléportation synchronisée vers salle de combat
 
-**Contenu:**
-- Partie 1: Module `duel.lua` (détection proximité, trigger bouton A, UI prompt)
-- Partie 2: Téléportation (HAL.writePlayerPosition, coordination serveur)
-- Partie 3: Coordonnées Duel Room (recherche Battle Frontier)
+**Résultat:**
+- `client/duel.lua` créé (trigger proximité, request/accept/decline, UI Painter overlay)
+- `server/server.js` modifié (duel_request unicast, duel_accept coordination, duel_warp envoi, duel_decline/cancelled, disconnect cleanup)
+- `client/main.lua` modifié (Duel integration, message handling, input lock 180 frames, HAL.readButtons)
+- `client/hal.lua` modifié (+readButtons pour A/B via KEYINPUT register)
+- Configs modifiées (duelRoom: mapGroup=28, mapId=24 — MAP_BATTLE_COLOSSEUM_2P)
 
-**Workflow:**
-1. Joueur A près de ghost B
-2. A appuie sur bouton A
-3. Serveur broadcast duel_request
-4. B voit prompt "Duel [PlayerA]?"
-5. B accepte (bouton A)
-6. Serveur envoie duel_warp aux deux
-7. Téléportation simultanée
-8. Lock inputs 3 secondes
-9. Unlock devant NPC Colisée
+**Fichiers créés/modifiés:**
+- ✅ Créé: `client/duel.lua`
+- ✅ Modifié: `server/server.js`, `client/main.lua`, `client/hal.lua`, `config/emerald_us.lua`, `config/run_and_bun.lua`
+
+---
+
+### done/fixes/P3_09A_WARP_MECHANISM_FIX.md
+**Status:** 🟢 Terminé (2026-02-04)
+**Priorité:** ⭐ P0 - CRITIQUE (résolu)
+**Description:** Le warp RAM freezait le jeu — corrigé via save state hijack + door fallback
+
+**Solution:**
+- WRITE_CHANGE watchpoint sur gMain.callback2 détecte les warps naturels (portes)
+- Premier warp naturel: capture "golden state" (état propre mid-warp via emu:saveStateBuffer)
+- Duel warp: save 16KB SaveBlock1 → load golden state → restore SaveBlock1 → write destination
+- Door fallback: si pas de golden state, intercepte le prochain warp naturel et redirige
+- Flag-based watchpoint (pas de memory access dans le callback — évite crash mGBA)
+
+**Fichiers modifiés:**
+- ✅ `client/hal.lua` (setupWarpWatchpoint, checkWarpWatchpoint, captureGoldenState, loadGoldenState, saveGameData, restoreGameData)
+- ✅ `client/main.lua` (watchpoint processing, save state hijack, door fallback, waiting_door overlay)
+
+---
+
+### todo/P3_10A_SCAN_BATTLE_ADDRESSES.md
+**Status:** 🔴 A faire
+**Priorite:** ⭐ P0 - CRITIQUE (prerequis pour P3_10B)
+**Description:** Creer scripts pour scanner les adresses memoire manquantes (CB2_InitBattle, gBattleOutcome, gTrainerBattleOpponent_A) + corriger gMainInBattle (0x020233E0 est FAUX → 0x0202067F)
 
 **Fichiers:**
-- ✨ Créer: `client/duel.lua`
-- 📝 Modifier: `server/server.js`, `client/main.lua`, `config/emerald_us.lua` (duelRoom coords)
+- ✨ Creer: `scripts/scanners/verify_gmain.lua`, `scripts/scanners/scan_battle_callbacks.lua`
+- 📝 Modifier: `scripts/scanners/scan_battle_outcome.lua`, `scripts/scanners/scan_battle_remaining.lua`, `scripts/scanners/scan_battle_addresses.lua`, `config/run_and_bun.lua`
+
+---
+
+### todo/P3_10B_FIX_DUEL_PVP_SYSTEM.md
+**Status:** 🔴 A faire
+**Priorite:** ⭐ P0 - CRITIQUE (depend de P3_10A)
+**Description:** Fix complet des 5 bugs qui empechent le duel PvP de fonctionner: coords serveur, door fallback, trigger combat, fin instantanee, outcome unknown
+
+**Fichiers:**
+- 📝 Modifier: `server/server.js`, `config/run_and_bun.lua`, `client/hal.lua`, `client/battle.lua`, `client/main.lua`
+
+---
+
+### todo/P3_10_DUEL_BATTLE_AND_RETURN.md
+**Status:** 🔴 A faire
+**Priorite:** ⭐ Haute
+**Description:** Declenchement de combat en salle de duel + retour a la position d'origine apres combat
+
+**Contenu:**
+- Corriger les coords du serveur (actuellement Pokemon Center test)
+- Sauvegarder position d'origine avant warp
+- Trouver la bonne destination de duel (NPC trainer ou trigger RAM)
+- Detecter fin de combat via gMain.inBattle
+- Retour a l'origine via save state hijack inverse
+- Coordination serveur + edge cases (disconnect, defaite, timeout)
+
+**Fichiers:**
+- 📝 Modifier: `server/server.js`, `client/main.lua`, `client/hal.lua`, `client/duel.lua`
+- ✨ Creer (optionnel): `scripts/scan_battle_state.lua`
 
 ---
 
@@ -429,11 +478,11 @@ Tasks/
 Phase 0 - Memory Discovery    [██████████] 100% ✅ COMPLETE
 Phase 1 - Foundation          [██████████] 100% ✅ COMPLETE
 Phase 2 - Ghosting            [██████████] 100% ✅ COMPLETE (render + interp + camera + smooth + network + sprites + BG occlusion)
-Phase 3 - Duel Warp           [░░░░░░░░░░]  0%
+Phase 3 - Duel Warp           [██████████] 100% ✅ COMPLETE (UI/server + warp mechanism fix)
 Phase 4 - Multi-ROM           [░░░░░░░░░░]  0%
 Phase 5 - Documentation       [░░░░░░░░░░]  0%
 
-Global                        [███░░░░░░░] 33%
+Global                        [█████░░░░░] 50%
 ```
 
 ---
@@ -460,7 +509,11 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 7b. ~~**P2_07B_INTERPOLATION_SMOOTHNESS.md**~~ ✅ TERMINÉ (5 fixes: frame loop reorder + os.clock + dt priority + padding + soft catch-up)
 8. **todo/P2_07_OPTIMIZATION.md**
 9. **todo/P2_08_FINAL_TESTING.md**
-10. **todo/P3_09_DUEL_WARP.md**
+10. ~~**P3_09_DUEL_WARP.md**~~ ✅ TERMINÉ (duel trigger + server coordination + input lock + UI + disconnect handling)
+10a. ~~**P3_09A_WARP_MECHANISM_FIX.md**~~ ✅ TERMINÉ (save state hijack + door fallback)
+10b. **todo/P3_10A_SCAN_BATTLE_ADDRESSES.md** ⭐ P0 (scanner adresses manquantes + fix gMainInBattle)
+10c. **todo/P3_10B_FIX_DUEL_PVP_SYSTEM.md** ⭐ P0 (fix 5 bugs duel PvP — depend de 10b)
+10d. **todo/P3_10_DUEL_BATTLE_AND_RETURN.md** (combat duel + retour origine — superseded par 10b+10c)
 11. **todo/P4_10_MULTI_ROM.md** (Radical Red, Unbound)
 12. **todo/P5_11_DOCUMENTATION.md**
 
@@ -496,6 +549,6 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 
 ---
 
-**Dernière mise à jour:** 2026-02-03
-**Version projet:** 0.3.0-alpha
-**Phase actuelle:** Phase 0+1+2 Complete ✅ | Phase 3 (Duel Warp) Next
+**Dernière mise à jour:** 2026-02-04
+**Version projet:** 0.5.0-alpha
+**Phase actuelle:** Phase 0+1+2+3 Complete ✅ | Next: Phase 4 (Multi-ROM) or Phase 5 (Documentation)

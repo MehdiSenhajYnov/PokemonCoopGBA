@@ -105,13 +105,26 @@ Le joueur GBA est toujours centré à l'écran (120, 80). Le ghost est positionn
 - Label joueur au-dessus du ghost
 
 ### C. Duel Warp (Feature Signature)
-**Trigger:** Bouton A près du ghost ou interface souris
+**Trigger:** Bouton A près du ghost (< 2 tiles, edge-detect)
 
 **Workflow:**
-1. Acceptation des deux joueurs
-2. Écriture RAM simultanée (MapID + Coords)
-3. Placement devant PNJ Colisée
-4. Verrouillage inputs pendant warp
+1. Joueur A appuie sur A près d'un ghost → `duel_request` au serveur
+2. Serveur forward au joueur cible uniquement → prompt affiché
+3. Joueur B accepte (A) ou refuse (B)
+4. Si accepté → serveur envoie `duel_warp` aux deux joueurs avec coords différentes
+5. Warp via save state hijack (mode principal) ou door interception (fallback)
+6. Verrouillage inputs pendant le chargement (5 secondes timeout)
+7. Placement dans MAP_BATTLE_COLOSSEUM_2P (mapGroup=28, mapId=24)
+   - Player A: (3, 5) | Player B: (10, 5)
+
+**Warp Mechanism (save state hijack):**
+- WRITE_CHANGE watchpoint on gMain.callback2 detects natural warps (door transitions)
+- First natural warp: capture "golden state" (clean mid-warp emulator state via `emu:saveStateBuffer()`)
+- Duel warp: save 16KB SaveBlock1 → load golden state → restore SaveBlock1 → write duel destination
+- CB2_LoadMap executes in clean state → no freeze
+- Door fallback: if no golden state yet, intercept next door warp and redirect to duel room
+
+**Disconnect safety:** pendingDuel nettoyé au disconnect, `duel_cancelled` envoyé si nécessaire
 
 ## 5. STRUCTURE DU PROJET
 
@@ -130,6 +143,8 @@ PokemonCoop/
 │   ├── sprite.lua           # VRAM sprite extraction (OAM scan, tile decode, palette, cache, network sync)
 │   ├── occlusion.lua        # BG layer occlusion (reads BG1 tilemap, redraws cover tiles over ghosts via Painter)
 │   ├── interpolate.lua      # Smooth ghost movement (FIFO waypoint queue + adaptive catch-up)
+│   ├── duel.lua             # Duel warp system (trigger, request/accept UI, proximity detection)
+│   ├── battle.lua           # PvP battle system (party injection, AI interception, RNG sync)
 │   ├── core.lua             # Core Engine
 │   └── README.md
 ├── config/                   # Profils ROM
@@ -141,6 +156,7 @@ PokemonCoop/
 │   ├── README.md            # Guide d'utilisation
 │   ├── scan_vanilla_offsets.lua
 │   ├── scan_wram.lua
+│   ├── scan_battle_addresses.lua  # Scanner for battle system addresses
 │   ├── find_saveblock_pointers.lua
 │   └── validate_offsets.lua
 └── docs/                     # Documentation
@@ -186,11 +202,29 @@ PokemonCoop/
 - [x] Waypoint queue interpolation (FIFO queue + adaptive catch-up `BASE_DURATION / queueLength`, exact path fidelity at any speedhack rate)
 - [x] Interpolation smoothness (receive-before-step reorder, os.clock realDt, timestamp>hint priority, 1.08x padding, soft catch-up curve)
 
-### Phase 3: Duel Warp
-- [ ] Système de trigger
-- [ ] Synchronisation téléportation
-- [ ] Verrouillage inputs
-- [ ] Interface utilisateur
+### Phase 3: Duel Warp (DONE)
+- [x] Système de trigger (duel.lua — proximity detection + A button edge detect)
+- [x] Synchronisation téléportation (server coordinates both players → duel_warp)
+- [x] Verrouillage inputs (180 frames lock after warp)
+- [x] Interface utilisateur (Painter API overlay — request prompt + accept/decline)
+- [x] Duel room: MAP_BATTLE_COLOSSEUM_2P (mapGroup=28, mapId=24)
+- [x] Disconnect handling (pendingDuel cleanup, duel_cancelled message)
+- [x] Warp mechanism fix — save state hijack + door fallback (watchpoint on callback2, golden state capture, SaveBlock1 preservation)
+
+### Phase 3B: PvP Battle System (CURRENT)
+- [x] Battle module architecture (client/battle.lua — party read/write, AI interception, RNG sync)
+- [x] Memory scanner script (scripts/scan_battle_addresses.lua — scan gBattleTypeFlags, gEnemyParty, etc.)
+- [x] Config placeholder (config/run_and_bun.lua — battle section with nil addresses)
+- [x] Server protocol (duel_party, duel_choice, duel_rng_sync, duel_end messages)
+- [x] Main.lua integration (warp phases: waiting_party, in_battle, returning)
+- [ ] **PENDING: Run scanner to find actual battle addresses**
+- [ ] **PENDING: Fill addresses in config/run_and_bun.lua**
+- [ ] Test party exchange and injection
+- [ ] Test battle trigger with BATTLE_TYPE_SECRET_BASE
+- [ ] Test AI choice interception
+- [ ] Test RNG synchronization
+- [ ] Test battle completion and return to origin
+- [ ] Test disconnect handling during battle
 
 ### Phase 4: Multi-ROM Support
 - [ ] Profils additionnels (Radical Red, Unbound)
@@ -295,6 +329,26 @@ Messages envoyés ligne par ligne (délimités par `\n`)
 ```
 Sent only when sprite changes (tile index, palette bank, or flip changes).
 
+**Duel warp protocol:**
+```json
+{"type":"duel_request","targetId":"player_xxx"}
+{"type":"duel_accept","requesterId":"player_xxx"}
+{"type":"duel_decline","requesterId":"player_xxx"}
+{"type":"duel_warp","coords":{"mapGroup":28,"mapId":24,"x":3,"y":5},"isMaster":true}
+{"type":"duel_declined","playerId":"player_xxx"}
+{"type":"duel_cancelled","requesterId":"player_xxx"}
+```
+
+**PvP battle protocol:**
+```json
+{"type":"duel_party","data":[/* 600 bytes as array */]}
+{"type":"duel_choice","choice":{"action":"move","slot":2,"target":1},"rng":305419896}
+{"type":"duel_choice","choice":{"action":"switch","switchIndex":3}}
+{"type":"duel_rng_sync","rng":305419896}
+{"type":"duel_end","outcome":"win"}
+{"type":"duel_opponent_disconnected","playerId":"player_xxx"}
+```
+
 **Note**: TCP brut via l'API socket intégrée de mGBA (pas LuaSocket — c'est l'implémentation propre à mGBA)
 
 ## 8. DÉPENDANCES
@@ -340,6 +394,6 @@ Run & Bun étant un ROM hack avec modifications majeures:
 
 ---
 
-**Dernière mise à jour**: 2026-02-03
-**Version**: 0.3.2-alpha
-**Status**: Phase 2 - Ghosting Complete (Interpolation + Camera + Network + Sprites + BG Occlusion + Waypoint Queue + Bike Sprite)
+**Dernière mise à jour**: 2026-02-04
+**Version**: 0.5.0-alpha
+**Status**: Phase 3 - Duel Warp Complete (Trigger + Server + UI + Warp Mechanism Fix: Save State Hijack + Door Fallback)

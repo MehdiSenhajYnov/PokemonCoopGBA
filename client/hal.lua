@@ -25,6 +25,12 @@ local config = nil
 function HAL.init(gameConfig)
   config = gameConfig
   console:log("[HAL] Initialized with config: " .. (gameConfig.name or "Unknown"))
+  if config.warp then
+    console:log(string.format("[HAL] Warp config OK: callback2=0x%08X cb2LoadMap=0x%08X",
+      config.warp.callback2Addr, config.warp.cb2LoadMap))
+  else
+    console:log("[HAL] WARNING: No warp config in profile — duel warp will not work")
+  end
 end
 
 --[[
@@ -293,6 +299,20 @@ function HAL.readKeyInput()
 end
 
 --[[
+  Read A and B button state from KEYINPUT register (0x04000130).
+  Active-low: bit=0 means pressed. A=bit0, B=bit1.
+  @return keyA (boolean), keyB (boolean)
+]]
+function HAL.readButtons()
+  local raw = HAL.readIOReg16(0x0130)
+  if not raw then return false, false end
+  local pressed = (~raw) & 0x0003  -- invert active-low, mask bits 0-1
+  local keyA = (pressed & 0x0001) ~= 0
+  local keyB = (pressed & 0x0002) ~= 0
+  return keyA, keyB
+end
+
+--[[
   Convert unsigned 16-bit to signed 16-bit
   Camera offsets (gSpriteCoordOffsetX/Y) are s16 but read16 returns u16
 ]]
@@ -363,6 +383,388 @@ function HAL.writePlayerPosition(x, y, mapId, mapGroup)
   end
 
   return success
+end
+
+-- ============================================================
+-- WARP SYSTEM
+-- ============================================================
+-- Cache for sWarpData EWRAM offset (found via runtime scan)
+local sWarpDataOffset = nil
+
+-- Watchpoint state (flag-based: watchpoint sets flag, frame loop processes)
+local warpWatchpointId = nil
+local warpWatchpointFired = false  -- set true by watchpoint callback
+
+-- Golden warp state (save state buffer captured during first natural warp)
+local goldenWarpState = nil
+
+-- SaveBlock1 preservation constants
+local SAVEBLOCK1_BASE = 0x02024CBC   -- SaveBlock1 start in Run & Bun
+local SAVEBLOCK1_WORDS = 4096        -- 16KB / 4 bytes = 4096 u32 words
+
+--[[
+  Scan EWRAM to find sWarpData address.
+  sWarpData is the game's internal warp destination struct. CB2_LoadMap reads
+  from sWarpData (not SaveBlock1) to know where to load. After any map transition,
+  sWarpData and SaveBlock1->location contain identical bytes, so we can find
+  sWarpData by scanning for duplicates of SaveBlock1->location in EWRAM.
+
+  Call this after HAL.init() and after each natural map change.
+  @return boolean True if sWarpData was found (or was already cached)
+]]
+function HAL.findSWarpData()
+  if not config or not config.warp then return false end
+  if sWarpDataOffset then return true end -- Already cached
+
+  local locOffset = toWRAMOffset(config.offsets.mapGroup)
+
+  -- Read SaveBlock1->location (8 bytes: mapGroup + mapNum + warpId + pad + x + y)
+  local ok1, ref32a = pcall(emu.memory.wram.read32, emu.memory.wram, locOffset)
+  local ok2, ref32b = pcall(emu.memory.wram.read32, emu.memory.wram, locOffset + 4)
+  if not ok1 or not ok2 then return false end
+
+  -- Skip if data is zeroed (game not fully initialized)
+  if ref32a == 0 and ref32b == 0 then return false end
+
+  console:log("[HAL] Scanning EWRAM for sWarpData...")
+
+  for offset = 0, 0x3FFFC, 4 do
+    -- Skip the SaveBlock1->location range itself
+    if offset < locOffset or offset >= locOffset + 8 then
+      local s1, val = pcall(emu.memory.wram.read32, emu.memory.wram, offset)
+      if s1 and val == ref32a then
+        local s2, val2 = pcall(emu.memory.wram.read32, emu.memory.wram, offset + 4)
+        if s2 and val2 == ref32b then
+          sWarpDataOffset = offset
+          console:log(string.format("[HAL] sWarpData found at 0x%08X", 0x02000000 + offset))
+          return true
+        end
+      end
+    end
+  end
+
+  console:log("[HAL] sWarpData not found (enter a door to calibrate)")
+  return false
+end
+
+--[[
+  Phase 1: Write warp destination to sWarpData + SaveBlock1.
+  Does NOT trigger the map load yet — call triggerMapLoad() after a few frames.
+
+  @param mapGroup Destination map group
+  @param mapId Destination map ID
+  @param x Destination X tile coordinate
+  @param y Destination Y tile coordinate
+  @return boolean Success status
+]]
+function HAL.writeWarpData(mapGroup, mapId, x, y)
+  if not config or not config.warp then
+    console:log("[HAL] writeWarpData: no warp config available")
+    return false
+  end
+
+  -- Write to sWarpData (CB2_LoadMap reads destination from here)
+  if sWarpDataOffset then
+    pcall(emu.memory.wram.write8, emu.memory.wram, sWarpDataOffset, mapGroup)
+    pcall(emu.memory.wram.write8, emu.memory.wram, sWarpDataOffset + 1, mapId)
+    pcall(emu.memory.wram.write8, emu.memory.wram, sWarpDataOffset + 2, 0xFF) -- warpId = -1 (use x,y)
+    pcall(emu.memory.wram.write8, emu.memory.wram, sWarpDataOffset + 3, 0)    -- padding
+    pcall(emu.memory.wram.write16, emu.memory.wram, sWarpDataOffset + 4, x)
+    pcall(emu.memory.wram.write16, emu.memory.wram, sWarpDataOffset + 6, y)
+  else
+    console:log("[HAL] WARNING: sWarpData not found — warp may load wrong map")
+  end
+
+  -- Also write to SaveBlock1->location + pos
+  local locOff = toWRAMOffset(config.offsets.mapGroup)
+  pcall(emu.memory.wram.write8, emu.memory.wram, locOff, mapGroup)
+  pcall(emu.memory.wram.write8, emu.memory.wram, locOff + 1, mapId)
+  pcall(emu.memory.wram.write8, emu.memory.wram, locOff + 2, 0xFF)
+  pcall(emu.memory.wram.write8, emu.memory.wram, locOff + 3, 0)
+  pcall(emu.memory.wram.write16, emu.memory.wram, locOff + 4, x)
+  pcall(emu.memory.wram.write16, emu.memory.wram, locOff + 6, y)
+
+  pcall(emu.memory.wram.write16, emu.memory.wram, toWRAMOffset(config.offsets.playerX), x)
+  pcall(emu.memory.wram.write16, emu.memory.wram, toWRAMOffset(config.offsets.playerY), y)
+
+  console:log(string.format("[HAL] writeWarpData: %d:%d (%d,%d) sWarpData=%s",
+    mapGroup, mapId, x, y, sWarpDataOffset and "OK" or "MISSING"))
+
+  return true
+end
+
+--[[
+  Phase 2: Trigger the map load by properly preparing gMain state.
+
+  The game's main loop calls callback1() then callback2() each frame.
+  Setting callback2 = CB2_LoadMap alone causes a freeze because:
+  - callback1 (CB1_Overworld) keeps processing events/camera, conflicting with map load
+  - gMain.state must be 0 for CB2_LoadMap's switch/state machine to start correctly
+  - VBlank/HBlank/VCount/Serial interrupt callbacks may interfere
+
+  Fix: replicate what the game's Task_WarpAndLoadMap does before setting CB2_LoadMap.
+
+  gMain struct layout (pokeemerald Main struct, size 0x44 = 68 bytes):
+    +0x00  callback1          (4 bytes) MainCallback
+    +0x04  callback2          (4 bytes) MainCallback
+    +0x08  savedCallback      (4 bytes) MainCallback
+    +0x0C  vblankCallback     (4 bytes) IntrCallback
+    +0x10  hblankCallback     (4 bytes) IntrCallback
+    +0x14  vcountCallback     (4 bytes) IntrCallback
+    +0x18  serialCallback     (4 bytes) IntrCallback
+    +0x1C  intrCheck          (2 bytes) u16
+    +0x1E  vblankCounter1     (4 bytes) u32
+    +0x22  vblankCounter2     (4 bytes) u32
+    +0x26  heldKeysRaw        (2 bytes) u16
+    +0x28  heldKeys           (2 bytes) u16
+    +0x2A  newKeys            (2 bytes) u16
+    +0x2C  newAndRepeatedKeys (2 bytes) u16
+    +0x2E  keyRepeatCounter   (2 bytes) u16
+    +0x30  watchedKeysPressed (2 bytes) bool16
+    +0x32  watchedKeysMask    (2 bytes) u16
+    +0x34  objCount           (1 byte)  u8
+    +0x35  state              (1 byte)  u8  ← CRITICAL for CB2_LoadMap switch
+    +0x36  oamLoadDisabled    (1 byte)  u8
+    +0x37  inBattle           (1 byte)  u8
+
+  Call this a few frames AFTER writeWarpData().
+  @return boolean Success status
+]]
+function HAL.triggerMapLoad()
+  if not config or not config.warp then return false end
+
+  -- gMain base = callback2Addr - 4 (callback2 is at offset +4)
+  local gMainBase = config.warp.callback2Addr - 4
+  local base = toWRAMOffset(gMainBase)
+
+  -- 1. NULL callback1 to stop CB1_Overworld from interfering
+  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x00, 0)
+
+  -- 2. NULL savedCallback
+  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x08, 0)
+
+  -- 3. Clear all interrupt callbacks (VBlank, HBlank, VCount, Serial)
+  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x0C, 0)
+  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x10, 0)
+  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x14, 0)
+  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x18, 0)
+
+  -- 4. Zero gMain.state at +0x35 (CRITICAL: CB2_LoadMap switch starts from case 0)
+  pcall(emu.memory.wram.write8, emu.memory.wram, base + 0x35, 0)
+
+  -- 5. Set callback2 = CB2_LoadMap
+  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x04, config.warp.cb2LoadMap)
+
+  console:log(string.format("[HAL] triggerMapLoad: cb1=NULL state(@+0x35)=0 intrs=NULL cb2=0x%08X",
+    config.warp.cb2LoadMap))
+  return true
+end
+
+--[[
+  Read gMain.callback2 value (for warp diagnostics).
+  @return u32 callback2 value, or nil
+]]
+function HAL.readCallback2()
+  if not config or not config.warp then return nil end
+  local ok, val = pcall(emu.memory.wram.read32, emu.memory.wram,
+    toWRAMOffset(config.warp.callback2Addr))
+  if ok then return val end
+  return nil
+end
+
+--[[
+  Check if warp is complete (callback2 returned to CB2_Overworld).
+  @return boolean True if callback2 == CB2_Overworld
+]]
+function HAL.isWarpComplete()
+  if not config or not config.warp or not config.warp.cb2Overworld then return false end
+  local cb2 = HAL.readCallback2()
+  return cb2 == config.warp.cb2Overworld
+end
+
+--[[
+  Blank the GBA screen by filling all palette RAM with black (0x0000).
+  Used before triggering CB2_LoadMap to mimic the game's normal fade-to-black.
+]]
+function HAL.blankScreen()
+  -- Fill BG palettes (0x000-0x1FF) and OBJ palettes (0x200-0x3FF) with black
+  for i = 0, 511 do
+    pcall(emu.memory.palette.write16, emu.memory.palette, i * 2, 0x0000)
+  end
+end
+
+--[[
+  Setup a WRITE_CHANGE watchpoint on gMain.callback2.
+  Uses FLAG-BASED approach: the watchpoint callback only sets a flag.
+  The main frame loop must call HAL.checkWarpWatchpoint() each frame to process.
+
+  This avoids crashes from reading/writing memory inside watchpoint callbacks
+  (known mGBA issue #3050).
+
+  @return boolean True if watchpoint was set successfully
+]]
+function HAL.setupWarpWatchpoint()
+  if not config or not config.warp then
+    console:log("[HAL] setupWarpWatchpoint: no warp config")
+    return false
+  end
+
+  -- Clear existing watchpoint if any
+  if warpWatchpointId then
+    pcall(emu.clearBreakpoint, emu, warpWatchpointId)
+    warpWatchpointId = nil
+  end
+
+  local addr = config.warp.callback2Addr
+
+  local ok, wpId = pcall(function()
+    return emu:setWatchpoint(function()
+      -- MINIMAL work here: just set flag. Memory access in watchpoint = crash risk.
+      warpWatchpointFired = true
+    end, addr, C.WATCHPOINT_TYPE.WRITE_CHANGE)
+  end)
+
+  if ok and wpId then
+    warpWatchpointId = wpId
+    warpWatchpointFired = false
+    console:log(string.format("[HAL] Watchpoint set on callback2 (0x%08X), id=%d", addr, wpId))
+    return true
+  else
+    console:log("[HAL] ERROR: Failed to set watchpoint on callback2")
+    return false
+  end
+end
+
+--[[
+  Check if the warp watchpoint fired since last check.
+  Call this every frame from the main loop.
+
+  @return boolean True if callback2 changed to CB2_LoadMap this frame
+]]
+function HAL.checkWarpWatchpoint()
+  if not warpWatchpointFired then
+    return false
+  end
+  warpWatchpointFired = false
+
+  -- Now safe to read memory (we're in frame callback context, not watchpoint)
+  local cb2 = HAL.readCallback2()
+  if not cb2 then return false end
+
+  return cb2 == config.warp.cb2LoadMap
+end
+
+--[[
+  Check if a golden warp state has been captured.
+  @return boolean
+]]
+function HAL.hasGoldenState()
+  return goldenWarpState ~= nil
+end
+
+--[[
+  Capture the golden warp state (save state buffer).
+  Call this when callback2 transitions to CB2_LoadMap during a natural warp.
+  The emulator is in a clean mid-warp state at this point.
+
+  @return boolean True if capture succeeded
+]]
+function HAL.captureGoldenState()
+  local ok, buf = pcall(function()
+    return emu:saveStateBuffer()  -- flags=31 (ALL) by default
+  end)
+
+  if ok and buf then
+    goldenWarpState = buf
+    console:log(string.format("[HAL] Golden warp state captured (%d bytes)", #buf))
+    return true
+  else
+    console:log("[HAL] ERROR: Failed to capture golden state")
+    return false
+  end
+end
+
+--[[
+  Load the golden warp state.
+  Restores the emulator to the clean mid-warp state.
+  SRAM (save file) is NOT overwritten (default flags=29).
+
+  @return boolean True if load succeeded
+]]
+function HAL.loadGoldenState()
+  if not goldenWarpState then
+    console:log("[HAL] loadGoldenState: no golden state captured")
+    return false
+  end
+
+  local ok, result = pcall(function()
+    return emu:loadStateBuffer(goldenWarpState, 29)  -- 29 = ALL except SAVEDATA (SRAM not overwritten)
+  end)
+
+  if ok and result then
+    console:log("[HAL] Golden warp state loaded")
+    return true
+  else
+    console:log("[HAL] ERROR: Failed to load golden state")
+    return false
+  end
+end
+
+--[[
+  Save current game data from SaveBlock1 in WRAM.
+  Reads 16KB (4096 x u32) starting from SAVEBLOCK1_BASE.
+  This preserves the player's team, inventory, flags, progression, etc.
+
+  @return table Array of u32 values, or nil on failure
+]]
+function HAL.saveGameData()
+  local data = {}
+  local baseOffset = toWRAMOffset(SAVEBLOCK1_BASE)
+
+  local ok = pcall(function()
+    for i = 0, SAVEBLOCK1_WORDS - 1 do
+      data[i] = emu.memory.wram:read32(baseOffset + i * 4)
+    end
+  end)
+
+  if ok then
+    console:log(string.format("[HAL] Game data saved (%d words from 0x%08X)",
+      SAVEBLOCK1_WORDS, SAVEBLOCK1_BASE))
+    return data
+  else
+    console:log("[HAL] ERROR: Failed to save game data")
+    return nil
+  end
+end
+
+--[[
+  Restore game data to SaveBlock1 in WRAM.
+  Writes back the 16KB saved by saveGameData().
+
+  @param data table Array of u32 values (from saveGameData)
+  @return boolean True if restore succeeded
+]]
+function HAL.restoreGameData(data)
+  if not data then return false end
+
+  local baseOffset = toWRAMOffset(SAVEBLOCK1_BASE)
+
+  local ok = pcall(function()
+    for i = 0, SAVEBLOCK1_WORDS - 1 do
+      if data[i] then
+        emu.memory.wram:write32(baseOffset + i * 4, data[i])
+      end
+    end
+  end)
+
+  if ok then
+    console:log(string.format("[HAL] Game data restored (%d words to 0x%08X)",
+      SAVEBLOCK1_WORDS, SAVEBLOCK1_BASE))
+    return true
+  else
+    console:log("[HAL] ERROR: Failed to restore game data")
+    return false
+  end
 end
 
 --[[
