@@ -51,3 +51,10 @@ temp/
 
 # Config overrides
 config.local.lua
+
+# Reference repos (cloned for offline analysis, not part of project)
+refs/
+
+# ROM runtime files
+rom/*.cheats
+rom/*.ss*

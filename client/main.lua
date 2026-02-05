@@ -84,10 +84,11 @@ local State = {
   -- Duel warp state machine
   inputsLocked = false,
   unlockFrame = 0,
-  warpPhase = nil,       -- nil / "waiting_door" / "loading" / "waiting_party" / "in_battle" / "returning"
+  warpPhase = nil,       -- nil / "loading" / "waiting_party" / "in_battle" / "returning"
   duelPending = nil,     -- {mapGroup, mapId, x, y, isMaster} when duel warp is pending
   duelOrigin = nil,      -- {x, y, mapGroup, mapId} position before duel (for return)
   opponentParty = nil,   -- 600-byte party data from opponent
+  prevInBattle = 0,      -- Previous inBattle value for transition logging
   sentChoice = false,    -- Whether we've sent our choice this turn
   remoteChoiceTimeout = nil, -- Frame when we started waiting for remote choice
   -- Early movement detection
@@ -230,8 +231,8 @@ local function initialize()
   Render.setSprite(Sprite)
   Render.setOcclusion(Occlusion)
 
-  -- Initialize battle module
-  Battle.init(detectedConfig)
+  -- Initialize battle module (pass HAL for triggerMapLoad)
+  Battle.init(detectedConfig, HAL)
   if Battle.isConfigured() then
     log("Battle module configured")
   else
@@ -440,11 +441,14 @@ local function drawOverlay(currentPos)
     Render.drawAllGhosts(painter, overlay.image, interpolatedPlayers, currentPos, currentMap)
   end
 
-  -- Draw door fallback overlay when waiting for player to enter a door
-  if State.warpPhase == "waiting_door" and State.duelPending then
-    local boxW, boxH = 180, 20
-    local boxX = math.floor((W - boxW) / 2)
-    local boxY = H - 30
+  -- Draw duel UI (request prompt / outgoing feedback)
+  Duel.drawUI(painter)
+
+  -- Draw "waiting for door" overlay when duel needs calibration
+  if State.warpPhase == "waiting_door" and painter then
+    local boxW, boxH = 180, 28
+    local boxX = math.floor((240 - boxW) / 2)
+    local boxY = math.floor((160 - boxH) / 2)
 
     painter:setFill(true)
     painter:setStrokeWidth(0)
@@ -459,11 +463,10 @@ local function drawOverlay(currentPos)
     painter:setFill(true)
     painter:setStrokeWidth(0)
     painter:setFillColor(0xFFFFFF00)
-    painter:drawText("Enter any door to start duel!", boxX + 4, boxY + 4)
+    painter:drawText("Duel: Walk through any door", boxX + 6, boxY + 4)
+    painter:setFillColor(0xFFCCCCCC)
+    painter:drawText("(one-time calibration)", boxX + 30, boxY + 16)
   end
-
-  -- Draw duel UI (request prompt / outgoing feedback)
-  Duel.drawUI(painter)
 
   overlay:update()
 end
@@ -480,6 +483,11 @@ local function update()
   State.frameCounter = State.frameCounter + 1
   State.timeMs = State.timeMs + realDt
 
+  -- === Auto-calibrate warp system (track callback2 transitions every frame) ===
+  -- This handles: sWarpData discovery after initial game load, golden state capture
+  -- skipGoldenCapture = true when inputs are locked (our own duel warp in progress)
+  HAL.trackCallback2(State.inputsLocked)
+
   -- === Watchpoint processing (flag-based, safe to read memory here) ===
   if HAL.checkWarpWatchpoint() then
     -- callback2 just transitioned to CB2_LoadMap (natural warp detected)
@@ -489,45 +497,58 @@ local function update()
     if not HAL.hasGoldenState() then
       HAL.captureGoldenState()
     end
+  end
 
-    -- If a duel is pending in door fallback mode, overwrite destination
-    if State.duelPending and State.warpPhase == "waiting_door" then
-      local dp = State.duelPending
-      local ok = HAL.writeWarpData(dp.mapGroup, dp.mapId, dp.x, dp.y)
-      if ok then
-        log(string.format("Door fallback: destination overwritten to %d:%d (%d,%d)",
-          dp.mapGroup, dp.mapId, dp.x, dp.y))
-        -- Transition from waiting_door to loading
-        State.inputsLocked = true
-        State.warpPhase = "loading"
-        State.unlockFrame = State.frameCounter + 300
+  -- === inBattle tracking (detect natural battle transitions for logging) ===
+  local inBattle = HAL.readInBattle()
+  if inBattle then
+    if State.prevInBattle == 0 and inBattle == 1 then
+      log("Battle detected (inBattle 0→1)")
+    elseif State.prevInBattle == 1 and inBattle == 0 then
+      log("Battle ended (inBattle 1→0)")
+    end
+    State.prevInBattle = inBattle
+  end
+
+  -- === Door fallback: waiting for natural warp to calibrate system ===
+  -- When a duel is requested but no golden state exists, the player must walk
+  -- through any door. The natural warp calibrates sWarpData + captures golden state.
+  -- Once both are available, execute the golden state hijack automatically.
+  if State.warpPhase == "waiting_door" and State.duelPending then
+    if HAL.hasGoldenState() and HAL.hasSWarpData() then
+      log("Door warp calibrated — executing duel warp via golden state hijack")
+      local coords = State.duelPending
+      local savedData = HAL.saveGameData()
+      if savedData then
+        local loaded = HAL.loadGoldenState()
+        if loaded then
+          HAL.restoreGameData(savedData)
+          HAL.writeWarpData(coords.mapGroup, coords.mapId, coords.x, coords.y)
+          State.inputsLocked = true
+          State.warpPhase = "loading"
+          State.unlockFrame = State.frameCounter + 300
+          log(string.format("Golden state hijack → duel room %d:%d (%d,%d)",
+            coords.mapGroup, coords.mapId, coords.x, coords.y))
+        else
+          log("ERROR: Failed to load golden state after calibration")
+          State.warpPhase = nil
+          State.duelPending = nil
+          State.duelOrigin = nil
+        end
       else
-        log("ERROR: Door fallback writeWarpData failed — aborting duel")
-        State.duelPending = nil
-        State.inputsLocked = false
+        log("ERROR: Failed to save game data for duel warp")
         State.warpPhase = nil
+        State.duelPending = nil
+        State.duelOrigin = nil
       end
     end
+    -- If not yet calibrated, do nothing (player continues playing, overlay shows message)
   end
 
   -- Warp state machine
   if State.inputsLocked then
-    -- Phase "waiting_door": golden state not available, waiting for player to enter a door
-    if State.warpPhase == "waiting_door" then
-      -- The watchpoint above handles the actual interception when a door is entered.
-      -- Safety timeout
-      if State.frameCounter >= State.unlockFrame then
-        State.inputsLocked = false
-        State.warpPhase = nil
-        State.duelPending = nil
-        State.duelOrigin = nil
-        log("WARNING: waiting_door timeout — cancelled")
-      end
-      -- Continue normal game loop (player needs to walk to a door)
-      -- Don't return — let the rest of the frame execute normally
-
     -- Phase "loading": CB2_LoadMap is running, wait for completion
-    elseif State.warpPhase == "loading" then
+    if State.warpPhase == "loading" then
       -- Check if map load finished (callback2 returned to CB2_Overworld)
       if HAL.isWarpComplete() then
         log("Warp complete! callback2 returned to Overworld")
@@ -872,13 +893,14 @@ local function update()
               end
             end
           else
-            -- === MODE FALLBACK: Door Interception ===
-            log("No golden state — using door fallback mode")
-            log("Enter any door to start the duel!")
-
-            State.inputsLocked = true
+            -- === DOOR FALLBACK: wait for a natural door warp to calibrate ===
+            -- Direct triggerMapLoad doesn't work without sWarpData (CB2_LoadMap
+            -- reads destination from sWarpDestination, not SaveBlock1->location).
+            -- The player must walk through ONE door to calibrate the system.
+            log("No golden state — waiting for door warp to calibrate")
             State.warpPhase = "waiting_door"
-            State.unlockFrame = State.frameCounter + 1800  -- 30 seconds to find a door
+            -- DON'T lock inputs — player needs to walk through a door
+            State.inputsLocked = false
           end
 
           -- Reset early detection + occlusion cache
@@ -890,8 +912,9 @@ local function update()
       elseif message.type == "duel_cancelled" then
         -- Requester disconnected, clear our prompt and pending duel
         Duel.reset()
-        if State.duelPending then
+        if State.duelPending or State.warpPhase == "waiting_door" then
           State.duelPending = nil
+          State.duelOrigin = nil
           State.inputsLocked = false
           State.warpPhase = nil
         end
@@ -930,7 +953,7 @@ local function update()
         -- Received opponent's battle choice
         if Battle.isActive() then
           Battle.setRemoteChoice(message.choice)
-          if message.rng and not State.duelPending.isMaster then
+          if message.rng and State.duelPending and not State.duelPending.isMaster then
             Battle.onRngSync(message.rng)
           end
           log(string.format("Received remote choice: %s", message.choice.action))

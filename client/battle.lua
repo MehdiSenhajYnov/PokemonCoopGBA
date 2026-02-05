@@ -26,8 +26,9 @@ local Battle = {}
 -- Configuration (loaded from game config)
 local config = nil
 local ADDRESSES = nil
+local HAL = nil
 
--- Battle type flags
+-- Battle type flags (loaded from config.battleFlags if available, fallback to hardcoded)
 local BATTLE_TYPE_DOUBLE = 0x00000001
 local BATTLE_TYPE_LINK = 0x00000002
 local BATTLE_TYPE_IS_MASTER = 0x00000004
@@ -39,10 +40,10 @@ local BATTLE_TYPE_SECRET_BASE = 0x08000000
 -- Special trainer ID that preserves gEnemyParty
 local TRAINER_SECRET_BASE = 1024
 
--- Party structure constants
-local PARTY_SIZE = 600  -- 6 Pokemon x 100 bytes each
-local POKEMON_SIZE = 100
-local POKEMON_HP_OFFSET = 0x56
+-- Party structure constants (defaults, overridden from config.pokemon if available)
+local PARTY_SIZE = 600      -- 6 Pokemon x 100 bytes each (FULL_PARTY_BYTES)
+local POKEMON_SIZE = 100    -- sizeof(struct Pokemon) = BoxPokemon(80) + stats(20)
+local POKEMON_HP_OFFSET = 86  -- +0x56: u16 current HP (decimal for clarity)
 
 -- Battle state
 local battleState = {
@@ -55,17 +56,34 @@ local battleState = {
   prevExecFlags = 0,        -- Previous gBattleControllerExecFlags value
   turnCount = 0,
   originPos = nil,          -- Position to return to after battle
+  prevInBattle = 0,         -- Previous inBattle value for transition detection
+  battleDetected = false,   -- True once inBattle 0→1 seen (actual combat running)
 }
 
 --[[
   Initialize the battle module with game configuration.
   @param gameConfig table containing battle addresses
 ]]
-function Battle.init(gameConfig)
+function Battle.init(gameConfig, halModule)
   config = gameConfig
+  HAL = halModule
   if config and config.battle then
     ADDRESSES = config.battle
+    -- Load pokemon struct constants from config if available
+    if config.pokemon then
+      PARTY_SIZE = config.pokemon.FULL_PARTY_BYTES or PARTY_SIZE
+      POKEMON_SIZE = config.pokemon.PARTY_MON_SIZE or POKEMON_SIZE
+      POKEMON_HP_OFFSET = config.pokemon.HP_OFFSET or POKEMON_HP_OFFSET
+    end
+    -- Load battle flag constants from config if available
+    if config.battleFlags then
+      BATTLE_TYPE_TRAINER = config.battleFlags.TRAINER or BATTLE_TYPE_TRAINER
+      BATTLE_TYPE_SECRET_BASE = config.battleFlags.SECRET_BASE or BATTLE_TYPE_SECRET_BASE
+      BATTLE_TYPE_IS_MASTER = config.battleFlags.IS_MASTER or BATTLE_TYPE_IS_MASTER
+    end
     console:log("[Battle] Initialized with battle config")
+    console:log(string.format("[Battle] gPlayerParty=0x%08X gEnemyParty=0x%08X",
+      ADDRESSES.gPlayerParty or 0, ADDRESSES.gEnemyParty or 0))
   else
     console:log("[Battle] WARNING: No battle config available")
   end
@@ -194,22 +212,27 @@ function Battle.startBattle(isMaster, originPos)
   local ok1 = pcall(emu.memory.wram.write32, emu.memory.wram,
     toWRAMOffset(ADDRESSES.gBattleTypeFlags), flags)
 
-  -- Set gTrainerBattleOpponent_A = TRAINER_SECRET_BASE (preserves gEnemyParty)
-  local ok2 = true
-  if ADDRESSES.gTrainerBattleOpponent_A then
-    ok2 = pcall(emu.memory.wram.write16, emu.memory.wram,
-      toWRAMOffset(ADDRESSES.gTrainerBattleOpponent_A), TRAINER_SECRET_BASE)
+  if not ok1 then
+    console:log("[Battle] ERROR: Failed to write gBattleTypeFlags")
+    battleState.active = false
+    return false
   end
 
-  if ok1 and ok2 then
-    console:log(string.format("[Battle] Battle configured: flags=0x%08X master=%s",
-      flags, tostring(isMaster)))
-    return true
+  console:log(string.format("[Battle] Battle flags written: 0x%08X master=%s",
+    flags, tostring(isMaster)))
+
+  -- Trigger battle via CB2_LoadMap (detects battle flags and loads battle scene)
+  if HAL then
+    HAL.blankScreen()
+    HAL.triggerMapLoad()
+    console:log("[Battle] triggerMapLoad called — CB2_LoadMap will start battle")
+  else
+    console:log("[Battle] WARNING: HAL not available — cannot trigger battle")
+    battleState.active = false
+    return false
   end
 
-  console:log("[Battle] ERROR: Failed to configure battle")
-  battleState.active = false
-  return false
+  return true
 end
 
 --[[
@@ -430,12 +453,13 @@ end
 
 --[[
   Check if battle has finished.
+  Uses transition tracking: battle is finished when inBattle goes from 1→0.
   @return boolean
 ]]
 function Battle.isFinished()
   if not battleState.active then return false end
 
-  -- Method 1: Check gBattleOutcome
+  -- Method 1: Check gBattleOutcome (if available)
   if ADDRESSES and ADDRESSES.gBattleOutcome then
     local ok, outcome = pcall(emu.memory.wram.read8, emu.memory.wram,
       toWRAMOffset(ADDRESSES.gBattleOutcome))
@@ -444,12 +468,23 @@ function Battle.isFinished()
     end
   end
 
-  -- Method 2: Check gMain.inBattle (if we know the address)
+  -- Method 2: Transition tracking on gMain.inBattle
+  -- Only finished if we SAW inBattle=1 (battle started) and now it's 0 (battle ended)
   if ADDRESSES and ADDRESSES.gMainInBattle then
     local ok, inBattle = pcall(emu.memory.wram.read8, emu.memory.wram,
       toWRAMOffset(ADDRESSES.gMainInBattle))
-    if ok and inBattle == 0 then
-      return true
+    if ok then
+      -- Detect 0→1: battle actually started
+      if battleState.prevInBattle == 0 and inBattle == 1 then
+        battleState.battleDetected = true
+        console:log("[Battle] inBattle 0→1: combat is running")
+      end
+      -- Detect 1→0: battle ended (only if we saw it start)
+      if battleState.battleDetected and battleState.prevInBattle == 1 and inBattle == 0 then
+        console:log("[Battle] inBattle 1→0: combat finished")
+        return true
+      end
+      battleState.prevInBattle = inBattle
     end
   end
 
@@ -458,24 +493,44 @@ end
 
 --[[
   Get battle outcome.
-  @return string "win", "lose", "flee", or nil
+  @return string "win", "lose", "flee", "completed", or nil
 ]]
 function Battle.getOutcome()
-  if not ADDRESSES or not ADDRESSES.gBattleOutcome then
-    return nil
-  end
-
-  local ok, outcome = pcall(emu.memory.wram.read8, emu.memory.wram,
-    toWRAMOffset(ADDRESSES.gBattleOutcome))
-
-  if ok then
-    if outcome == 1 then return "win"
-    elseif outcome == 2 then return "lose"
-    elseif outcome == 7 then return "flee"
+  -- Method 1: Use gBattleOutcome if available
+  if ADDRESSES and ADDRESSES.gBattleOutcome then
+    local ok, outcome = pcall(emu.memory.wram.read8, emu.memory.wram,
+      toWRAMOffset(ADDRESSES.gBattleOutcome))
+    if ok and outcome ~= 0 then
+      if outcome == 1 then return "win"
+      elseif outcome == 2 then return "lose"
+      elseif outcome == 7 then return "flee"
+      end
     end
   end
 
-  return nil
+  -- Method 2: Fallback — check HP of both parties for PvP outcome
+  if ADDRESSES and ADDRESSES.gPlayerParty and ADDRESSES.gEnemyParty then
+    local playerHP = 0
+    local enemyHP = 0
+    local playerBase = toWRAMOffset(ADDRESSES.gPlayerParty)
+    local enemyBase = toWRAMOffset(ADDRESSES.gEnemyParty)
+    for i = 0, 5 do
+      local ok1, hp1 = pcall(emu.memory.wram.read16, emu.memory.wram,
+        playerBase + i * POKEMON_SIZE + POKEMON_HP_OFFSET)
+      if ok1 then playerHP = playerHP + hp1 end
+      local ok2, hp2 = pcall(emu.memory.wram.read16, emu.memory.wram,
+        enemyBase + i * POKEMON_SIZE + POKEMON_HP_OFFSET)
+      if ok2 then enemyHP = enemyHP + hp2 end
+    end
+    if playerHP == 0 then
+      return "lose"
+    elseif enemyHP == 0 then
+      return "win"
+    end
+  end
+
+  -- Final fallback: battle completed but outcome unknown
+  return "completed"
 end
 
 --[[
@@ -507,6 +562,8 @@ function Battle.reset()
   battleState.prevExecFlags = 0
   battleState.turnCount = 0
   battleState.originPos = nil
+  battleState.prevInBattle = 0
+  battleState.battleDetected = false
 end
 
 return Battle

@@ -13,15 +13,14 @@ const net = require('net');
 const PORT = process.env.PORT || 8080;
 const HEARTBEAT_INTERVAL = 30000; // 30s
 
-// Duel room coordinates — TEST: Pokemon Center (map 2:2)
-// TODO: find correct Battle Colosseum map in Run & Bun
+// Duel room coordinates — MAP_BATTLE_COLOSSEUM_2P (28:24)
 const DUEL_ROOM = {
-  mapGroup: 2,
-  mapId: 2,
-  playerAX: 5,
-  playerAY: 4,
-  playerBX: 8,
-  playerBY: 4
+  mapGroup: 28,
+  mapId: 24,
+  playerAX: 3,
+  playerAY: 5,
+  playerBX: 10,
+  playerBY: 5
 };
 
 // Client storage

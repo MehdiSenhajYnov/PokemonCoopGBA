@@ -14,7 +14,7 @@ local EWRAM_START = 0x02000000
 
 -- Known addresses (already found)
 local KNOWN = {
-  gMainInBattle = 0x020233E0,
+  gMainInBattle = 0x020206AE,  -- FOUND: gMain+0x66 via find_inbattle_offset.lua
   gPlayerParty = 0x020233D0,
   gBattleControllerExecFlags = 0x020239FC,
 }

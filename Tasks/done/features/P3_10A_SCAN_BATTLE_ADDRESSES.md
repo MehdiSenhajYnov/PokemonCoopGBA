@@ -1,6 +1,6 @@
 # Scanner les adresses battle manquantes pour Run & Bun
 
-> **Statut:** En attente d'implementation
+> **Statut:** Completed (2026-02-05)
 > **Type:** Update — Scripts de scan memoire pour PvP
 > **Priorite:** P0 - CRITIQUE (prerequis pour P3_10B)
 > **Prerequis:** Aucun

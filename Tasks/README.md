@@ -388,24 +388,38 @@ Tasks/
 
 ---
 
-### todo/P3_10A_SCAN_BATTLE_ADDRESSES.md
-**Status:** 🔴 A faire
+### done/features/P3_10A_SCAN_BATTLE_ADDRESSES.md
+**Status:** 🟢 Terminé (2026-02-05)
 **Priorite:** ⭐ P0 - CRITIQUE (prerequis pour P3_10B)
-**Description:** Creer scripts pour scanner les adresses memoire manquantes (CB2_InitBattle, gBattleOutcome, gTrainerBattleOpponent_A) + corriger gMainInBattle (0x020233E0 est FAUX → 0x0202067F)
+**Description:** Scripts de scan pour adresses battle manquantes + correction gMainInBattle (0x020233E0 → 0x0202067F)
 
-**Fichiers:**
-- ✨ Creer: `scripts/scanners/verify_gmain.lua`, `scripts/scanners/scan_battle_callbacks.lua`
-- 📝 Modifier: `scripts/scanners/scan_battle_outcome.lua`, `scripts/scanners/scan_battle_remaining.lua`, `scripts/scanners/scan_battle_addresses.lua`, `config/run_and_bun.lua`
+**Résultat:**
+- `scripts/scanners/verify_gmain.lua` créé (vérifie gMain struct + inBattle correct vs faux)
+- `scripts/scanners/scan_battle_callbacks.lua` créé (auto-détection CB2_InitBattle/CB2_ReturnToField via watchpoint)
+- gMainInBattle corrigé dans 4 fichiers: config, scan_battle_outcome, scan_battle_remaining
+- STEP 7 (gTrainerBattleOpponent_A) ajouté à scan_battle_addresses.lua
+
+**Fichiers créés/modifiés:**
+- ✅ Créé: `scripts/scanners/verify_gmain.lua`, `scripts/scanners/scan_battle_callbacks.lua`
+- ✅ Modifié: `scripts/scanners/scan_battle_outcome.lua`, `scripts/scanners/scan_battle_remaining.lua`, `scripts/scanners/scan_battle_addresses.lua`, `config/run_and_bun.lua`
 
 ---
 
-### todo/P3_10B_FIX_DUEL_PVP_SYSTEM.md
-**Status:** 🔴 A faire
-**Priorite:** ⭐ P0 - CRITIQUE (depend de P3_10A)
-**Description:** Fix complet des 5 bugs qui empechent le duel PvP de fonctionner: coords serveur, door fallback, trigger combat, fin instantanee, outcome unknown
+### done/fixes/P3_10B_FIX_DUEL_PVP_SYSTEM.md
+**Status:** 🟢 Terminé (2026-02-05)
+**Priorite:** ⭐ P0 - CRITIQUE (résolu)
+**Description:** Fix complet des 5 bugs qui empechaient le duel PvP de fonctionner: coords serveur, door fallback, trigger combat, fin instantanee, outcome unknown
 
-**Fichiers:**
-- 📝 Modifier: `server/server.js`, `config/run_and_bun.lua`, `client/hal.lua`, `client/battle.lua`, `client/main.lua`
+**Résultat:**
+- DUEL_ROOM coords corrigées (2:2 → 28:24 Battle Colosseum 2P)
+- Door fallback remplacé par triggerMapLoad direct (warp instantané sans porte)
+- Battle.startBattle() trigger via HAL.triggerMapLoad() (CB2_LoadMap détecte les flags)
+- Battle.isFinished() utilise transition tracking (inBattle 0→1→0)
+- Battle.getOutcome() avec fallback HP-based (win/lose) + "completed"
+- HAL.readInBattle() ajouté + tracking dans main.lua
+
+**Fichiers modifiés:**
+- ✅ `server/server.js`, `client/hal.lua`, `client/battle.lua`, `client/main.lua`
 
 ---
 
@@ -511,8 +525,8 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 9. **todo/P2_08_FINAL_TESTING.md**
 10. ~~**P3_09_DUEL_WARP.md**~~ ✅ TERMINÉ (duel trigger + server coordination + input lock + UI + disconnect handling)
 10a. ~~**P3_09A_WARP_MECHANISM_FIX.md**~~ ✅ TERMINÉ (save state hijack + door fallback)
-10b. **todo/P3_10A_SCAN_BATTLE_ADDRESSES.md** ⭐ P0 (scanner adresses manquantes + fix gMainInBattle)
-10c. **todo/P3_10B_FIX_DUEL_PVP_SYSTEM.md** ⭐ P0 (fix 5 bugs duel PvP — depend de 10b)
+10b. ~~**P3_10A_SCAN_BATTLE_ADDRESSES.md**~~ ✅ TERMINÉ (scripts scan + fix gMainInBattle 0x020233E0 → 0x0202067F)
+10c. ~~**P3_10B_FIX_DUEL_PVP_SYSTEM.md**~~ ✅ TERMINÉ (fix 5 bugs duel PvP)
 10d. **todo/P3_10_DUEL_BATTLE_AND_RETURN.md** (combat duel + retour origine — superseded par 10b+10c)
 11. **todo/P4_10_MULTI_ROM.md** (Radical Red, Unbound)
 12. **todo/P5_11_DOCUMENTATION.md**
@@ -549,6 +563,6 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 
 ---
 
-**Dernière mise à jour:** 2026-02-04
+**Dernière mise à jour:** 2026-02-05
 **Version projet:** 0.5.0-alpha
 **Phase actuelle:** Phase 0+1+2+3 Complete ✅ | Next: Phase 4 (Multi-ROM) or Phase 5 (Documentation)

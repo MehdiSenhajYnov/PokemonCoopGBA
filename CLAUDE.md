@@ -10,13 +10,17 @@ Framework générique pour multijoueur "Seamless" sur ROM et ROM hacks GBA Poké
 - **Synchronized Duel (Warp Mode)**: Téléportation synchronisée dans une salle de combat Link
 
 ### Cible Prioritaire
-**Pokémon Run & Bun** - ROM hack avancé basé sur le moteur Émeraude
+**Pokémon Run & Bun** - ROM hack avancé basé sur **pokeemerald-expansion** (RHH). Créateur: dekzeh.
 
-**IMPORTANT**: Run & Bun modifie énormément la ROM de base d'Émeraude. Les offsets mémoire standard d'Émeraude ne fonctionneront probablement PAS directement. Il faudra:
-- Scanner et trouver les offsets spécifiques à Run & Bun
-- Tester chaque adresse mémoire individuellement
-- Créer un profil ROM dédié à Run & Bun
-- Ne pas se fier aveuglément aux adresses d'Émeraude standard
+**Architecture connue**: Run & Bun est construit sur le projet pokeemerald-expansion (ROM Hacking Hideout), qui étend Émeraude vanilla avec:
+- Gen 1-8 Pokémon (1234 espèces dont formes), 782 attaques, 267 abilities
+- Battle Engine V2 (physical/special split, Mega, Z-Moves, Dynamax)
+- Structs modifiées (hidden nature, 3-ability slots, tera type dans expansion)
+
+**Données de référence locales** (clonées dans `refs/`):
+- `refs/pokemon-run-bun-exporter` — Script Lua avec adresses party validées par la communauté
+- `refs/runandbundex` — Tables de données officielles (species, moves, abilities) par dekzeh
+- `refs/pokeemerald-expansion` — Code source decomp (structs, constantes, headers)
 
 ## 1B. RÈGLE FONDAMENTALE: RECHERCHE AVANT DÉVELOPPEMENT
 
@@ -148,17 +152,19 @@ PokemonCoop/
 │   ├── core.lua             # Core Engine
 │   └── README.md
 ├── config/                   # Profils ROM
-│   ├── run_and_bun.lua      # Profil principal (template à remplir)
+│   ├── run_and_bun.lua      # Profil principal (adresses validées + constantes)
 │   ├── emerald_us.lua       # Référence vanilla
 │   ├── radical_red.lua      # Future extension
 │   └── unbound.lua          # Future extension
+├── refs/                     # Repos de référence (git-ignored, clonés localement)
+│   ├── pokemon-run-bun-exporter/  # Adresses party validées (Lua)
+│   ├── runandbundex/              # Données officielles R&B (species, moves, abilities)
+│   └── pokeemerald-expansion/     # Source decomp (structs, headers, constantes)
 ├── scripts/                  # Scripts de scan mémoire mGBA
 │   ├── README.md            # Guide d'utilisation
-│   ├── scan_vanilla_offsets.lua
-│   ├── scan_wram.lua
-│   ├── scan_battle_addresses.lua  # Scanner for battle system addresses
-│   ├── find_saveblock_pointers.lua
-│   └── validate_offsets.lua
+│   ├── scanners/            # Scripts de scan actifs
+│   ├── debug/               # Scripts de debug
+│   └── archive/             # Scripts archivés
 └── docs/                     # Documentation
     ├── MEMORY_GUIDE.md      # Guide complet de scan mémoire
     ├── RUN_AND_BUN.md       # Documentation offsets Run & Bun
@@ -217,8 +223,13 @@ PokemonCoop/
 - [x] Config placeholder (config/run_and_bun.lua — battle section with nil addresses)
 - [x] Server protocol (duel_party, duel_choice, duel_rng_sync, duel_end messages)
 - [x] Main.lua integration (warp phases: waiting_party, in_battle, returning)
-- [ ] **PENDING: Run scanner to find actual battle addresses**
-- [ ] **PENDING: Fill addresses in config/run_and_bun.lua**
+- [x] Battle addresses scanned and filled in config/run_and_bun.lua
+- [x] Fix 5 PvP bugs (P3_10B): server coords, door fallback→triggerMapLoad, battle trigger, isFinished transition tracking, getOutcome HP fallback
+- [x] HAL.readInBattle() + inBattle tracking in main.lua
+- [x] **Party addresses corrected** via cross-ref with pokemon-run-bun-exporter (gPlayerParty=0x02023A98, gEnemyParty=0x02023CF0)
+- [x] **Reference data repos cloned** (pokemon-run-bun-exporter, runandbundex, pokeemerald-expansion)
+- [x] **Config enriched** with Pokemon struct constants, battle flags, outcome codes from decomp
+- [ ] Verify gBattleBufferB address (was derived from wrong gPlayerParty base, needs re-scan)
 - [ ] Test party exchange and injection
 - [ ] Test battle trigger with BATTLE_TYPE_SECRET_BASE
 - [ ] Test AI choice interception
@@ -251,7 +262,9 @@ PokemonCoop/
 **⚠️ IMPORTANT pour Run & Bun:**
 Ces adresses sont celles d'Émeraude vanilla. Run & Bun modifiant énormément le code, ces offsets sont à considérer comme des POINTS DE DÉPART pour la recherche, pas des valeurs définitives. Il faudra utiliser Cheat Engine ou des outils de memory scanning pour trouver les vrais offsets de Run & Bun.
 
-#### Pokémon Run & Bun (Trouvés 2026-02-02/03)
+#### Pokémon Run & Bun (Trouvés 2026-02-02/05)
+
+**Overworld (scanner mGBA, 2026-02-02/03):**
 - **PlayerX**: 0x02024CBC (16-bit, EWRAM)
 - **PlayerY**: 0x02024CBE (16-bit, EWRAM)
 - **MapGroup**: 0x02024CC0 (8-bit, EWRAM)
@@ -259,41 +272,44 @@ Ces adresses sont celles d'Émeraude vanilla. Run & Bun modifiant énormément l
 - **FacingDirection**: 0x02036934 (8-bit, EWRAM)
 - **CameraX**: IWRAM+0x5DFC (s16, gSpriteCoordOffsetX)
 - **CameraY**: IWRAM+0x5DF8 (s16, gSpriteCoordOffsetY)
-- **Mode**: STATIQUE (pas de pointeurs dynamiques)
 
-### ⚠️ CRITIQUE: Adresses Dynamiques vs Statiques
+**Party (cross-ref pokemon-run-bun-exporter, 2026-02-05):**
+- **gPlayerParty**: 0x02023A98 (600 bytes, 6×100)
+- **gPlayerPartyCount**: 0x02023A95 (8-bit)
+- **gEnemyParty**: 0x02023CF0 (= gPlayerParty + 0x258)
+- **gPokemonStorage**: 0x02028848 (PC box storage)
 
-**IMPORTANT**: Les adresses peuvent être:
-1. **Statiques** (offsets fixes) - facile
-2. **Dynamiques** (via pointeurs SaveBlock1/2) - nécessite `readSafePointer()`
+**Battle state (scanner mGBA, 2026-02-05):**
+- **gBattleTypeFlags**: 0x020090E8 (32-bit)
+- **gMainInBattle**: 0x020206AE (gMain+0x66)
+- **gRngValue**: IWRAM 0x03005D90 (32-bit)
+- **CB2_BattleMain**: 0x08094815 (ROM)
 
-Le code HAL supporte déjà les deux modes, mais on doit d'abord IDENTIFIER lequel Run & Bun utilise.
+**Warp system (scanner mGBA, 2026-02-03):**
+- **gMain.callback2**: 0x0202064C (EWRAM)
+- **CB2_LoadMap**: 0x08007441 (ROM)
+- **CB2_Overworld**: 0x080A89A5 (ROM)
 
-### Méthodologie pour trouver les offsets Run & Bun
+**Mode**: STATIQUE (pas de pointeurs dynamiques)
 
-**Voir les guides complets**:
-- [docs/MEMORY_GUIDE.md](docs/MEMORY_GUIDE.md) - Guide théorique complet
-- [scripts/README.md](scripts/README.md) - Guide pratique d'utilisation des scripts
+**Pokemon struct**: 100 bytes party / 80 bytes box, encrypted substructs (XOR otId^personality, personality%24 permutation). Hidden nature R&B-specific (bits 16-20 growth substruct, value 26=PID nature). 3 ability slots (2 bits at ss3[2] bits 29-30).
 
-**Résumé rapide:**
+### Sources d'adresses
 
-1. **Phase 1**: Tester si offsets Émeraude vanilla fonctionnent
-   - Utiliser `scripts/scan_vanilla_offsets.lua` dans mGBA console
-   - Si ça marche → terminé, remplir config
+| Source | Fiabilité | Contenu |
+|--------|-----------|---------|
+| `refs/pokemon-run-bun-exporter` | Haute (testé communauté) | gPlayerParty, gPlayerPartyCount, gPokemonStorage, struct layout |
+| `refs/pokeemerald-expansion` | Haute (source decomp) | Structs, constantes, battle flags |
+| Scanner mGBA | Moyenne (scan unique) | gBattleTypeFlags, gRngValue, callbacks |
+| `refs/runandbundex` | Haute (officiel dekzeh) | Species/moves/abilities data tables |
 
-2. **Phase 2**: Si échec, scanner avec `scripts/scan_wram.lua`
-   - Scanner WRAM GBA (0x02000000-0x0203FFFF) pour chaque valeur
-   - Utiliser fonctions `scanWRAM()`, `rescan()`, `watchAddress()`
+### Méthodologie pour trouver les offsets
 
-3. **Phase 3**: Identifier si pointeurs dynamiques
-   - Tester persistance des adresses trouvées
-   - Si dynamiques: utiliser `scripts/find_saveblock_pointers.lua`
-   - Trouver pointeurs SaveBlock et offsets relatifs
+**Approche recommandée** (mise à jour 2026-02-05):
 
-4. **Phase 4**: Valider et documenter
-   - Utiliser `scripts/validate_offsets.lua` pour validation
-   - Remplir `config/run_and_bun.lua` avec offsets trouvés
-   - Documenter dans `docs/RUN_AND_BUN.md`
+1. **D'abord**: Chercher dans les références existantes (`refs/`) — adresses validées gratuitement
+2. **Ensuite**: Ghidra + symboles pokeemerald-expansion pour analyse statique
+3. **Enfin**: Scanner mGBA en live si les deux premières méthodes échouent
 
 ### TCP Protocol (JSON-based)
 Messages envoyés ligne par ligne (délimités par `\n`)
@@ -375,25 +391,30 @@ Sent only when sprite changes (tile index, palette bank, or flip changes).
 
 ### Documentation
 - [mGBA Scripting API](https://mgba.io/docs/scripting.html) - API Lua pour mGBA
-- [Pokémon Emerald Decomp](https://github.com/pret/pokeemerald) - ⚠️ Référence pour comprendre le moteur de base, MAIS Run & Bun modifie beaucoup le code
+- [pokeemerald-expansion](https://github.com/rh-hideout/pokeemerald-expansion) - Base code de Run & Bun (structs, constantes, battle engine)
+- [Pokémon Emerald Decomp](https://github.com/pret/pokeemerald) - Référence vanilla Émeraude
 - [Node.js TCP/Net](https://nodejs.org/api/net.html) - Documentation TCP Node.js
-- [Lua Socket](http://w3.impa.br/~diego/software/luasocket/) - Documentation Lua Socket
+
+### Références Run & Bun spécifiques (clonées dans refs/)
+- [pokemon-run-bun-exporter](https://github.com/luisvega23/pokemon-run-bun-exporter) - Adresses party validées + code lecture Pokémon
+- [runandbundex](https://github.com/dekzeh/runandbundex) - Tables données officielles (species, moves, abilities, wild encounters)
+- [PokeCommunity Thread](https://www.pokecommunity.com/threads/pok%C3%A9mon-run-bun-v1-07.493223/) - Page officielle Run & Bun
 
 ### Outils Essentiels
-- **mGBA 0.11+ dev build** (CRITIQUE) - Émulateur avec console Lua + canvas API pour overlay. Les dev builds sont nécessaires pour le dessin à l'écran.
-- **Cheat Engine** (optionnel) - Alternative pour memory scanning (plus complexe, problème d'ASLR)
-- **VBA-SDL-H** - Alternative pour memory debugging
+- **mGBA 0.11+ dev build** (CRITIQUE) - Émulateur avec console Lua + canvas API pour overlay
+- **Ghidra + GBA loader** - Pour analyse statique ROM (trouver adresses battle system restantes)
 - **PKHex** - Pour ROM exploration (structures de données)
 
 ### Notes sur Run & Bun
-Run & Bun étant un ROM hack avec modifications majeures:
-- Les structures de données peuvent être réorganisées
-- Les offsets mémoire sont probablement différents d'Émeraude vanilla
-- Certaines fonctionnalités peuvent avoir été ajoutées/supprimées
-- Il faudra reverse-engineer les offsets via memory scanning en live
+- Construit sur **pokeemerald-expansion** (RHH) — structs expansion sont la référence correcte
+- 1234 espèces (Gen 1-8 + formes), 782 moves, 267 abilities
+- Trade evolutions converties en level-up (Haunter→Gengar lvl 40, Kadabra→Alakazam lvl 36, etc.)
+- Hidden Nature system (champ custom dans growth substruct)
+- Offsets décalés vs vanilla Émeraude (PlayerX: +0x878, Facing: +0x120EC)
+- Mode STATIQUE confirmé (pas de pointeurs dynamiques SaveBlock)
 
 ---
 
-**Dernière mise à jour**: 2026-02-04
-**Version**: 0.5.0-alpha
-**Status**: Phase 3 - Duel Warp Complete (Trigger + Server + UI + Warp Mechanism Fix: Save State Hijack + Door Fallback)
+**Dernière mise à jour**: 2026-02-05
+**Version**: 0.5.1-alpha
+**Status**: Phase 3B - PvP Battle System (party addresses corrected, reference data integrated)

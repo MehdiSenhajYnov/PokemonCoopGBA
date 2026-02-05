@@ -37,13 +37,13 @@ local function getPredictions()
   table.insert(predictions, {addr = 0x020239FC - 0x18, name = "ExecFlags-0x18"})
   table.insert(predictions, {addr = 0x020239FC - 0x20, name = "ExecFlags-0x20"})
 
-  -- Method 3: Near gMainInBattle (0x020233E0)
+  -- Method 3: Near gMain.inBattle (0x020206AE, found via find_inbattle_offset.lua)
   -- gBattleOutcome might be in the same struct area
-  table.insert(predictions, {addr = 0x020233E0 + 0x01, name = "inBattle+1"})
-  table.insert(predictions, {addr = 0x020233E0 + 0x02, name = "inBattle+2"})
-  table.insert(predictions, {addr = 0x020233E0 + 0x04, name = "inBattle+4"})
-  table.insert(predictions, {addr = 0x020233E0 - 0x01, name = "inBattle-1"})
-  table.insert(predictions, {addr = 0x020233E0 - 0x02, name = "inBattle-2"})
+  table.insert(predictions, {addr = 0x020206AE + 0x01, name = "inBattle+1"})
+  table.insert(predictions, {addr = 0x020206AE + 0x02, name = "inBattle+2"})
+  table.insert(predictions, {addr = 0x020206AE + 0x04, name = "inBattle+4"})
+  table.insert(predictions, {addr = 0x020206AE - 0x01, name = "inBattle-1"})
+  table.insert(predictions, {addr = 0x020206AE - 0x02, name = "inBattle-2"})
 
   -- Method 4: Common addresses in Emerald hacks
   -- Vanilla gBattleOutcome = around 0x0202xxxx
@@ -65,7 +65,7 @@ end
 -- State
 local predictions = getPredictions()
 local state = "monitoring"
-local gMainInBattle = 0x020233E0
+local gMainInBattle = 0x020206AE  -- FOUND: gMain+0x66 via find_inbattle_offset.lua
 
 local function isInBattle()
   local val = readAddr(gMainInBattle)

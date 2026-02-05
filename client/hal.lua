@@ -391,6 +391,9 @@ end
 -- Cache for sWarpData EWRAM offset (found via runtime scan)
 local sWarpDataOffset = nil
 
+-- Callback2 transition tracking (for auto-calibration)
+local prevTrackedCb2 = nil
+
 -- Watchpoint state (flag-based: watchpoint sets flag, frame loop processes)
 local warpWatchpointId = nil
 local warpWatchpointFired = false  -- set true by watchpoint callback
@@ -416,6 +419,13 @@ function HAL.findSWarpData()
   if not config or not config.warp then return false end
   if sWarpDataOffset then return true end -- Already cached
 
+  -- Use config-provided address if available (from scanner results)
+  if config.warp.sWarpDataAddr then
+    sWarpDataOffset = toWRAMOffset(config.warp.sWarpDataAddr)
+    console:log(string.format("[HAL] sWarpData set from config: 0x%08X", config.warp.sWarpDataAddr))
+    return true
+  end
+
   local locOffset = toWRAMOffset(config.offsets.mapGroup)
 
   -- Read SaveBlock1->location (8 bytes: mapGroup + mapNum + warpId + pad + x + y)
@@ -424,26 +434,44 @@ function HAL.findSWarpData()
   if not ok1 or not ok2 then return false end
 
   -- Skip if data is zeroed (game not fully initialized)
-  if ref32a == 0 and ref32b == 0 then return false end
+  if ref32a == 0 and ref32b == 0 then
+    console:log("[HAL] findSWarpData: SaveBlock1->location is zeroed, skipping scan")
+    return false
+  end
 
-  console:log("[HAL] Scanning EWRAM for sWarpData...")
+  -- Debug: show what we're looking for
+  local mg = ref32a & 0xFF
+  local mi = (ref32a >> 8) & 0xFF
+  console:log(string.format("[HAL] findSWarpData: scanning for pattern mapGroup=%d mapId=%d (ref32a=0x%08X ref32b=0x%08X)",
+    mg, mi, ref32a, ref32b))
 
-  for offset = 0, 0x3FFFC, 4 do
-    -- Skip the SaveBlock1->location range itself
-    if offset < locOffset or offset >= locOffset + 8 then
-      local s1, val = pcall(emu.memory.wram.read32, emu.memory.wram, offset)
-      if s1 and val == ref32a then
-        local s2, val2 = pcall(emu.memory.wram.read32, emu.memory.wram, offset + 4)
-        if s2 and val2 == ref32b then
-          sWarpDataOffset = offset
-          console:log(string.format("[HAL] sWarpData found at 0x%08X", 0x02000000 + offset))
-          return true
-        end
+  -- IMPORTANT: Only scan LOW EWRAM (before SaveBlock1).
+  -- sWarpDestination is an EWRAM_DATA static variable (overworld.c:212), placed by the linker
+  -- at a low EWRAM address, well before SaveBlock1/party/PC storage.
+  -- Scanning ALL EWRAM causes false positives in PC box storage (gPokemonStorage=0x02028848)
+  -- where Pokemon data can accidentally match the 8-byte warp pattern.
+  -- locOffset = SaveBlock1->location (mapGroup offset) — scan up to 8 bytes before it.
+  local scanEnd = locOffset - 8
+  local candidates = 0
+
+  console:log(string.format("[HAL] findSWarpData: scan range 0x%05X-0x%05X (LOW EWRAM only)",
+    0, scanEnd))
+
+  for offset = 0, scanEnd, 4 do
+    local s1, val = pcall(emu.memory.wram.read32, emu.memory.wram, offset)
+    if s1 and val == ref32a then
+      local s2, val2 = pcall(emu.memory.wram.read32, emu.memory.wram, offset + 4)
+      if s2 and val2 == ref32b then
+        candidates = candidates + 1
+        sWarpDataOffset = offset
+        console:log(string.format("[HAL] sWarpData MATCH #%d at 0x%08X", candidates, 0x02000000 + offset))
+        return true
       end
     end
   end
 
-  console:log("[HAL] sWarpData not found (enter a door to calibrate)")
+  console:log(string.format("[HAL] findSWarpData: no match found (scanned 0x00000-0x%05X)",
+    scanEnd))
   return false
 end
 
@@ -504,7 +532,7 @@ end
 
   Fix: replicate what the game's Task_WarpAndLoadMap does before setting CB2_LoadMap.
 
-  gMain struct layout (pokeemerald Main struct, size 0x44 = 68 bytes):
+  gMain struct layout — Run & Bun (modified from pokeemerald-expansion):
     +0x00  callback1          (4 bytes) MainCallback
     +0x04  callback2          (4 bytes) MainCallback
     +0x08  savedCallback      (4 bytes) MainCallback
@@ -513,19 +541,15 @@ end
     +0x14  vcountCallback     (4 bytes) IntrCallback
     +0x18  serialCallback     (4 bytes) IntrCallback
     +0x1C  intrCheck          (2 bytes) u16
-    +0x1E  vblankCounter1     (4 bytes) u32
-    +0x22  vblankCounter2     (4 bytes) u32
-    +0x26  heldKeysRaw        (2 bytes) u16
-    +0x28  heldKeys           (2 bytes) u16
-    +0x2A  newKeys            (2 bytes) u16
-    +0x2C  newAndRepeatedKeys (2 bytes) u16
-    +0x2E  keyRepeatCounter   (2 bytes) u16
-    +0x30  watchedKeysPressed (2 bytes) bool16
-    +0x32  watchedKeysMask    (2 bytes) u16
-    +0x34  objCount           (1 byte)  u8
-    +0x35  state              (1 byte)  u8  ← CRITICAL for CB2_LoadMap switch
-    +0x36  oamLoadDisabled    (1 byte)  u8
-    +0x37  inBattle           (1 byte)  u8
+    +0x1E  ...                (varies)  key/counter fields
+    NOTE: Run & Bun has additional fields (possibly oamBuffer or custom fields)
+    between +0x1E and +0x65. The exact layout differs from vanilla pokeemerald.
+
+    +0x65  state              (1 byte)  u8  ← CRITICAL for CB2_LoadMap switch (ESTIMATED)
+    +0x66  inBattle           (1 byte)  u8  (CONFIRMED at 0x020206AE)
+
+    The state offset is configurable via config.warp.gMainStateOffset.
+    Run scripts/scanners/find_gMain_state.lua to confirm the exact offset.
 
   Call this a few frames AFTER writeWarpData().
   @return boolean Success status
@@ -549,15 +573,37 @@ function HAL.triggerMapLoad()
   pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x14, 0)
   pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x18, 0)
 
-  -- 4. Zero gMain.state at +0x35 (CRITICAL: CB2_LoadMap switch starts from case 0)
-  pcall(emu.memory.wram.write8, emu.memory.wram, base + 0x35, 0)
+  -- 4. Zero gMain.state (CRITICAL: CB2_LoadMap switch starts from case 0)
+  -- Confirmed from pokeemerald-expansion main.h: state is 1 byte before inBattle bitfield
+  -- R&B: inBattle at +0x66 → state at +0x65
+  local stateOffset = (config.warp.gMainStateOffset) or 0x65
+  pcall(emu.memory.wram.write8, emu.memory.wram, base + stateOffset, 0)
+
+  -- Also zero the old vanilla offset as safety (costs nothing)
+  if stateOffset ~= 0x35 then
+    pcall(emu.memory.wram.write8, emu.memory.wram, base + 0x35, 0)
+  end
 
   -- 5. Set callback2 = CB2_LoadMap
   pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x04, config.warp.cb2LoadMap)
 
-  console:log(string.format("[HAL] triggerMapLoad: cb1=NULL state(@+0x35)=0 intrs=NULL cb2=0x%08X",
-    config.warp.cb2LoadMap))
+  console:log(string.format("[HAL] triggerMapLoad: cb1=NULL state(@+0x%02X)=0 intrs=NULL cb2=0x%08X",
+    stateOffset, config.warp.cb2LoadMap))
   return true
+end
+
+--[[
+  Read gMain.inBattle flag.
+  @return u8 inBattle value (0 = overworld, 1 = in battle), or nil
+]]
+function HAL.readInBattle()
+  if not config or not config.battle or not config.battle.gMainInBattle then
+    return nil
+  end
+  local ok, val = pcall(emu.memory.wram.read8, emu.memory.wram,
+    toWRAMOffset(config.battle.gMainInBattle))
+  if ok then return val end
+  return nil
 end
 
 --[[
@@ -580,6 +626,78 @@ function HAL.isWarpComplete()
   if not config or not config.warp or not config.warp.cb2Overworld then return false end
   local cb2 = HAL.readCallback2()
   return cb2 == config.warp.cb2Overworld
+end
+
+--[[
+  Track callback2 every frame for auto-calibration.
+  Detects transitions (CB2_LoadMap → CB2_Overworld) and auto-calibrates:
+  - sWarpData (scans EWRAM for pattern match after map load completes)
+  - Golden state (captures mid-warp emulator state during CB2_LoadMap)
+
+  @param skipGoldenCapture boolean  If true, don't capture golden state (e.g. during our own duel warp)
+  @return string|nil  "loading", "overworld", "other", or nil
+]]
+function HAL.trackCallback2(skipGoldenCapture)
+  if not config or not config.warp then return nil end
+
+  local cb2 = HAL.readCallback2()
+  if not cb2 then return nil end
+
+  local state = nil
+  if cb2 == config.warp.cb2LoadMap then
+    state = "loading"
+  elseif cb2 == config.warp.cb2Overworld then
+    state = "overworld"
+  else
+    state = "other"
+  end
+
+  -- First call: try immediate calibration based on current state
+  if prevTrackedCb2 == nil then
+    if state ~= "loading" and not sWarpDataOffset then
+      -- Game is past initial load — try to find sWarpData now
+      local found = HAL.findSWarpData()
+      if found then
+        console:log("[HAL] sWarpData auto-calibrated on first frame!")
+      end
+    end
+    if state == "loading" and not goldenWarpState and not skipGoldenCapture then
+      -- Script started during a map load — capture golden state
+      console:log("[HAL] Script started during map load — capturing golden state")
+      HAL.captureGoldenState()
+    end
+    prevTrackedCb2 = cb2
+    return state
+  end
+
+  -- Detect CB2_LoadMap → non-CB2_LoadMap (map load completed)
+  if prevTrackedCb2 == config.warp.cb2LoadMap and cb2 ~= config.warp.cb2LoadMap then
+    if not sWarpDataOffset then
+      console:log("[HAL] Map load completed — auto-calibrating sWarpData...")
+      local found = HAL.findSWarpData()
+      if found then
+        console:log("[HAL] sWarpData auto-calibrated!")
+      end
+    end
+  end
+
+  -- Detect non-CB2_LoadMap → CB2_LoadMap (map load started, natural warp)
+  if prevTrackedCb2 ~= config.warp.cb2LoadMap and cb2 == config.warp.cb2LoadMap then
+    if not goldenWarpState and not skipGoldenCapture then
+      HAL.captureGoldenState()
+    end
+  end
+
+  prevTrackedCb2 = cb2
+  return state
+end
+
+--[[
+  Check if sWarpData has been calibrated.
+  @return boolean
+]]
+function HAL.hasSWarpData()
+  return sWarpDataOffset ~= nil
 end
 
 --[[
