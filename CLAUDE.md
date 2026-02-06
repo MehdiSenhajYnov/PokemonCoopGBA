@@ -116,17 +116,29 @@ Le joueur GBA est toujours centré à l'écran (120, 80). Le ghost est positionn
 2. Serveur forward au joueur cible uniquement → prompt affiché
 3. Joueur B accepte (A) ou refuse (B)
 4. Si accepté → serveur envoie `duel_warp` aux deux joueurs avec coords différentes
-5. Warp via save state hijack (mode principal) ou door interception (fallback)
+5. Warp via direct memory write (sWarpDestination + triggerMapLoad)
 6. Verrouillage inputs pendant le chargement (5 secondes timeout)
 7. Placement dans MAP_BATTLE_COLOSSEUM_2P (mapGroup=28, mapId=24)
    - Player A: (3, 5) | Player B: (10, 5)
 
-**Warp Mechanism (save state hijack):**
-- WRITE_CHANGE watchpoint on gMain.callback2 detects natural warps (door transitions)
-- First natural warp: capture "golden state" (clean mid-warp emulator state via `emu:saveStateBuffer()`)
-- Duel warp: save 16KB SaveBlock1 → load golden state → restore SaveBlock1 → write duel destination
-- CB2_LoadMap executes in clean state → no freeze
-- Door fallback: if no golden state yet, intercept next door warp and redirect to duel room
+**Warp Mechanism (direct warp via ROM-scanned SetCB2WarpAndLoadMap):**
+- `HAL.performDirectWarp()` handles the entire sequence:
+  1. Find sWarpData address (cluster scan for sDummyWarpData pair in EWRAM, cached)
+  2. Find SetCB2WarpAndLoadMap ROM address (scans ROM literal pools for CB2_LoadMap reference)
+  3. Blank screen (fill palette RAM with black)
+  4. Write destination to sWarpDestination (0x020318A8) + SaveBlock1->location
+  5. Inject EWRAM trampoline (24 bytes THUMB code at 0x0203FF00)
+  6. Set callback2 = trampoline address (THUMB bit set)
+- **EWRAM Code Injection**: GBA has no MMU — EWRAM is executable. The trampoline is a tiny
+  THUMB stub that calls WarpIntoMap() then CB2_LoadMap(). This is necessary because CB2_LoadMap
+  alone HANGS — WarpIntoMap() must run first to call LoadCurrentMapData() (loads gMapHeader).
+- **Finding WarpIntoMap**: Multi-phase ROM scanner using sWarpDestination (0x020318A8) as anchor.
+  Phase 1: find sWarpDestination in ROM literal pools (3-10 refs vs 280 for CB2_LoadMap).
+  Phase 2: identify containing functions (ApplyCurrentWarp, SetWarpDestination).
+  Phase 3: search nearby ROM for 3-BL function calling a Phase 2 function = WarpIntoMap.
+  Fallback: extract BL targets before LDR =CB2_LoadMap instructions.
+- sWarpData auto-calibrated via `trackCallback2()` on every natural map transition
+- No emulator save state or door interception needed — works immediately from any game state
 
 **Disconnect safety:** pendingDuel nettoyé au disconnect, `duel_cancelled` envoyé si nécessaire
 
@@ -215,7 +227,7 @@ PokemonCoop/
 - [x] Interface utilisateur (Painter API overlay — request prompt + accept/decline)
 - [x] Duel room: MAP_BATTLE_COLOSSEUM_2P (mapGroup=28, mapId=24)
 - [x] Disconnect handling (pendingDuel cleanup, duel_cancelled message)
-- [x] Warp mechanism fix — save state hijack + door fallback (watchpoint on callback2, golden state capture, SaveBlock1 preservation)
+- [x] Warp mechanism — direct warp via sWarpDestination + triggerMapLoad (no golden state or door fallback needed)
 
 ### Phase 3B: PvP Battle System (CURRENT)
 - [x] Battle module architecture (client/battle.lua — party read/write, AI interception, RNG sync)
@@ -224,7 +236,7 @@ PokemonCoop/
 - [x] Server protocol (duel_party, duel_choice, duel_rng_sync, duel_end messages)
 - [x] Main.lua integration (warp phases: waiting_party, in_battle, returning)
 - [x] Battle addresses scanned and filled in config/run_and_bun.lua
-- [x] Fix 5 PvP bugs (P3_10B): server coords, door fallback→triggerMapLoad, battle trigger, isFinished transition tracking, getOutcome HP fallback
+- [x] Fix 5 PvP bugs (P3_10B): server coords, triggerMapLoad, battle trigger, isFinished transition tracking, getOutcome HP fallback
 - [x] HAL.readInBattle() + inBattle tracking in main.lua
 - [x] **Party addresses corrected** via cross-ref with pokemon-run-bun-exporter (gPlayerParty=0x02023A98, gEnemyParty=0x02023CF0)
 - [x] **Reference data repos cloned** (pokemon-run-bun-exporter, runandbundex, pokeemerald-expansion)

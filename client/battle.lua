@@ -182,7 +182,7 @@ end
 
 --[[
   Start a PvP battle.
-  Prerequisites: gEnemyParty already injected, golden state available.
+  Prerequisites: gEnemyParty already injected, player in duel room.
 
   @param isMaster boolean - true if this player is the RNG master
   @param originPos table - {x, y, mapGroup, mapId} to return to after battle

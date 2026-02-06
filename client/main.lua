@@ -221,9 +221,6 @@ local function initialize()
   -- Proactively scan for sWarpData (works if game loaded from save)
   HAL.findSWarpData()
 
-  -- Setup warp watchpoint (monitors callback2 for CB2_LoadMap transitions)
-  HAL.setupWarpWatchpoint()
-
   -- Initialize rendering, sprite extraction, and occlusion
   Render.init(detectedConfig)
   Sprite.init()
@@ -444,30 +441,6 @@ local function drawOverlay(currentPos)
   -- Draw duel UI (request prompt / outgoing feedback)
   Duel.drawUI(painter)
 
-  -- Draw "waiting for door" overlay when duel needs calibration
-  if State.warpPhase == "waiting_door" and painter then
-    local boxW, boxH = 180, 28
-    local boxX = math.floor((240 - boxW) / 2)
-    local boxY = math.floor((160 - boxH) / 2)
-
-    painter:setFill(true)
-    painter:setStrokeWidth(0)
-    painter:setFillColor(0xE0000000)
-    painter:drawRectangle(boxX, boxY, boxW, boxH)
-
-    painter:setFill(false)
-    painter:setStrokeWidth(1)
-    painter:setStrokeColor(0xFFFFFF00)
-    painter:drawRectangle(boxX, boxY, boxW, boxH)
-
-    painter:setFill(true)
-    painter:setStrokeWidth(0)
-    painter:setFillColor(0xFFFFFF00)
-    painter:drawText("Duel: Walk through any door", boxX + 6, boxY + 4)
-    painter:setFillColor(0xFFCCCCCC)
-    painter:drawText("(one-time calibration)", boxX + 30, boxY + 16)
-  end
-
   overlay:update()
 end
 
@@ -484,20 +457,8 @@ local function update()
   State.timeMs = State.timeMs + realDt
 
   -- === Auto-calibrate warp system (track callback2 transitions every frame) ===
-  -- This handles: sWarpData discovery after initial game load, golden state capture
-  -- skipGoldenCapture = true when inputs are locked (our own duel warp in progress)
-  HAL.trackCallback2(State.inputsLocked)
-
-  -- === Watchpoint processing (flag-based, safe to read memory here) ===
-  if HAL.checkWarpWatchpoint() then
-    -- callback2 just transitioned to CB2_LoadMap (natural warp detected)
-    log("Watchpoint: callback2 -> CB2_LoadMap detected")
-
-    -- Capture golden state if not yet captured
-    if not HAL.hasGoldenState() then
-      HAL.captureGoldenState()
-    end
-  end
+  -- This handles sWarpData discovery after initial game load and after natural warps
+  HAL.trackCallback2()
 
   -- === inBattle tracking (detect natural battle transitions for logging) ===
   local inBattle = HAL.readInBattle()
@@ -508,41 +469,6 @@ local function update()
       log("Battle ended (inBattle 1→0)")
     end
     State.prevInBattle = inBattle
-  end
-
-  -- === Door fallback: waiting for natural warp to calibrate system ===
-  -- When a duel is requested but no golden state exists, the player must walk
-  -- through any door. The natural warp calibrates sWarpData + captures golden state.
-  -- Once both are available, execute the golden state hijack automatically.
-  if State.warpPhase == "waiting_door" and State.duelPending then
-    if HAL.hasGoldenState() and HAL.hasSWarpData() then
-      log("Door warp calibrated — executing duel warp via golden state hijack")
-      local coords = State.duelPending
-      local savedData = HAL.saveGameData()
-      if savedData then
-        local loaded = HAL.loadGoldenState()
-        if loaded then
-          HAL.restoreGameData(savedData)
-          HAL.writeWarpData(coords.mapGroup, coords.mapId, coords.x, coords.y)
-          State.inputsLocked = true
-          State.warpPhase = "loading"
-          State.unlockFrame = State.frameCounter + 300
-          log(string.format("Golden state hijack → duel room %d:%d (%d,%d)",
-            coords.mapGroup, coords.mapId, coords.x, coords.y))
-        else
-          log("ERROR: Failed to load golden state after calibration")
-          State.warpPhase = nil
-          State.duelPending = nil
-          State.duelOrigin = nil
-        end
-      else
-        log("ERROR: Failed to save game data for duel warp")
-        State.warpPhase = nil
-        State.duelPending = nil
-        State.duelOrigin = nil
-      end
-    end
-    -- If not yet calibrated, do nothing (player continues playing, overlay shows message)
   end
 
   -- Warp state machine
@@ -678,37 +604,28 @@ local function update()
 
     -- Phase "returning": returning to origin after battle
     elseif State.warpPhase == "returning" then
-      if State.duelOrigin and HAL.hasGoldenState() then
-        -- Use save state hijack to return
-        local savedData = HAL.saveGameData()
-        if savedData then
-          local loaded = HAL.loadGoldenState()
-          if loaded then
-            HAL.restoreGameData(savedData)
-            HAL.writeWarpData(
-              State.duelOrigin.mapGroup,
-              State.duelOrigin.mapId,
-              State.duelOrigin.x,
-              State.duelOrigin.y
-            )
-            log(string.format("Returning to origin: %d:%d (%d,%d)",
-              State.duelOrigin.mapGroup, State.duelOrigin.mapId,
-              State.duelOrigin.x, State.duelOrigin.y))
+      if State.duelOrigin then
+        -- Direct warp back to origin (no save/restore needed — WRAM is preserved)
+        local warpOk, warpErr = HAL.performDirectWarp(
+          State.duelOrigin.mapGroup,
+          State.duelOrigin.mapId,
+          State.duelOrigin.x,
+          State.duelOrigin.y
+        )
 
-            State.warpPhase = "loading_return"
-            State.unlockFrame = State.frameCounter + 300
-          else
-            log("ERROR: Failed to load golden state for return")
-            State.warpPhase = nil
-            State.inputsLocked = false
-          end
+        if warpOk then
+          log(string.format("Returning to origin: %d:%d (%d,%d)",
+            State.duelOrigin.mapGroup, State.duelOrigin.mapId,
+            State.duelOrigin.x, State.duelOrigin.y))
+          State.warpPhase = "loading_return"
+          State.unlockFrame = State.frameCounter + 300
         else
-          log("ERROR: Failed to save game data for return")
+          log("ERROR: Return warp failed: " .. (warpErr or "unknown"))
           State.warpPhase = nil
           State.inputsLocked = false
         end
       else
-        log("WARNING: No origin or golden state for return")
+        log("WARNING: No origin for return")
         State.warpPhase = nil
         State.inputsLocked = false
         State.duelPending = nil
@@ -860,47 +777,23 @@ local function update()
             isMaster = isMaster
           }
 
-          if HAL.hasGoldenState() then
-            -- === MODE PRINCIPAL: Save State Hijack ===
-            log("Using save state hijack mode")
+          -- === DIRECT WARP: write sWarpDestination + trigger CB2_LoadMap ===
+          local warpOk, warpErr = HAL.performDirectWarp(
+            coords.mapGroup, coords.mapId, coords.x, coords.y)
 
-            -- 1. Save current game data (team, inventory, flags, etc.)
-            local savedData = HAL.saveGameData()
-            if not savedData then
-              log("ERROR: Failed to save game data — aborting warp")
-              State.duelPending = nil
-              State.duelOrigin = nil
-            else
-              -- 2. Load golden state (clean mid-warp emulator state)
-              local loaded = HAL.loadGoldenState()
-              if not loaded then
-                log("ERROR: Failed to load golden state — aborting warp")
-                State.duelPending = nil
-                State.duelOrigin = nil
-              else
-                -- 3. Restore game data into the golden state's WRAM
-                HAL.restoreGameData(savedData)
-
-                -- 4. Write duel destination over SaveBlock1 location
-                HAL.writeWarpData(coords.mapGroup, coords.mapId, coords.x, coords.y)
-
-                -- 5. Activate loading state machine
-                State.inputsLocked = true
-                State.warpPhase = "loading"
-                State.unlockFrame = State.frameCounter + 300
-
-                log("Save state hijack complete — CB2_LoadMap will execute next frame")
-              end
-            end
+          if warpOk then
+            State.inputsLocked = true
+            State.warpPhase = "loading"
+            State.unlockFrame = State.frameCounter + 300
+            log("Direct warp initiated — CB2_LoadMap will execute next frame")
           else
-            -- === DOOR FALLBACK: wait for a natural door warp to calibrate ===
-            -- Direct triggerMapLoad doesn't work without sWarpData (CB2_LoadMap
-            -- reads destination from sWarpDestination, not SaveBlock1->location).
-            -- The player must walk through ONE door to calibrate the system.
-            log("No golden state — waiting for door warp to calibrate")
-            State.warpPhase = "waiting_door"
-            -- DON'T lock inputs — player needs to walk through a door
-            State.inputsLocked = false
+            log("ERROR: Direct warp failed: " .. (warpErr or "unknown"))
+            State.duelPending = nil
+            State.duelOrigin = nil
+            -- Notify server so opponent isn't stuck waiting
+            if State.connected then
+              Network.send({ type = "duel_cancelled" })
+            end
           end
 
           -- Reset early detection + occlusion cache
@@ -912,7 +805,7 @@ local function update()
       elseif message.type == "duel_cancelled" then
         -- Requester disconnected, clear our prompt and pending duel
         Duel.reset()
-        if State.duelPending or State.warpPhase == "waiting_door" then
+        if State.duelPending then
           State.duelPending = nil
           State.duelOrigin = nil
           State.inputsLocked = false

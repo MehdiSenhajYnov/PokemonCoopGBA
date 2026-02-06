@@ -49,6 +49,15 @@ return {
     -- SaveBlock1->location in EWRAM. HAL scans for this pattern automatically.
     -- Set a fixed address here only if auto-detection fails.
     sWarpDataAddr = nil,         -- AUTO-DETECTED at runtime (no manual scan needed)
+
+    -- WarpIntoMap ROM address: auto-detected by HAL.scanROMForWarpFunction()
+    -- Used by EWRAM trampoline: writes THUMB code to EWRAM that calls WarpIntoMap + CB2_LoadMap.
+    -- GBA has no MMU — EWRAM is executable. This avoids needing SetCB2WarpAndLoadMap.
+    -- Set manually only if auto-detection fails.
+    warpIntoMapAddr = nil,       -- AUTO-DETECTED via ROM scan (Phase 1-3 or fallback)
+
+    -- Legacy: SetCB2WarpAndLoadMap ROM address (if known, used as Priority 2)
+    setCB2WarpAddr = nil,        -- Manual override only
   },
 
   -- Duel room coordinates (MAP_BATTLE_COLOSSEUM_2P — same as vanilla Emerald)

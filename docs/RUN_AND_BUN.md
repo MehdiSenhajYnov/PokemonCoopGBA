@@ -243,7 +243,7 @@ From `refs/runandbundex` (official data by dekzeh):
 - [x] PlayerX, PlayerY, MapID, MapGroup, Facing — overworld working
 - [x] Camera X/Y — IWRAM (0x03005DFC, 0x03005DF8)
 - [x] Ghost rendering — relative screen-center positioning
-- [x] Warp system — save state hijack + door fallback
+- [x] Warp system — direct warp via sWarpDestination + triggerMapLoad
 - [x] gPlayerParty, gEnemyParty — corrected from exporter
 - [x] gBattleTypeFlags, gRngValue — from scanner
 
