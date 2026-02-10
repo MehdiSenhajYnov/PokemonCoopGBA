@@ -13,15 +13,7 @@ const net = require('net');
 const PORT = process.env.PORT || 8080;
 const HEARTBEAT_INTERVAL = 30000; // 30s
 
-// Duel room coordinates — MAP_BATTLE_COLOSSEUM_2P (28:24)
-const DUEL_ROOM = {
-  mapGroup: 28,
-  mapId: 24,
-  playerAX: 3,
-  playerAY: 5,
-  playerBX: 10,
-  playerBY: 5
-};
+// Duel: no physical warp — battle starts from overworld (GBA-PK style)
 
 // Client storage
 const clients = new Map();
@@ -239,31 +231,20 @@ function handleMessage(client, messageStr) {
         requester.duelOpponent = client.id;
         client.duelOpponent = requester.id;
 
-        // Send warp command to both players with different spawn positions
-        // Requester is player A (master), accepter is player B (slave)
+        // Send duel start to both players — no warp, battle starts from overworld (GBA-PK style)
         sendToClient(requester, {
           type: 'duel_warp',
-          coords: {
-            mapGroup: DUEL_ROOM.mapGroup,
-            mapId: DUEL_ROOM.mapId,
-            x: DUEL_ROOM.playerAX,
-            y: DUEL_ROOM.playerAY
-          },
+          coords: {},
           isMaster: true
         });
 
         sendToClient(client, {
           type: 'duel_warp',
-          coords: {
-            mapGroup: DUEL_ROOM.mapGroup,
-            mapId: DUEL_ROOM.mapId,
-            x: DUEL_ROOM.playerBX,
-            y: DUEL_ROOM.playerBY
-          },
+          coords: {},
           isMaster: false
         });
 
-        console.log(`[Duel] Warping ${requester.id} (master) and ${client.id} (slave) to Battle Colosseum`);
+        console.log(`[Duel] Starting battle: ${requester.id} (master) vs ${client.id} (slave) — no warp`);
         break;
       }
 
@@ -306,31 +287,147 @@ function handleMessage(client, messageStr) {
         break;
       }
 
-      case 'duel_choice': {
-        // Player sends their battle choice (move/switch)
+      case 'duel_player_info': {
+        // Relay player name/gender/trainerId to duel opponent (for VS screen)
         if (!client.roomId || !client.duelOpponent) return;
-
-        const opponent = clients.get(client.duelOpponent);
-        if (opponent) {
-          sendToClient(opponent, {
-            type: 'duel_choice',
+        const piOpponent = clients.get(client.duelOpponent);
+        if (piOpponent) {
+          sendToClient(piOpponent, {
+            type: 'duel_player_info',
             playerId: client.id,
-            choice: message.choice,
-            rng: message.rng
+            name: message.name,
+            gender: message.gender,
+            trainerId: message.trainerId
           });
+          console.log(`[Duel] Player info relayed from ${client.id} to ${client.duelOpponent}`);
         }
         break;
       }
 
-      case 'duel_rng_sync': {
-        // Master sends RNG sync to slave
+      case 'duel_ready': {
+        // Relay ready signal to duel opponent (handshake before battle start)
+        if (!client.roomId || !client.duelOpponent) return;
+        const readyOpponent = clients.get(client.duelOpponent);
+        if (readyOpponent) {
+          sendToClient(readyOpponent, {
+            type: 'duel_ready',
+            playerId: client.id
+          });
+          console.log(`[Duel] Ready signal relayed from ${client.id} to ${client.duelOpponent}`);
+        }
+        break;
+      }
+
+      case 'duel_choice': {
+        // Relay PvP move choice to opponent (Real PvP synchronization)
+        if (!client.roomId || !client.duelOpponent) return;
+
+        const choiceOpponent = clients.get(client.duelOpponent);
+        if (choiceOpponent) {
+          sendToClient(choiceOpponent, {
+            type: 'duel_choice',
+            playerId: client.id,
+            action: message.action,
+            move: message.move,
+            target: message.target,
+            playerSlot: message.playerSlot
+          });
+          console.log(`[Duel] Move choice relayed from ${client.id} to ${client.duelOpponent} (action=${message.action}, move=${message.move}, target=${message.target})`);
+        }
+        break;
+      }
+
+      case 'duel_buffer': {
+        // Relay battle buffer data to opponent (GBA-PK exec flag protocol)
+        if (!client.roomId || !client.duelOpponent) return;
+
+        const opponent = clients.get(client.duelOpponent);
+        if (opponent) {
+          // Relay all fields — just forward the entire message with sender ID
+          const relay = { type: 'duel_buffer', playerId: client.id };
+          if (message.bufA) relay.bufA = message.bufA;
+          if (message.bufB) relay.bufB = message.bufB;
+          if (message.ef) relay.ef = message.ef;
+          if (message.bufID !== undefined) relay.bufID = message.bufID;
+          if (message.sendID !== undefined) relay.sendID = message.sendID;
+          if (message.p !== undefined) relay.p = message.p;
+          if (message.attacker !== undefined) relay.attacker = message.attacker;
+          if (message.target !== undefined) relay.target = message.target;
+          if (message.absent !== undefined) relay.absent = message.absent;
+          if (message.effect !== undefined) relay.effect = message.effect;
+          sendToClient(opponent, relay);
+        }
+        break;
+      }
+
+      case 'duel_buffer_cmd':
+      case 'duel_buffer_resp': {
+        // Relay buffer command/response to duel opponent (GBA-PK protocol)
+        if (!client.roomId || !client.duelOpponent) return;
+
+        const bufOpponent = clients.get(client.duelOpponent);
+        if (bufOpponent) {
+          const relay = { type: message.type, playerId: client.id };
+          if (message.battler !== undefined) relay.battler = message.battler;
+          if (message.bufA) relay.bufA = message.bufA;
+          if (message.bufB) relay.bufB = message.bufB;
+          if (message.ctx) relay.ctx = message.ctx;
+          sendToClient(bufOpponent, relay);
+          console.log(`[Duel] ${message.type} relayed from ${client.id} to ${client.duelOpponent} (battler=${message.battler})`);
+        }
+        break;
+      }
+
+      case 'duel_stage': {
+        // Relay battle stage sync to opponent (with diagnostic data)
+        const diagParts = [`Stage from ${client.id}: ${message.stage}`];
+        if (message.reason) diagParts.push(`reason=${message.reason}`);
+        if (message.bmf) diagParts.push(`bmf=${message.bmf}`);
+        if (message.ef) diagParts.push(`ef=${message.ef}`);
+        if (message.comm) diagParts.push(`comm=[${message.comm}]`);
+        if (message.ctrl0) diagParts.push(`ctrl0=${message.ctrl0}`);
+        if (message.ctrl1) diagParts.push(`ctrl1=${message.ctrl1}`);
+        if (message.end0) diagParts.push(`end0=${message.end0}`);
+        if (message.end1) diagParts.push(`end1=${message.end1}`);
+        if (message.btf) diagParts.push(`btf=${message.btf}`);
+        if (message.cb2) diagParts.push(`cb2=${message.cb2}`);
+        if (message.comm0) diagParts.push(`comm0=${message.comm0}`);
+        if (message.hsb) diagParts.push(`hsb=${message.hsb}`);
+        if (message.ib) diagParts.push(`ib=${message.ib}`);
+        if (message.relayBufID !== undefined) diagParts.push(`rbuf=${message.relayBufID}`);
+        if (message.relayP !== undefined) diagParts.push(`rP=${message.relayP}`);
+        if (message.relayE !== undefined) diagParts.push(`rE=${message.relayE}`);
+        if (message.relaySendID !== undefined) diagParts.push(`rsnd=${message.relaySendID}`);
+        if (message.remoteRcvd !== undefined) diagParts.push(`rcvd=${message.remoteRcvd}`);
+        if (message.bufA0) diagParts.push(`bufA0=${message.bufA0}`);
+        if (message.btf_change) diagParts.push(`BTF_CHANGE=${message.btf_change}`);
+        if (message.context) diagParts.push(`ctx=${message.context}`);
+        if (message.patches) diagParts.push(`patches=[${message.patches}]`);
+        if (message.iState !== undefined) diagParts.push(`iState=${message.iState}`);
+        if (message.sPtr) diagParts.push(`sPtr=${message.sPtr}`);
+        if (message.bs) diagParts.push(`bs=${message.bs}`);
+        if (message.br) diagParts.push(`br=${message.br}`);
+        if (message.bufA) diagParts.push(`bufA=${message.bufA}`);
+        if (message.brSS) diagParts.push(`brSS=${message.brSS}`);
+        if (message.maxIS !== undefined) diagParts.push(`maxIS=${message.maxIS}`);
+        if (message.dmaZ !== undefined) diagParts.push(`dmaZ=${message.dmaZ}`);
+        if (message.taskCount !== undefined) diagParts.push(`tasks=${message.taskCount}`);
+        if (message.killed !== undefined) diagParts.push(`killed=${message.killed}`);
+        if (message.tasks) diagParts.push(`taskList=${message.tasks}`);
+        if (message.vblank1) diagParts.push(`vb1=${message.vblank1}`);
+        if (message.vblank2) diagParts.push(`vb2=${message.vblank2}`);
+        if (message.intro !== undefined) diagParts.push(`intro=${message.intro}`);
+        if (message.htass !== undefined) diagParts.push(`htass=${message.htass}`);
+        if (message.turnPhase) diagParts.push(`tp=${message.turnPhase}`);
+        console.log(`[Duel] ${diagParts.join(' ')}`);
         if (!client.roomId || !client.duelOpponent) return;
 
         const opponent = clients.get(client.duelOpponent);
         if (opponent) {
           sendToClient(opponent, {
-            type: 'duel_rng_sync',
-            rng: message.rng
+            type: 'duel_stage',
+            playerId: client.id,
+            stage: message.stage
           });
         }
         break;

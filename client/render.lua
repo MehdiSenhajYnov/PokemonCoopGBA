@@ -206,13 +206,21 @@ function Render.drawGhost(painter, overlayImage, playerId, position, playerPos, 
     spriteImg, spriteW, spriteH = Sprite.getImageForPlayer(playerId)
   end
 
+  local spriteDrawn = false
   if spriteImg and overlayImage then
     -- Anchor sprite so feet align with the tile position
     -- Center horizontally on tile (handles 16x32 walk and 32x32 bike)
     local drawX = screenX - math.floor((spriteW - TILE_SIZE) / 2)
     local drawY = screenY - (spriteH - TILE_SIZE)
-    pcall(overlayImage.drawImage, overlayImage, spriteImg, drawX, drawY)
-  else
+    local drawOk = pcall(overlayImage.drawImage, overlayImage, spriteImg, drawX, drawY)
+    if drawOk then
+      spriteDrawn = true
+    else
+      -- Image became invalid (GC'd or stale) — clear cache so next frame retries
+      if Sprite and Sprite.removePlayer then Sprite.removePlayer(playerId) end
+    end
+  end
+  if not spriteDrawn then
     -- Fallback: colored rectangle (original behavior)
     local fillColor = (state and STATE_COLORS[state]) or GHOST_COLOR
     local outlineColor = (state and STATE_OUTLINES[state]) or GHOST_OUTLINE

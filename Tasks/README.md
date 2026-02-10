@@ -6,10 +6,11 @@ Index de toutes les tâches d'implémentation organisées par phase.
 
 ```
 Tasks/
-├── todo/          Tâches à faire (toutes les tasks actuelles)
-├── done/          Tâches terminées (vide pour l'instant)
-├── updates/       Mises à jour et améliorations futures
-└── README.md      Ce fichier
+├── todo/              Taches a faire (toutes les tasks actuelles)
+│   └── Improvements/  Ameliorations futures (non bloquantes)
+├── done/              Taches terminees
+├── updates/           Mises a jour et ameliorations futures
+└── README.md          Ce fichier
 ```
 
 **Format des noms:** `P{phase}_{numéro}_{nom}.md`
@@ -309,6 +310,20 @@ Tasks/
 
 ---
 
+### todo/P2_09_HIDE_GHOSTS_OUTSIDE_OVERWORLD.md
+**Status:** 🔴 A faire
+**Priorite:** ⭐ Haute
+**Description:** Fix simple : verifier callback2 == CB2_Overworld avant de dessiner les ghosts. Empeche les ghosts d'apparaitre dans le sac, menus, combats sauvages, ecran PC, etc. ~3 lignes dans main.lua.
+
+---
+
+### todo/Improvements/HYBRID_OAM_GHOST_RENDERING.md
+**Status:** 🔴 A faire (amelioration future)
+**Priorite:** Moyenne
+**Description:** Remplacer le rendu overlay (Painter API) par injection OAM/VRAM directe. Garde l'extraction dynamique de sprites. Avantages : occlusion gratuite (suppression occlusion.lua), masquage automatique hors overworld, pixel-perfect, compatible mGBA 0.10+. Reference : `refs/GBA-PK-multiplayer-main/`.
+
+---
+
 ### todo/P2_07_OPTIMIZATION.md
 **Status:** 🔴 À faire
 **Tâche:** #11
@@ -442,6 +457,28 @@ Tasks/
 
 ---
 
+## Infrastructure — Test Autonome 🤖
+
+### done/infrastructure/P0_12_AUTONOMOUS_TEST_FRAMEWORK.md
+**Status:** 🟢 Completed (2026-02-06)
+**Priorité:** ⭐ Haute (déblocke toutes les phases suivantes)
+**Description:** Framework de test autonome permettant à Claude d'itérer en boucle sans intervention humaine
+
+**Résultat:**
+- `scripts/testing/runner.lua` — framework principal (save state, suites sync+async, JSON output, screenshots)
+- `scripts/testing/assertions.lua` — assertEqual, assertRange, assertTrue, assertNotNil, assertBytes, screenshot
+- `scripts/testing/run_all.lua` — point d'entrée unique
+- 5 suites: `memory.lua`, `rom_patches.lua`, `battle.lua`, `warp.lua`, `network.lua`
+- Support async multi-frame tests (waitFrames + done callback)
+- Auto-screenshot on test failure
+- POC scripts archivés vers `scripts/archive/`
+
+**Fichiers créés:**
+- ✅ `scripts/testing/runner.lua`, `assertions.lua`, `run_all.lua`
+- ✅ `scripts/testing/suites/memory.lua`, `rom_patches.lua`, `battle.lua`, `warp.lua`, `network.lua`
+
+---
+
 ## Phase 4 - Multi-ROM 🌐
 
 ### todo/P4_10_MULTI_ROM.md
@@ -521,15 +558,18 @@ Toutes les tâches sont dans `todo/` jusqu'à leur complétion:
 6c. ~~**P2_04E_WAYPOINT_QUEUE_INTERPOLATION.md**~~ ✅ TERMINÉ (waypoint queue + catch-up adaptatif)
 7. ~~**P2_07A_EARLY_MOVEMENT_DETECTION.md**~~ ✅ TERMINÉ (early detection + duration timestamps)
 7b. ~~**P2_07B_INTERPOLATION_SMOOTHNESS.md**~~ ✅ TERMINÉ (5 fixes: frame loop reorder + os.clock + dt priority + padding + soft catch-up)
-8. **todo/P2_07_OPTIMIZATION.md**
-9. **todo/P2_08_FINAL_TESTING.md**
+8. **todo/P2_09_HIDE_GHOSTS_OUTSIDE_OVERWORLD.md** (fix rapide : ghosts invisibles hors overworld)
+9. **todo/Improvements/HYBRID_OAM_GHOST_RENDERING.md** (amelioration future : injection OAM)
+10. **todo/P2_07_OPTIMIZATION.md**
+11. **todo/P2_08_FINAL_TESTING.md**
 10. ~~**P3_09_DUEL_WARP.md**~~ ✅ TERMINÉ (duel trigger + server coordination + input lock + UI + disconnect handling)
 10a. ~~**P3_09A_WARP_MECHANISM_FIX.md**~~ ✅ TERMINÉ (save state hijack + door fallback)
 10b. ~~**P3_10A_SCAN_BATTLE_ADDRESSES.md**~~ ✅ TERMINÉ (scripts scan + fix gMainInBattle 0x020233E0 → 0x0202067F)
 10c. ~~**P3_10B_FIX_DUEL_PVP_SYSTEM.md**~~ ✅ TERMINÉ (fix 5 bugs duel PvP)
 10d. **todo/P3_10_DUEL_BATTLE_AND_RETURN.md** (combat duel + retour origine — superseded par 10b+10c)
-11. **todo/P4_10_MULTI_ROM.md** (Radical Red, Unbound)
-12. **todo/P5_11_DOCUMENTATION.md**
+11. ~~**P0_12_AUTONOMOUS_TEST_FRAMEWORK.md**~~ ✅ TERMINÉ (framework test autonome — 5 suites, runner, assertions, async support)
+12. **todo/P4_10_MULTI_ROM.md** (Radical Red, Unbound)
+13. **todo/P5_11_DOCUMENTATION.md**
 
 **Workflow:**
 - Nouvelles tâches → `todo/`

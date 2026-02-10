@@ -26,6 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] BG layer occlusion (ghosts hidden behind buildings/trees)
 - [x] Bike sprite support (32x32 OAM detection + centered rendering)
 
+### Phase 3B - PvP Battle System: Context Vars & Stuck Recovery (2026-02-10)
+- **config/run_and_bun.lua**: Found 4 battler context variable addresses via BSS layout analysis
+  - gBattlerAttacker = 0x0202358C, gBattlerTarget = 0x0202358D
+  - gEffectBattler = 0x0202358F, gAbsentBattlerFlags = 0x02023591
+  - Anchored between gLastUsedAbility and gBattlescriptCurrInstr (0x02023594)
+  - Buffer relay now includes attacker/target context in duel_buffer_cmd messages
+- **client/battle.lua**: Stuck detection — 3-layer timeout system
+  - Relay timeout: 600 frames (10s) no relay activity → forceEnd
+  - Safety timeout reduced from 18000 (5min) to 3600 (1min)
+  - forceEnd() rewritten: `forceEndPending` flag + 30-frame 0x37 CMD_GET_AWAY_EXIT re-injection loop (GBA-PK approach)
+  - ENDING stage also re-injects 0x37 for first 30 frames
+- **client/main.lua**: Ping timeout — 900 frames (15s) no server messages during battle → forceEnd
+  - `lastServerMessageFrame` tracking with reset at all cleanup points
+- **scripts/ToUse/verify_battler_context_vars.lua**: New runtime verification script for mGBA
+  - Monitors all battler context vars during live PvP battle
+  - Cross-checks gBattlescriptCurrInstr is valid ROM pointer
+
 ## [0.3.2-alpha] - 2026-02-03
 
 ### Fixed - Bike Sprite Detection & Rendering
@@ -353,6 +370,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **0.7.1-alpha** (2026-02-10): Context vars found + stuck detection + multi-frame forceEnd + ping timeout
 - **0.3.2-alpha** (2026-02-03): Bike sprite support — 32x32 OAM detection, sort-based player identification, centered rendering
 - **0.3.1-alpha** (2026-02-03): Waypoint queue interpolation — FIFO queue + adaptive catch-up, exact path fidelity at any speedhack rate
 - **0.3.0-alpha** (2026-02-03): BG layer occlusion — ghosts hidden behind buildings/trees, fully opaque ghosts, HAL BG read functions
@@ -380,19 +398,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] VRAM sprite extraction and network sync
 - [x] BG layer occlusion (ghosts behind buildings/trees)
 
-### 0.4.0 - Duel Warp System (Phase 3)
-- [ ] Click/button trigger system
-- [ ] RAM write implementation
-- [ ] Input locking during warp
-- [ ] Battle room teleportation
-- [ ] Duel acceptance UI
+### 0.4.0 - Duel Warp System (Phase 3) ✅
+- [x] Button trigger system (duel.lua — proximity detection + A button)
+- [x] CB2_InitBattle direct takeover (no physical warp)
+- [x] Input locking during warp
+- [x] PvP Link Battle Emulation (buffer relay, ROM patching)
+- [x] Duel acceptance UI
 
-### 0.5.0 - Multi-ROM Support (Phase 4)
+### 0.5.0 - PvP Battle Polish (Phase 3B) — IN PROGRESS
+- [x] Context vars found (gBattlerAttacker/Target/Effect/Absent)
+- [x] Stuck detection (relay timeout + ping timeout + safety timeout)
+- [x] forceEnd multi-frame 0x37 injection
+- [ ] Multi-turn PvP battles
+- [ ] BATTLE_FLAGS system (items, exp, heal, level cap)
+
+### 0.6.0 - Multi-ROM Support (Phase 4)
 - [ ] Radical Red configuration
 - [ ] Unbound configuration
 - [ ] Improved ROM auto-detection
 
-### 0.6.0 - Polish & Release Candidate (Phase 5)
+### 0.7.0 - Polish & Release Candidate (Phase 5)
 - [ ] Error handling improvements
 - [ ] Performance optimization
 - [ ] Complete API documentation

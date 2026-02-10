@@ -1,0 +1,1800 @@
+ROM loaded: 33554432 bytes (32.0 MB)
+
+======================================================================
+  STEP 1: Literal pool references to known anchors
+======================================================================
+
+  CB2_BattleMain (0x08094815): 2 ROM refs
+  CB2_LoadMap (0x08007441): 447 ROM refs
+  CB2_Overworld (0x080A89A5): 1 ROM refs
+  GetMultiplayerId (0x0833D67F): 0 ROM refs
+  SIO_MULTI_CNT (0x04000120): 21 ROM refs
+  gBattleTypeFlags (0x020090E8): 0 ROM refs
+  gEnemyParty (0x02023CF0): 551 ROM refs
+  gMainAddr (0x02020648): 0 ROM refs
+  gMainCallback2 (0x0202064C): 19 ROM refs
+  gMainInBattle (0x020206AE): 0 ROM refs
+  gPlayerParty (0x02023A98): 1141 ROM refs
+  gPlayerPartyCount (0x02023A95): 46 ROM refs
+  gPokemonStorage (0x02028848): 2 ROM refs
+  sWarpDestination (0x020318A8): 12 ROM refs
+
+======================================================================
+  STEP 2: Unknown EWRAM addresses near known anchors
+======================================================================
+
+  [BATTLE REGION 0x02008xxx-0x0200Bxxx] (2 addresses)
+    0x02008E20  (2 refs: CB2_LoadMap, gPlayerParty)
+    0x02008E68  (1 refs: CB2_LoadMap)
+
+  [MAIN/PARTY REGION 0x02020xxx-0x02024xxx] (177 addresses)
+    0x02020630  (7 refs: CB2_BattleMain, CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x020233DC  (6 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x020233E6  (6 refs: CB2_BattleMain, CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02022CE8  (5 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023126  (5 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x02023128  (5 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x02023364  (5 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x020233E0  (5 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020233E4  (5 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x0202356C  (5 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x02023A0C  (5 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x02023A18  (5 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02021BC0  (4 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x02021CC4  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02021DC4  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02021EC4  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02021FC4  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020226C4  (4 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty)
+    0x02022BC4  (4 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty)
+    0x02022CF0  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023116  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023118  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202311A  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202311C  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202311E  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202312E  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020233FC  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023590  (4 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x02023595  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023668  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020239D0  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023A20  (4 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x02023A40  (4 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x02024018  (4 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02024CBC  (4 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02022CC6  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02022F30  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02022F40  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023120  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023122  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023124  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202312A  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202312C  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020232CF  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023368  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020233EE  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02023408  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02023421  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02023572  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023592  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023594  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02023599  (3 refs: gEnemyParty, gMainCallback2, gPlayerParty)
+    0x0202359C  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020235CC  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020235FA  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02023604  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02023618  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x0202370E  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023716  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02023718  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    ... and 117 more
+
+  [OTHER REGIONS] (320 addresses)
+    0x02000000  (6 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02036914  (5 refs: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02000C24  (4 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02004730  (4 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02031864  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020368DC  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, sWarpDestination)
+    0x02036BA0  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02036BA2  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02036BA4  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02036BB0  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02037594  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020379DE  (4 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x020379F6  (4 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x020379F7  (4 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x020381AE  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020381B2  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020381F0  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02038230  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0203B2DC  (4 refs: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x0203C4B8  (4 refs: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0203C5AC  (4 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02000002  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02000003  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02000100  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02001A40  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02002080  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x02007800  (3 refs: gEnemyParty, gMainCallback2, gPlayerParty)
+    0x0201C000  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    0x0203174C  (3 refs: gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0203185C  (3 refs: CB2_LoadMap, gEnemyParty, gPlayerParty)
+    ... and 290 more
+
+======================================================================
+  STEP 3: Battle-critical variable identification
+======================================================================
+
+  Addresses near 2+ battle anchors (234):
+    0x02020630  (near: CB2_BattleMain, CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x02000000  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x020233DC  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x020233E6  (near: CB2_BattleMain, CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02022CE8  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023126  (near: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x02023128  (near: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x02023364  (near: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x020233E0  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020233E4  (near: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x0202356C  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x02023A0C  (near: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty, gPlayerPartyCount)
+    0x02023A18  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02036914  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02000C24  (near: gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02004730  (near: gEnemyParty, gPlayerParty, gPlayerPartyCount, gPokemonStorage)
+    0x02021BC0  (near: CB2_LoadMap, gEnemyParty, gMainCallback2, gPlayerParty)
+    0x02021CC4  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02021DC4  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02021EC4  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02021FC4  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x020226C4  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty)
+    0x02022BC4  (near: CB2_LoadMap, SIO_MULTI_CNT, gEnemyParty, gPlayerParty)
+    0x02022CF0  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023116  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x02023118  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202311A  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202311C  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202311E  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+    0x0202312E  (near: CB2_LoadMap, gEnemyParty, gPlayerParty, gPlayerPartyCount)
+
+  Functions referencing gBattleTypeFlags:
+
+  Functions referencing gEnemyParty:
+    0x08013FA9 (? bytes, 27 BL) BL->0x0800A4B0 BL->0x08018108 BL->0x0800A4F4
+    0x0801AABD (? bytes, 17 BL) BL->0x08014224 BL->0x08347BB4 BL->0x08083AD4
+    0x08032455 (? bytes, 15 BL) BL->0x0803240C BL->0x080C16D4 BL->0x0808A5C4
+    0x08032E89 (? bytes, 5 BL) BL->0x08032E40 BL->0x08032E40 BL->0x08032E40
+    0x08036491 (? bytes, 24 BL) BL->0x0800071C BL->0x08000710 BL->0x08345864
+    0x08036D01 (? bytes, 23 BL) BL->0x080C6F84 BL->0x080069D0 BL->0x08006A1C
+    0x080371A9 (? bytes, 27 BL) BL->0x080C6F84 BL->0x080069D0 BL->0x08006A1C
+    0x08037B49 (? bytes, 24 BL) BL->0x0800A4B0 BL->0x080C6F84 BL->0x080069D0
+    0x080388B5 (? bytes, 12 BL) BL->0x08085D70 BL->0x08085D70 BL->0x08085D70
+    0x080396B9 (386 bytes, 7 BL) BL->0x08085D70 BL->0x08085D70 BL->0x0808589C
+    0x08039CBB (? bytes, 9 BL) BL->0x0803DBF0 BL->0x0803DDB0 BL->0x08347C14
+    0x0803ACB9 (? bytes, 10 BL) BL->0x0803B484 BL->0x080336C0 BL->0x080C49D8
+    0x0803EC05 (? bytes, 12 BL) BL->0x08089E6C BL->0x0808A07C BL->0x08192794
+    0x0803F35D (? bytes, 9 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x08346348
+    0x0804260D (? bytes, 4 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x0808BD34
+    0x08046121 (? bytes, 15 BL) BL->0x080C49B4 BL->0x080C49D8 BL->0x080C49D8
+    0x080466F9 (? bytes, 11 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x0804B430
+    0x08052A35 (? bytes, 16 BL) BL->0x080C49C8 BL->0x080C49C8 BL->0x080C49C8
+    0x08052D27 (? bytes, 16 BL) BL->0x08085D70 BL->0x080864C0 BL->0x08084E14
+    0x08052F7D (476 bytes, 10 BL) BL->0x080C49B4 BL->0x08053040 BL->0x08053040
+    0x08053049 (272 bytes, 6 BL) BL->0x08086F6C BL->0x080C49B4 BL->0x0804F23C
+    0x08053325 (? bytes, 7 BL) BL->0x080C49B4 BL->0x081E8B50 BL->0x080F6124
+    0x08059687 (? bytes, 10 BL) BL->0x08040AB0 BL->0x080416E4 BL->0x080C49B4
+    0x0805AA99 (? bytes, 8 BL) BL->0x08085D70 BL->0x08085D70 BL->0x08085D70
+    0x0805E14D (? bytes, 17 BL) BL->0x080C49B4 BL->0x080C49D8 BL->0x080C49D8
+    0x080604AD (? bytes, 15 BL) BL->0x08040AB0 BL->0x080C49B4 BL->0x08085D70
+    0x08061579 (? bytes, 2 BL) BL->0x08087550 BL->0x08057940
+    0x080621C1 (? bytes, 7 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x08085D70
+    0x08067F5D (? bytes, 13 BL) BL->0x080C49B4 BL->0x0804F23C BL->0x0804F23C
+    0x08068BB5 (? bytes, 16 BL) BL->0x080C49B4 BL->0x080C49B4 BL->0x08085D70
+    0x0806A233 (? bytes, 12 BL) BL->0x080C49B4 BL->0x0804B430 BL->0x0815E41C
+    0x0806BF39 (? bytes, 6 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x08085D70
+    0x0806C695 (? bytes, 6 BL) BL->0x080C49C8 BL->0x08085D70 BL->0x08085D70
+    0x0806D3D1 (? bytes, 7 BL) BL->0x0806D3A0 BL->0x080338B0 BL->0x08040F40
+    0x0806DB91 (? bytes, 29 BL) BL->0x0806D3A0 BL->0x08086C54 BL->0x0816AF7C
+    0x0806DD11 (? bytes, 21 BL) BL->0x0806D3A0 BL->0x08085D70 BL->0x0806D3A0
+    0x0806DDB5 (? bytes, 15 BL) BL->0x0806D3A0 BL->0x08085D70 BL->0x080BF910
+    0x0806E0E1 (? bytes, 18 BL) BL->0x0806DF54 BL->0x0817FF44 BL->0x0806E060
+    0x08076965 (? bytes, 17 BL) BL->0x08076B04 BL->0x0807680C BL->0x0808F1FC
+    0x08076BDD (? bytes, 18 BL) BL->0x080C2CC0 BL->0x080C49C8 BL->0x080C49B4
+    0x08076F99 (432 bytes, 15 BL) BL->0x080C2CC0 BL->0x080C49C8 BL->0x080C2CC0
+    0x08077AB1 (? bytes, 5 BL) BL->0x080C4ABC BL->0x08032E40 BL->0x08077AB0
+    0x08077D75 (? bytes, 11 BL) BL->0x081A40E4 BL->0x08077AB0 BL->0x081A40E4
+    0x080781F5 (? bytes, 16 BL) BL->0x081A40E4 BL->0x08008598 BL->0x0800887C
+    0x08078571 (? bytes, 12 BL) BL->0x08008598 BL->0x0800887C BL->0x080081D8
+    0x08078661 (? bytes, 10 BL) BL->0x081A40E4 BL->0x08007100 BL->0x08085D70
+    0x08078881 (? bytes, 10 BL) BL->0x08078FFA BL->0x08085D70 BL->0x08085D70
+    0x08079011 (? bytes, 6 BL) BL->0x08033E04 BL->0x08078788 BL->0x080790F4
+    0x080790FD (? bytes, 9 BL) BL->0x08079AF2 BL->0x080864C0 BL->0x080864C0
+    0x08079B09 (? bytes, 12 BL) BL->0x08078788 BL->0x08085D70 BL->0x08076694
+    0x08079B8D (? bytes, 14 BL) BL->0x08085D70 BL->0x08076694 BL->0x080C49C8
+    0x08079D49 (? bytes, 15 BL) BL->0x08077740 BL->0x08085D70 BL->0x0808BE80
+    0x0807AC19 (? bytes, 18 BL) BL->0x0807D430 BL->0x080C49D8 BL->0x080C49D8
+    0x0807AD35 (? bytes, 14 BL) BL->0x08085D70 BL->0x08085D70 BL->0x08085D70
+    0x0807ADA3 (? bytes, 13 BL) BL->0x08076944 BL->0x08085D70 BL->0x08085D70
+    0x0807AE9D (? bytes, 17 BL) BL->0x08076474 BL->0x08091B30 BL->0x08076474
+    0x0807B1B1 (? bytes, 12 BL) BL->0x08085D70 BL->0x080C1120 BL->0x08078788
+    0x0807B819 (? bytes, 19 BL) BL->0x080C49C8 BL->0x080C49D8 BL->0x080C49C8
+    0x0807BBFD (? bytes, 20 BL) BL->0x080C49C8 BL->0x080C49D8 BL->0x0804B430
+    0x0807BDC1 (? bytes, 15 BL) BL->0x0807C688 BL->0x0808BE0C BL->0x083463C0
+    0x0807C815 (? bytes, 14 BL) BL->0x080C49C8 BL->0x080C49D8 BL->0x080C49C8
+    0x0807CAAB (? bytes, 16 BL) BL->0x0804B604 BL->0x080C49C8 BL->0x080C49D8
+    0x0807CC75 (? bytes, 13 BL) BL->0x080C49C8 BL->0x080C49B4 BL->0x0807CAA4
+    0x0807D439 (? bytes, 13 BL) BL->0x080C49C8 BL->0x080C49D8 BL->0x080C49C8
+    0x0807D6F5 (? bytes, 9 BL) BL->0x080C49C8 BL->0x0807D660 BL->0x080C49B4
+    0x0807DFD5 (? bytes, 13 BL) BL->0x081A40E4 BL->0x081A40E4 BL->0x080C4ABC
+    0x0807E39D (? bytes, 17 BL) BL->0x081A40E4 BL->0x08008598 BL->0x0800887C
+    0x0807E6F9 (? bytes, 12 BL) BL->0x08008598 BL->0x0800887C BL->0x080081D8
+    0x0807E7E9 (? bytes, 10 BL) BL->0x081A40E4 BL->0x08007100 BL->0x08085D70
+    0x0807EA09 (? bytes, 10 BL) BL->0x0807F182 BL->0x08085D70 BL->0x08085D70
+    0x0807F205 (? bytes, 9 BL) BL->0x0807FBFA BL->0x080864C0 BL->0x080864C0
+    0x0807FC11 (? bytes, 13 BL) BL->0x0807E910 BL->0x08085D70 BL->0x08076694
+    0x0807FC95 (? bytes, 15 BL) BL->0x08085D70 BL->0x08076694 BL->0x080C49C8
+    0x0807FE35 (? bytes, 15 BL) BL->0x08077740 BL->0x08085D70 BL->0x0808BE80
+    0x08080A2B (? bytes, 13 BL) BL->0x08076944 BL->0x08085D70 BL->0x08085D70
+    0x08080B25 (? bytes, 17 BL) BL->0x08076474 BL->0x08091B30 BL->0x08076474
+    0x08080E39 (? bytes, 10 BL) BL->0x08085D70 BL->0x080C1120 BL->0x0807E910
+    0x080839CD (? bytes, 20 BL) BL->0x080C49B4 BL->0x080864C0 BL->0x080864C0
+    0x08083B75 (? bytes, 17 BL) BL->0x08083AD4 BL->0x08083AD4 BL->0x08083C04
+    0x08084D21 (? bytes, 24 BL) BL->0x08083B74 BL->0x08084AE8 BL->0x080864C0
+    0x08086DC1 (? bytes, 12 BL) BL->0x08085D70 BL->0x08086D7C BL->0x08085D70
+    0x08086FA9 (? bytes, 12 BL) BL->0x08083B74 BL->0x08347BB4 BL->0x08083B94
+    0x0808AC8D (? bytes, 13 BL) BL->0x08085D70 BL->0x08086F6C BL->0x08086F6C
+    0x0808DF59 (? bytes, 25 BL) BL->0x0808DDE8 BL->0x080864C0 BL->0x08085D70
+    0x0808FF79 (? bytes, 16 BL) BL->0x080C49B4 BL->0x0808EDF4 BL->0x080C49B4
+    0x080915E1 (? bytes, 19 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x080894FC
+    0x080916D1 (? bytes, 21 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x0808EDF4
+    0x08093B4F (? bytes, 19 BL) BL->0x080081D8 BL->0x080949C0 BL->0x081A1E90
+    0x080949C1 (? bytes, 20 BL) BL->0x080C49B4 BL->0x08052F7C BL->0x08085D70
+    0x08095369 (? bytes, 15 BL) BL->0x08000B5C BL->0x08095238 BL->0x08000B5C
+    0x08095B05 (? bytes, 14 BL) BL->0x08095238 BL->0x08086D7C BL->0x0800E120
+    0x080963DD (? bytes, 20 BL) BL->0x0800A4B0 BL->0x080963BC BL->0x08095150
+    0x08096FDD (? bytes, 15 BL) BL->0x081F26B4 BL->0x081F26B4 BL->0x08003614
+    0x08097055 (? bytes, 17 BL) BL->0x083463C0 BL->0x08085D70 BL->0x08085D70
+    0x080979D9 (? bytes, 18 BL) BL->0x08085D70 BL->0x08085D70 BL->0x08008B40
+    0x08097A47 (512 bytes, 15 BL) BL->0x08085D70 BL->0x08008BD0 BL->0x08008BF0
+    0x08097B7D (202 bytes, 5 BL) BL->0x08085D70 BL->0x08008B40 BL->0x08097B20
+    0x08097BF1 (86 bytes, 2 BL) BL->0x080024E8 BL->0x0800237C
+    0x080982C3 (? bytes, 10 BL) BL->0x08085D70 BL->0x08085D70 BL->0x08085D70
+    0x08098405 (? bytes, 12 BL) BL->0x08085D70 BL->0x08085D70 BL->0x080922C8
+    0x08098D05 (? bytes, 18 BL) BL->0x083463C0 BL->0x08085D70 BL->0x08085D70
+    0x0809924D (? bytes, 32 BL) BL->0x08008BD0 BL->0x08085D70 BL->0x08008BD0
+    0x080994AF (? bytes, 23 BL) BL->0x08085D70 BL->0x08085D70 BL->0x080F2BD4
+    0x08099AB1 (? bytes, 14 BL) BL->0x0800A4B0 BL->0x08008BD0 BL->0x083463C0
+    0x0809C7D7 (? bytes, 26 BL) BL->0x08085D70 BL->0x0808BE0C BL->0x083463C0
+    0x0809D141 (? bytes, 14 BL) BL->0x083463C0 BL->0x08085D70 BL->0x080BB414
+    0x080C1845 (? bytes, 5 BL) BL->0x080C2CC0 BL->0x080C625C BL->0x0808F5E0
+    0x080C3B55 (? bytes, 15 BL) BL->0x080C2CC0 BL->0x080C49C8 BL->0x0808EDF4
+    0x080C3C95 (? bytes, 10 BL) BL->0x080C49B4 BL->0x080C2CC0 BL->0x080C2CC0
+    0x080C3FFD (332 bytes, 10 BL) BL->0x080C3B54 BL->0x080C2CC0 BL->0x080C49B4
+    0x080C4A15 (178 bytes, 3 BL) BL->0x080C2CC0 BL->0x080C49B4 BL->0x08085D70
+    0x080C5EFD (312 bytes, 4 BL) BL->0x080C2CC0 BL->0x080C49B4 BL->0x08085D70
+    0x080C6547 (? bytes, 10 BL) BL->0x080C2CC0 BL->0x080C49B4 BL->0x08085D70
+    0x080C71B5 (? bytes, 30 BL) BL->0x080D8724 BL->0x08035258 BL->0x08001B68
+    0x080C748D (? bytes, 16 BL) BL->0x080C49B4 BL->0x08076694 BL->0x08076F98
+    0x080C7589 (? bytes, 17 BL) BL->0x080C3FB8 BL->0x080C3FA4 BL->0x080C49B4
+    0x080C7965 (? bytes, 21 BL) BL->0x0808F1FC BL->0x0808EE30 BL->0x0808F74C
+    0x080CEAE1 (? bytes, 36 BL) BL->0x08084234 BL->0x080B6C04 BL->0x080CE8B8
+    0x080CEBED (? bytes, 30 BL) BL->0x080B6C04 BL->0x08085D70 BL->0x080CE8B8
+    0x080CED2D (? bytes, 27 BL) BL->0x080B6C04 BL->0x08085D70 BL->0x080CE8B8
+    0x080CF0F9 (? bytes, 15 BL) BL->0x080CEFDC BL->0x08085D70 BL->0x080CF040
+    0x080CF251 (? bytes, 31 BL) BL->0x08085D70 BL->0x080CF040 BL->0x0808BE0C
+    0x080D32F9 (? bytes, 25 BL) BL->0x08083B74 BL->0x08085D70 BL->0x08086F6C
+    0x080D35AD (? bytes, 15 BL) BL->0x080D3F4C BL->0x080D32F8 BL->0x08085304
+    0x080D3847 (? bytes, 25 BL) BL->0x080D3188 BL->0x081D9088 BL->0x080D37F4
+    0x081180E1 (? bytes, 14 BL) BL->0x08083B74 BL->0x08083B94 BL->0x080864C0
+    0x08118145 (? bytes, 16 BL) BL->0x08083B74 BL->0x08083B94 BL->0x080864C0
+    0x08128119 (? bytes, 12 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x08085D70
+    0x08135205 (? bytes, 25 BL) BL->0x080010C4 BL->0x080010C4 BL->0x080011F8
+    0x081378EB (? bytes, 24 BL) BL->0x080010C4 BL->0x080010C4 BL->0x080011F8
+    0x08137CD5 (? bytes, 19 BL) BL->0x080C2CC0 BL->0x080C21E0 BL->0x080010C4
+    0x0813862D (? bytes, 19 BL) BL->0x080C2CC0 BL->0x080C21E0 BL->0x080010C4
+    0x08154019 (? bytes, 9 BL) BL->0x08085D70 BL->0x080C4ABC BL->0x08085D70
+    0x081613D5 (? bytes, 18 BL) BL->0x080C49B4 BL->0x081613D4 BL->0x08086F6C
+    0x08161F8D (? bytes, 20 BL) BL->0x080C49B4 BL->0x08086F6C BL->0x08085D70
+    0x081627E1 (? bytes, 18 BL) BL->0x0807B7A4 BL->0x080C49B4 BL->0x08162AA4
+    0x08162AAB (? bytes, 17 BL) BL->0x080C49B4 BL->0x080C49C8 BL->0x080C49D8
+    0x08162B71 (416 bytes, 13 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x08085D70
+    0x08166B25 (? bytes, 15 BL) BL->0x08088A30 BL->0x08166E7C BL->0x08008BD0
+    0x0817E4CD (? bytes, 0 BL)
+    0x0817EC6D (? bytes, 14 BL) BL->0x080C49C8 BL->0x08052F7C BL->0x08085D70
+    0x0817EFE3 (36 bytes, 0 BL)
+    0x0817FAB1 (? bytes, 11 BL) BL->0x08086F6C BL->0x0804F23C BL->0x08085D70
+    0x0817FB59 (? bytes, 14 BL) BL->0x08008CF0 BL->0x080C49B4 BL->0x08085D70
+    0x081801CD (? bytes, 13 BL) BL->0x08085D70 BL->0x08085D70 BL->0x08345D20
+    0x08189449 (? bytes, 14 BL) BL->0x080C3060 BL->0x080C2CC0 BL->0x080C21E0
+    0x08189551 (? bytes, 16 BL) BL->0x080C3060 BL->0x080C2CC0 BL->0x080C21E0
+    0x0818D6FD (? bytes, 15 BL) BL->0x080C40AC BL->0x080C2CC0 BL->0x080C49B4
+    0x08190115 (? bytes, 11 BL) BL->0x080C40AC BL->0x080C49B4 BL->0x080C2CC0
+    0x081923BD (456 bytes, 16 BL) BL->0x0808BE0C BL->0x083463C0 BL->0x08083B94
+    0x081926B5 (? bytes, 15 BL) BL->0x08083B74 BL->0x0808429C BL->0x080864C0
+    0x08193AA5 (? bytes, 10 BL) BL->0x08196B68 BL->0x08196C30 BL->0x080843D8
+    0x08193E25 (? bytes, 12 BL) BL->0x08084350 BL->0x080864C0 BL->0x080864C0
+    0x08193FB5 (? bytes, 11 BL) BL->0x080BB34C BL->0x08346348 BL->0x081D8010
+    0x08194199 (? bytes, 10 BL) BL->0x08084870 BL->0x081D8390 BL->0x080864C0
+    0x081944FD (? bytes, 20 BL) BL->0x080BB34C BL->0x08193A20 BL->0x08193A20
+    0x08195935 (? bytes, 9 BL) BL->0x080BB34C BL->0x081937BC BL->0x080093B8
+    0x08196DD5 (? bytes, 12 BL) BL->0x08196CA0 BL->0x0808BE0C BL->0x0808BE0C
+    0x081970B1 (498 bytes, 30 BL) BL->0x08196B68 BL->0x08085D70 BL->0x080864C0
+    0x081A1CBF (? bytes, 16 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x081A1E90
+    0x081ADB81 (? bytes, 12 BL) BL->0x081AF2C2 BL->0x080C49B4 BL->0x080C49B4
+    0x081AF619 (? bytes, 9 BL) BL->0x08085D70 BL->0x08085D70 BL->0x08085D70
+    0x081B00D1 (? bytes, 4 BL) BL->0x080C49B4 BL->0x081B038C BL->0x08052174
+    0x081B04AD (182 bytes, 4 BL) BL->0x080C49B4 BL->0x08085D70 BL->0x081AF8A0
+    0x081B6E31 (? bytes, 5 BL) BL->0x08083B54 BL->0x08083B74 BL->0x08347BB4
+    0x081B7181 (54 bytes, 2 BL) BL->0x08347BB4 BL->0x08347BB4
+    0x081B71C5 (58 bytes, 2 BL) BL->0x08347BB4 BL->0x08347BB4
+    0x081B7B4B (? bytes, 14 BL) BL->0x081A40E4 BL->0x081A40E4 BL->0x080C4ABC
+    0x081B7F21 (? bytes, 17 BL) BL->0x081A40E4 BL->0x08008598 BL->0x0800887C
+    0x081B827D (? bytes, 12 BL) BL->0x08008598 BL->0x0800887C BL->0x080081D8
+    0x081B836D (? bytes, 10 BL) BL->0x081A40E4 BL->0x08007100 BL->0x08085D70
+    0x081B858D (? bytes, 10 BL) BL->0x081B8D06 BL->0x08085D70 BL->0x08085D70
+    0x081B8D89 (? bytes, 9 BL) BL->0x081B977E BL->0x080864C0 BL->0x080864C0
+    0x081B9795 (? bytes, 13 BL) BL->0x081B8494 BL->0x08085D70 BL->0x08076694
+    0x081B9819 (? bytes, 15 BL) BL->0x08085D70 BL->0x08076694 BL->0x080C49C8
+    0x081B99B9 (? bytes, 15 BL) BL->0x08077740 BL->0x08085D70 BL->0x0808BE80
+    0x081BA39B (? bytes, 13 BL) BL->0x08076944 BL->0x08085D70 BL->0x08085D70
+    0x081BA495 (? bytes, 17 BL) BL->0x08076474 BL->0x08091B30 BL->0x08076474
+    0x081BA7A9 (? bytes, 10 BL) BL->0x08085D70 BL->0x080C1120 BL->0x081B8494
+    0x081C0F15 (? bytes, 14 BL) BL->0x081C15DC BL->0x08196B68 BL->0x08084870
+    0x081CDC23 (? bytes, 15 BL) BL->0x08347BB4 BL->0x080864C0 BL->0x08085D70
+    0x081CFF5D (? bytes, 24 BL) BL->0x08003C58 BL->0x08003668 BL->0x08085D70
+    0x081D0219 (? bytes, 23 BL) BL->0x08345864 BL->0x080BF774 BL->0x0800379C
+    0x081D0301 (? bytes, 20 BL) BL->0x080BF774 BL->0x08345864 BL->0x08003668
+    0x081D03B9 (388 bytes, 12 BL) BL->0x08003C58 BL->0x08003668 BL->0x0800379C
+    0x081D09AD (? bytes, 18 BL) BL->0x08085D70 BL->0x08085D70 BL->0x080C6E28
+    0x081D0CF1 (? bytes, 10 BL) BL->0x08085D70 BL->0x08085D70 BL->0x08085D70
+    0x081D6145 (? bytes, 18 BL) BL->0x080BB34C BL->0x081D6474 BL->0x081C67FC
+    0x081D7739 (? bytes, 7 BL) BL->0x08085E70 BL->0x08085D70 BL->0x08085E70
+    0x081D7835 (? bytes, 9 BL) BL->0x08083B54 BL->0x08083B94 BL->0x08345D20
+    0x081D8041 (? bytes, 9 BL) BL->0x080BB34C BL->0x08346348 BL->0x081D8010
+    0x081D8F21 (? bytes, 11 BL) BL->0x081D9088 BL->0x08085D70 BL->0x081D9CA0
+    0x081DAF91 (? bytes, 18 BL) BL->0x08346348 BL->0x083463C0 BL->0x08085D70
+    0x081E75B1 (? bytes, 13 BL) BL->0x08085D70 BL->0x080F2FF8 BL->0x081E7654
+    0x081F6165 (? bytes, 14 BL) BL->0x0800A4B0 BL->0x08008BD0 BL->0x0810ED6C
+    0x08209551 (236 bytes, 11 BL) BL->0x08208954 BL->0x08196BDC BL->0x082087D4
+
+======================================================================
+  STEP 4: Direct scan for key variables
+======================================================================
+
+  Scanning ALL EWRAM literal pool refs in ROM...
+  4884 unique EWRAM addresses found in ROM
+
+  TOP 100 most-referenced EWRAM addresses:
+      1. 0x02020630  (1655 refs)
+      2. 0x020233DC  (1355 refs)
+      3. 0x02023A98  (1141 refs) <-- gPlayerParty
+      4. 0x020233FC  (877 refs)
+      5. 0x0202359C  (768 refs)
+      6. 0x02023A18  (650 refs)
+      7. 0x020379DE  (648 refs)
+      8. 0x02000000  (595 refs)
+      9. 0x02023A0C  (579 refs)
+     10. 0x02023CF0  (551 refs) <-- gEnemyParty
+     11. 0x02023594  (548 refs)
+     12. 0x02021CC4  (516 refs)
+     13. 0x02023364  (503 refs)
+     14. 0x020379F6  (440 refs)
+     15. 0x020233E6  (434 refs)
+     16. 0x02021FC4  (426 refs)
+     17. 0x02037594  (421 refs)
+     18. 0x02036BB0  (416 refs)
+     19. 0x02023595  (394 refs)
+     20. 0x02039558  (364 refs)
+     21. 0x0202370E  (352 refs)
+     22. 0x02039310  (342 refs)
+     23. 0x020379F7  (341 refs)
+     24. 0x02036914  (321 refs)
+     25. 0x02023A40  (311 refs)
+     26. 0x020239D0  (299 refs)
+     27. 0x02021DC4  (298 refs)
+     28. 0x02010201  (291 refs)
+     29. 0x0202356C  (274 refs)
+     30. 0x02036BA0  (252 refs)
+     31. 0x02039654  (244 refs)
+     32. 0x02036B54  (221 refs)
+     33. 0x02020202  (194 refs)
+     34. 0x020233E4  (193 refs)
+     35. 0x02023572  (188 refs)
+     36. 0x0203C56C  (176 refs)
+     37. 0x02023768  (172 refs)
+     38. 0x0203A160  (162 refs)
+     39. 0x02020400  (160 refs)
+     40. 0x0203A15C  (159 refs)
+     41. 0x02023668  (158 refs)
+     42. 0x02000200  (158 refs)
+     43. 0x02023648  (156 refs)
+     44. 0x02000100  (150 refs)
+     45. 0x0203C514  (149 refs)
+     46. 0x02023604  (147 refs)
+     47. 0x02036BA2  (144 refs)
+     48. 0x02023590  (143 refs)
+     49. 0x020368DC  (139 refs)
+     50. 0x02022F98  (132 refs)
+     51. 0x02023602  (132 refs)
+     52. 0x02022CE8  (130 refs)
+     53. 0x0203C4B8  (127 refs)
+     54. 0x02023578  (127 refs)
+     55. 0x02031868  (126 refs)
+     56. 0x020381AE  (123 refs)
+     57. 0x02023718  (119 refs)
+     58. 0x02031860  (119 refs)
+     59. 0x020232BE  (116 refs)
+     60. 0x02039154  (115 refs)
+     61. 0x0203A1B4  (115 refs)
+     62. 0x02036BA4  (111 refs)
+     63. 0x02021EC4  (110 refs)
+     64. 0x02038230  (109 refs)
+     65. 0x020381F0  (107 refs)
+     66. 0x02022FFC  (106 refs)
+     67. 0x0202311A  (106 refs)
+     68. 0x02039740  (101 refs)
+     69. 0x02020908  (100 refs)
+     70. 0x020370D4  ( 99 refs)
+     71. 0x0202311C  ( 99 refs)
+     72. 0x02039744  ( 97 refs)
+     73. 0x02022F84  ( 94 refs)
+     74. 0x020392F0  ( 93 refs)
+     75. 0x020233E0  ( 91 refs)
+     76. 0x02023A58  ( 91 refs)
+     77. 0x0203C510  ( 91 refs)
+     78. 0x02031864  ( 87 refs)
+     79. 0x02010400  ( 85 refs)
+     80. 0x020226C4  ( 84 refs)
+     81. 0x02000002  ( 83 refs)
+     82. 0x02007890  ( 83 refs)
+     83. 0x0203C484  ( 81 refs)
+     84. 0x02036CD4  ( 79 refs)
+     85. 0x02023597  ( 78 refs)
+     86. 0x0203A1CC  ( 78 refs)
+     87. 0x0202312E  ( 73 refs)
+     88. 0x02023618  ( 71 refs)
+     89. 0x02023118  ( 69 refs)
+     90. 0x02023610  ( 69 refs)
+     91. 0x0202311E  ( 67 refs)
+     92. 0x02023599  ( 65 refs)
+     93. 0x02023120  ( 65 refs)
+     94. 0x02000400  ( 62 refs)
+     95. 0x02023592  ( 61 refs)
+     96. 0x02023116  ( 61 refs)
+     97. 0x02030908  ( 60 refs)
+     98. 0x020381B0  ( 59 refs)
+     99. 0x02023010  ( 59 refs)
+    100. 0x02023716  ( 59 refs)
+
+======================================================================
+  STEP 5: EWRAM address clusters (likely struct/variable groups)
+======================================================================
+
+  Cluster 0x02000000-0x02002B30 (791 vars, 11056 bytes span, 3509 total refs)
+      0x02000000 (595 refs)
+      0x02000001 ( 31 refs)
+      0x02000002 ( 83 refs)
+      0x02000003 ( 26 refs)
+      0x02000004 ( 15 refs)
+      0x02000005 ( 12 refs)
+      0x02000006 (  3 refs)
+      0x02000007 (  7 refs)
+      0x02000008 ( 20 refs)
+      0x02000009 (  4 refs)
+      0x0200000A (  2 refs)
+      0x0200000D (  1 refs)
+      0x0200000E ( 34 refs)
+      0x0200000F (  2 refs)
+      0x02000010 (  5 refs)
+      0x02000011 (  9 refs)
+      0x02000012 (  7 refs)
+      0x02000014 (  3 refs)
+      0x02000015 (  1 refs)
+      0x02000016 (  1 refs)
+      ... and 771 more
+
+  Cluster 0x02002D00-0x02003990 (105 vars, 3216 bytes span, 174 total refs)
+      0x02002D00 (  2 refs)
+      0x02002D32 (  1 refs)
+      0x02002DFF (  1 refs)
+      0x02002E3D (  1 refs)
+      0x02002EA4 (  1 refs)
+      0x02002EA7 (  1 refs)
+      0x02002EE0 (  1 refs)
+      0x02002EEE (  1 refs)
+      0x02002F20 (  1 refs)
+      0x02002F36 (  1 refs)
+      0x02002FE1 (  1 refs)
+      0x02002FF1 (  1 refs)
+      0x02003000 (  3 refs)
+      0x02003001 (  5 refs)
+      0x02003002 (  1 refs)
+      0x0200300F (  1 refs)
+      0x0200302D (  1 refs)
+      0x02003040 (  1 refs)
+      0x0200308A (  1 refs)
+      0x02003093 (  2 refs)
+      ... and 85 more
+
+  Cluster 0x02003B01-0x020058CF (228 vars, 7630 bytes span, 344 total refs)
+      0x02003B01 (  1 refs)
+      0x02003B33 (  1 refs)
+      0x02003C00 (  6 refs)
+      0x02003C0A (  1 refs)
+      0x02003C30 (  1 refs)
+      0x02003C32 (  1 refs)
+      0x02003C3C (  1 refs)
+      0x02003CF1 (  1 refs)
+      0x02003D03 (  1 refs)
+      0x02003D13 (  1 refs)
+      0x02003D3B (  1 refs)
+      0x02003D3D (  1 refs)
+      0x02003D4D (  1 refs)
+      0x02003DCE (  1 refs)
+      0x02003E00 (  1 refs)
+      0x02003E3A (  2 refs)
+      0x02003F01 (  1 refs)
+      0x02003F21 (  1 refs)
+      0x02003F25 (  1 refs)
+      0x02003FF0 (  1 refs)
+      ... and 208 more
+
+  Cluster 0x02005D00-0x02006961 (70 vars, 3169 bytes span, 109 total refs)
+      0x02005D00 (  1 refs)
+      0x02005D01 (  1 refs)
+      0x02005D1F (  1 refs)
+      0x02005DD1 (  1 refs)
+      0x02005E00 (  1 refs)
+      0x02005E40 (  1 refs)
+      0x02005E68 (  1 refs)
+      0x02005E78 (  1 refs)
+      0x02005EA0 (  1 refs)
+      0x02005EC0 (  1 refs)
+      0x02005F00 (  1 refs)
+      0x02005F02 (  2 refs)
+      0x02005F50 (  2 refs)
+      0x02005F80 (  1 refs)
+      0x02006000 (  4 refs)
+      0x02006001 (  8 refs)
+      0x02006003 (  1 refs)
+      0x02006020 (  1 refs)
+      0x02006056 (  1 refs)
+      0x02006099 (  1 refs)
+      ... and 50 more
+
+  Cluster 0x02006DFD-0x02007E60 (121 vars, 4195 bytes span, 330 total refs)
+      0x02006DFD (  1 refs)
+      0x02006E01 (  1 refs)
+      0x02006E03 (  3 refs)
+      0x02006E91 (  1 refs)
+      0x02006F42 (  1 refs)
+      0x02007000 (  2 refs)
+      0x02007001 (  5 refs)
+      0x02007013 (  1 refs)
+      0x020070C1 (  1 refs)
+      0x02007102 (  1 refs)
+      0x02007111 (  1 refs)
+      0x02007138 (  1 refs)
+      0x02007202 (  1 refs)
+      0x02007221 (  1 refs)
+      0x02007222 (  1 refs)
+      0x02007280 (  1 refs)
+      0x02007333 (  1 refs)
+      0x02007370 (  1 refs)
+      0x02007400 (  1 refs)
+      0x02007422 (  2 refs)
+      ... and 101 more
+
+  Cluster 0x02008000-0x02008300 (63 vars, 768 bytes span, 92 total refs)
+      0x02008000 (  7 refs)
+      0x02008001 (  9 refs)
+      0x02008003 (  1 refs)
+      0x0200800F (  1 refs)
+      0x02008010 (  5 refs)
+      0x02008011 (  3 refs)
+      0x02008014 (  1 refs)
+      0x02008016 (  1 refs)
+      0x02008018 (  1 refs)
+      0x02008022 (  1 refs)
+      0x02008030 (  2 refs)
+      0x02008031 (  1 refs)
+      0x02008032 (  1 refs)
+      0x02008033 (  1 refs)
+      0x02008036 (  1 refs)
+      0x02008042 (  1 refs)
+      0x02008043 (  2 refs)
+      0x02008048 (  1 refs)
+      0x02008055 (  1 refs)
+      0x02008058 (  1 refs)
+      ... and 43 more
+
+  Cluster 0x02008469-0x02008AAB (51 vars, 1602 bytes span, 83 total refs)
+      0x02008469 (  1 refs)
+      0x02008477 (  1 refs)
+      0x02008501 (  1 refs)
+      0x02008522 (  1 refs)
+      0x02008540 (  1 refs)
+      0x02008544 (  1 refs)
+      0x02008579 (  1 refs)
+      0x02008589 (  1 refs)
+      0x02008601 (  1 refs)
+      0x0200860A (  1 refs)
+      0x02008612 (  1 refs)
+      0x02008663 (  1 refs)
+      0x02008711 (  1 refs)
+      0x02008800 (  3 refs)
+      0x02008801 (  6 refs)
+      0x02008802 (  5 refs)
+      0x02008803 (  4 refs)
+      0x02008806 (  1 refs)
+      0x02008810 (  1 refs)
+      0x02008818 (  1 refs)
+      ... and 31 more
+
+  Cluster 0x02008BF0-0x02008D10 (6 vars, 288 bytes span, 9 total refs)
+      0x02008BF0 (  1 refs)
+      0x02008C00 (  4 refs)
+      0x02008CA8 (  1 refs)
+      0x02008CBA (  1 refs)
+      0x02008CE0 (  1 refs)
+      0x02008D10 (  1 refs)
+
+  Cluster 0x02009000-0x02009300 (15 vars, 768 bytes span, 16 total refs)
+    Known: gBattleTypeFlags
+      0x02009000 (  1 refs)
+      0x02009001 (  2 refs)
+      0x02009010 (  1 refs)
+      0x02009020 (  1 refs)
+      0x02009093 (  1 refs)
+      0x020090AA (  1 refs)
+      0x020090E2 (  1 refs)
+      0x020090E6 (  1 refs)
+      0x020090F3 (  1 refs)
+      0x02009101 (  1 refs)
+      0x02009133 (  1 refs)
+      0x02009161 (  1 refs)
+      0x02009210 (  1 refs)
+      0x02009244 (  1 refs)
+      0x02009300 (  1 refs)
+
+  Cluster 0x02009403-0x02009AAA (53 vars, 1703 bytes span, 74 total refs)
+      0x02009403 (  1 refs)
+      0x0200940D (  1 refs)
+      0x02009422 (  1 refs)
+      0x02009501 (  2 refs)
+      0x02009502 (  1 refs)
+      0x02009569 (  1 refs)
+      0x020095EE (  1 refs)
+      0x02009602 (  1 refs)
+      0x02009632 (  1 refs)
+      0x02009655 (  1 refs)
+      0x020096CE (  1 refs)
+      0x02009700 (  1 refs)
+      0x02009702 (  1 refs)
+      0x02009777 (  1 refs)
+      0x020097A1 (  1 refs)
+      0x020097EE (  1 refs)
+      0x02009800 (  1 refs)
+      0x02009801 (  1 refs)
+      0x02009802 (  1 refs)
+      0x02009803 (  1 refs)
+      ... and 33 more
+
+  Cluster 0x02009E04-0x0200B0C9 (103 vars, 4805 bytes span, 139 total refs)
+      0x02009E04 (  1 refs)
+      0x02009ECC (  1 refs)
+      0x02009F00 (  1 refs)
+      0x02009F04 (  1 refs)
+      0x02009F0E (  1 refs)
+      0x02009F24 (  1 refs)
+      0x02009F44 (  1 refs)
+      0x02009F60 (  1 refs)
+      0x0200A000 (  2 refs)
+      0x0200A001 ( 10 refs)
+      0x0200A011 (  2 refs)
+      0x0200A01D (  1 refs)
+      0x0200A022 (  1 refs)
+      0x0200A041 (  1 refs)
+      0x0200A044 (  4 refs)
+      0x0200A050 (  1 refs)
+      0x0200A055 (  1 refs)
+      0x0200A066 (  1 refs)
+      0x0200A077 (  1 refs)
+      0x0200A07A (  2 refs)
+      ... and 83 more
+
+  Cluster 0x0200B640-0x0200B900 (10 vars, 704 bytes span, 14 total refs)
+      0x0200B640 (  1 refs)
+      0x0200B701 (  1 refs)
+      0x0200B706 (  1 refs)
+      0x0200B730 (  2 refs)
+      0x0200B77B (  1 refs)
+      0x0200B7BF (  1 refs)
+      0x0200B800 (  3 refs)
+      0x0200B844 (  1 refs)
+      0x0200B8D0 (  1 refs)
+      0x0200B900 (  2 refs)
+
+  Cluster 0x0200BA3D-0x0200C3E4 (44 vars, 2471 bytes span, 69 total refs)
+      0x0200BA3D (  1 refs)
+      0x0200BB01 (  8 refs)
+      0x0200BB02 (  5 refs)
+      0x0200BB03 (  2 refs)
+      0x0200BB04 (  1 refs)
+      0x0200BB06 (  1 refs)
+      0x0200BB4C (  1 refs)
+      0x0200BB50 (  1 refs)
+      0x0200BB54 (  1 refs)
+      0x0200BB73 (  1 refs)
+      0x0200BBA4 (  1 refs)
+      0x0200BBB0 (  1 refs)
+      0x0200BBB8 (  2 refs)
+      0x0200BBBA (  1 refs)
+      0x0200BBBB (  6 refs)
+      0x0200BBBC (  1 refs)
+      0x0200BCAC (  1 refs)
+      0x0200BD03 (  1 refs)
+      0x0200BDAB (  1 refs)
+      0x0200BDEF (  1 refs)
+      ... and 24 more
+
+  Cluster 0x0200C501-0x0200C800 (9 vars, 767 bytes span, 10 total refs)
+      0x0200C501 (  2 refs)
+      0x0200C510 (  1 refs)
+      0x0200C5F1 (  1 refs)
+      0x0200C600 (  1 refs)
+      0x0200C62A (  1 refs)
+      0x0200C646 (  1 refs)
+      0x0200C6E0 (  1 refs)
+      0x0200C700 (  1 refs)
+      0x0200C800 (  1 refs)
+
+  Cluster 0x0200C902-0x0200CE4D (30 vars, 1355 bytes span, 38 total refs)
+      0x0200C902 (  1 refs)
+      0x0200C904 (  1 refs)
+      0x0200C940 (  1 refs)
+      0x0200CA01 (  1 refs)
+      0x0200CA05 (  1 refs)
+      0x0200CAAA (  1 refs)
+      0x0200CB7B (  1 refs)
+      0x0200CC00 (  1 refs)
+      0x0200CC01 (  6 refs)
+      0x0200CC02 (  1 refs)
+      0x0200CC31 (  1 refs)
+      0x0200CC40 (  1 refs)
+      0x0200CC44 (  1 refs)
+      0x0200CC61 (  2 refs)
+      0x0200CCA5 (  1 refs)
+      0x0200CCAF (  1 refs)
+      0x0200CCC3 (  1 refs)
+      0x0200CCC5 (  1 refs)
+      0x0200CCCA (  1 refs)
+      0x0200CCCB (  1 refs)
+      ... and 10 more
+
+  Cluster 0x0200D000-0x0200D813 (33 vars, 2067 bytes span, 44 total refs)
+      0x0200D000 (  3 refs)
+      0x0200D001 (  5 refs)
+      0x0200D033 (  1 refs)
+      0x0200D03E (  1 refs)
+      0x0200D055 (  1 refs)
+      0x0200D077 (  1 refs)
+      0x0200D0CC (  1 refs)
+      0x0200D0EE (  1 refs)
+      0x0200D101 (  1 refs)
+      0x0200D112 (  1 refs)
+      0x0200D120 (  1 refs)
+      0x0200D177 (  1 refs)
+      0x0200D1DC (  1 refs)
+      0x0200D1EC (  1 refs)
+      0x0200D1FF (  1 refs)
+      0x0200D205 (  1 refs)
+      0x0200D2CD (  2 refs)
+      0x0200D300 (  1 refs)
+      0x0200D303 (  1 refs)
+      0x0200D400 (  5 refs)
+      ... and 13 more
+
+  Cluster 0x0200DA00-0x0200E8C0 (86 vars, 3776 bytes span, 101 total refs)
+      0x0200DA00 (  1 refs)
+      0x0200DA07 (  1 refs)
+      0x0200DB01 (  1 refs)
+      0x0200DB11 (  1 refs)
+      0x0200DB78 (  1 refs)
+      0x0200DBAA (  1 refs)
+      0x0200DBF0 (  1 refs)
+      0x0200DC42 (  1 refs)
+      0x0200DC61 (  1 refs)
+      0x0200DCCC (  1 refs)
+      0x0200DCDC (  1 refs)
+      0x0200DD01 (  2 refs)
+      0x0200DD02 (  4 refs)
+      0x0200DD40 (  2 refs)
+      0x0200DD41 (  1 refs)
+      0x0200DD52 (  1 refs)
+      0x0200DD8F (  1 refs)
+      0x0200DDCD (  1 refs)
+      0x0200DDD0 (  1 refs)
+      0x0200DDDC (  3 refs)
+      ... and 66 more
+
+  Cluster 0x0200EA25-0x02010A30 (395 vars, 8203 bytes span, 1245 total refs)
+      0x0200EA25 (  6 refs)
+      0x0200EAAA (  1 refs)
+      0x0200EB00 (  1 refs)
+      0x0200EB01 (  1 refs)
+      0x0200EBDD (  1 refs)
+      0x0200EC25 (  1 refs)
+      0x0200EC32 (  1 refs)
+      0x0200EC41 (  1 refs)
+      0x0200ED0D (  1 refs)
+      0x0200ED13 (  1 refs)
+      0x0200ED40 (  1 refs)
+      0x0200ED49 (  1 refs)
+      0x0200EDD6 (  1 refs)
+      0x0200EDEE (  1 refs)
+      0x0200EE01 (  1 refs)
+      0x0200EE02 (  1 refs)
+      0x0200EE03 (  1 refs)
+      0x0200EE11 (  1 refs)
+      0x0200EE12 (  2 refs)
+      0x0200EE28 (  1 refs)
+      ... and 375 more
+
+  Cluster 0x02010B40-0x0201163E (67 vars, 2814 bytes span, 124 total refs)
+      0x02010B40 (  1 refs)
+      0x02010C16 (  1 refs)
+      0x02010D03 (  1 refs)
+      0x02010E00 (  1 refs)
+      0x02010E11 (  1 refs)
+      0x02010E12 (  1 refs)
+      0x02010E31 (  1 refs)
+      0x02010EE1 (  2 refs)
+      0x02010F00 (  1 refs)
+      0x02010F02 (  1 refs)
+      0x02010F09 (  1 refs)
+      0x02010F2F (  1 refs)
+      0x02011000 (  2 refs)
+      0x02011001 (  6 refs)
+      0x0201100F (  2 refs)
+      0x02011010 (  4 refs)
+      0x02011011 (  2 refs)
+      0x0201101E (  1 refs)
+      0x02011032 (  1 refs)
+      0x02011044 (  1 refs)
+      ... and 47 more
+
+  Cluster 0x02011759-0x02011AF5 (6 vars, 924 bytes span, 6 total refs)
+      0x02011759 (  1 refs)
+      0x02011840 (  1 refs)
+      0x02011900 (  1 refs)
+      0x020119F5 (  1 refs)
+      0x02011A22 (  1 refs)
+      0x02011AF5 (  1 refs)
+
+  Cluster 0x02011E11-0x02012411 (53 vars, 1536 bytes span, 64 total refs)
+      0x02011E11 (  1 refs)
+      0x02011E12 (  2 refs)
+      0x02011E44 (  1 refs)
+      0x02011EED (  1 refs)
+      0x02011EEE (  1 refs)
+      0x02011EF1 (  1 refs)
+      0x02011F0E (  2 refs)
+      0x02011F10 (  1 refs)
+      0x02011F11 (  2 refs)
+      0x02011F12 (  1 refs)
+      0x02011F1E (  1 refs)
+      0x02011F1F (  1 refs)
+      0x02011F22 (  1 refs)
+      0x02011FF0 (  1 refs)
+      0x02011FFE (  2 refs)
+      0x02012000 (  1 refs)
+      0x02012001 (  3 refs)
+      0x02012003 (  1 refs)
+      0x02012008 (  1 refs)
+      0x02012012 (  1 refs)
+      ... and 33 more
+
+  Cluster 0x02012E00-0x02013355 (45 vars, 1365 bytes span, 65 total refs)
+      0x02012E00 (  1 refs)
+      0x02012E11 (  1 refs)
+      0x02012E17 (  1 refs)
+      0x02012E2F (  1 refs)
+      0x02012E32 (  1 refs)
+      0x02012ED2 (  1 refs)
+      0x02012EEE (  1 refs)
+      0x02012EFF (  1 refs)
+      0x02012F01 (  1 refs)
+      0x02012F0F (  5 refs)
+      0x02012F10 (  1 refs)
+      0x02012F1E (  1 refs)
+      0x02012F1F (  4 refs)
+      0x02012FD1 (  1 refs)
+      0x02012FE1 (  2 refs)
+      0x02012FF0 (  2 refs)
+      0x02012FF1 (  1 refs)
+      0x02012FFF (  1 refs)
+      0x02013001 (  4 refs)
+      0x02013003 (  1 refs)
+      ... and 25 more
+
+  Cluster 0x02013ED5-0x020144BE (21 vars, 1513 bytes span, 22 total refs)
+      0x02013ED5 (  1 refs)
+      0x02013F12 (  1 refs)
+      0x02013F1C (  1 refs)
+      0x02013F4A (  1 refs)
+      0x02013FD2 (  1 refs)
+      0x02014001 (  2 refs)
+      0x02014012 (  1 refs)
+      0x0201407E (  1 refs)
+      0x020140B5 (  1 refs)
+      0x020140BB (  1 refs)
+      0x02014128 (  1 refs)
+      0x02014201 (  1 refs)
+      0x020142AA (  1 refs)
+      0x02014333 (  1 refs)
+      0x0201441C (  1 refs)
+      0x02014424 (  1 refs)
+      0x02014425 (  1 refs)
+      0x02014431 (  1 refs)
+      0x02014434 (  1 refs)
+      0x02014466 (  1 refs)
+      ... and 1 more
+
+  Cluster 0x02014F6C-0x02015203 (14 vars, 663 bytes span, 21 total refs)
+      0x02014F6C (  1 refs)
+      0x02015000 (  1 refs)
+      0x02015001 (  8 refs)
+      0x02015010 (  1 refs)
+      0x02015019 (  1 refs)
+      0x0201501F (  1 refs)
+      0x02015020 (  1 refs)
+      0x02015070 (  1 refs)
+      0x020150AF (  1 refs)
+      0x020150BD (  1 refs)
+      0x020150D7 (  1 refs)
+      0x02015122 (  1 refs)
+      0x020151B2 (  1 refs)
+      0x02015203 (  1 refs)
+
+  Cluster 0x02015423-0x02015553 (7 vars, 304 bytes span, 7 total refs)
+      0x02015423 (  1 refs)
+      0x02015425 (  1 refs)
+      0x02015501 (  1 refs)
+      0x02015506 (  1 refs)
+      0x0201554C (  1 refs)
+      0x02015551 (  1 refs)
+      0x02015553 (  1 refs)
+
+  Cluster 0x02016001-0x02016131 (8 vars, 304 bytes span, 10 total refs)
+      0x02016001 (  3 refs)
+      0x0201600C (  1 refs)
+      0x02016019 (  1 refs)
+      0x020160A1 (  1 refs)
+      0x020160B1 (  1 refs)
+      0x020160B7 (  1 refs)
+      0x020160FF (  1 refs)
+      0x02016131 (  1 refs)
+
+  Cluster 0x020167D4-0x02016B25 (9 vars, 849 bytes span, 9 total refs)
+      0x020167D4 (  1 refs)
+      0x020167E0 (  1 refs)
+      0x02016818 (  1 refs)
+      0x02016825 (  1 refs)
+      0x02016850 (  1 refs)
+      0x02016925 (  1 refs)
+      0x02016A25 (  1 refs)
+      0x02016AAA (  1 refs)
+      0x02016B25 (  1 refs)
+
+  Cluster 0x02016EB6-0x02017101 (11 vars, 587 bytes span, 28 total refs)
+      0x02016EB6 (  1 refs)
+      0x02016F02 (  1 refs)
+      0x02017001 ( 16 refs)
+      0x02017012 (  3 refs)
+      0x02017013 (  1 refs)
+      0x02017016 (  1 refs)
+      0x02017018 (  1 refs)
+      0x0201703F (  1 refs)
+      0x02017077 (  1 refs)
+      0x020170F3 (  1 refs)
+      0x02017101 (  1 refs)
+
+  Cluster 0x02017EA1-0x020180FF (11 vars, 606 bytes span, 13 total refs)
+      0x02017EA1 (  1 refs)
+      0x02017F0C (  1 refs)
+      0x02018000 (  2 refs)
+      0x02018001 (  2 refs)
+      0x0201801C (  1 refs)
+      0x02018033 (  1 refs)
+      0x020180A1 (  1 refs)
+      0x020180CC (  1 refs)
+      0x020180E9 (  1 refs)
+      0x020180FE (  1 refs)
+      0x020180FF (  1 refs)
+
+  Cluster 0x02018FA8-0x020190EC (9 vars, 324 bytes span, 12 total refs)
+      0x02018FA8 (  1 refs)
+      0x02019000 (  1 refs)
+      0x02019001 (  4 refs)
+      0x0201901F (  1 refs)
+      0x0201906F (  1 refs)
+      0x020190BF (  1 refs)
+      0x020190CB (  1 refs)
+      0x020190DD (  1 refs)
+      0x020190EC (  1 refs)
+
+  Cluster 0x02019ED1-0x0201A204 (14 vars, 819 bytes span, 21 total refs)
+      0x02019ED1 (  1 refs)
+      0x02019F05 (  1 refs)
+      0x0201A001 (  5 refs)
+      0x0201A002 (  1 refs)
+      0x0201A003 (  1 refs)
+      0x0201A004 (  3 refs)
+      0x0201A0A4 (  1 refs)
+      0x0201A0C4 (  1 refs)
+      0x0201A0E3 (  1 refs)
+      0x0201A0E4 (  1 refs)
+      0x0201A0EF (  1 refs)
+      0x0201A0F7 (  1 refs)
+      0x0201A104 (  1 refs)
+      0x0201A204 (  2 refs)
+
+  Cluster 0x0201A9CB-0x0201AAA3 (5 vars, 216 bytes span, 5 total refs)
+      0x0201A9CB (  1 refs)
+      0x0201AA04 (  1 refs)
+      0x0201AA36 (  1 refs)
+      0x0201AA95 (  1 refs)
+      0x0201AAA3 (  1 refs)
+
+  Cluster 0x0201B001-0x0201B1A0 (6 vars, 415 bytes span, 11 total refs)
+      0x0201B001 (  6 refs)
+      0x0201B031 (  1 refs)
+      0x0201B045 (  1 refs)
+      0x0201B09E (  1 refs)
+      0x0201B0CF (  1 refs)
+      0x0201B1A0 (  1 refs)
+
+  Cluster 0x0201BDE0-0x0201C042 (6 vars, 610 bytes span, 41 total refs)
+      0x0201BDE0 (  1 refs)
+      0x0201BE43 (  1 refs)
+      0x0201BF17 (  1 refs)
+      0x0201C000 ( 33 refs)
+      0x0201C001 (  4 refs)
+      0x0201C042 (  1 refs)
+
+  Cluster 0x0201CFCC-0x0201D2CD (11 vars, 769 bytes span, 13 total refs)
+      0x0201CFCC (  1 refs)
+      0x0201D000 (  3 refs)
+      0x0201D01F (  1 refs)
+      0x0201D0BD (  1 refs)
+      0x0201D0EE (  1 refs)
+      0x0201D14E (  1 refs)
+      0x0201D166 (  1 refs)
+      0x0201D1FF (  1 refs)
+      0x0201D206 (  1 refs)
+      0x0201D23E (  1 refs)
+      0x0201D2CD (  1 refs)
+
+  Cluster 0x0201DD30-0x0201E4DC (29 vars, 1964 bytes span, 31 total refs)
+      0x0201DD30 (  1 refs)
+      0x0201DE0F (  1 refs)
+      0x0201DECD (  1 refs)
+      0x0201DEDD (  1 refs)
+      0x0201DF22 (  1 refs)
+      0x0201E000 (  1 refs)
+      0x0201E001 (  2 refs)
+      0x0201E003 (  1 refs)
+      0x0201E012 (  1 refs)
+      0x0201E01E (  1 refs)
+      0x0201E031 (  1 refs)
+      0x0201E0E0 (  1 refs)
+      0x0201E0EE (  2 refs)
+      0x0201E0F2 (  1 refs)
+      0x0201E0FC (  1 refs)
+      0x0201E100 (  1 refs)
+      0x0201E12F (  1 refs)
+      0x0201E1DE (  1 refs)
+      0x0201E1E0 (  1 refs)
+      0x0201E1E1 (  1 refs)
+      ... and 9 more
+
+  Cluster 0x0201EC33-0x02021542 (412 vars, 10511 bytes span, 3251 total refs)
+    Known: gMainAddr, gMainCallback2, gMainInBattle
+      0x0201EC33 (  1 refs)
+      0x0201EC43 (  1 refs)
+      0x0201ECF1 (  1 refs)
+      0x0201ED03 (  1 refs)
+      0x0201ED13 (  1 refs)
+      0x0201ED2E (  1 refs)
+      0x0201EE1E (  1 refs)
+      0x0201EE21 (  1 refs)
+      0x0201EE23 (  1 refs)
+      0x0201EE33 (  1 refs)
+      0x0201EEFE (  1 refs)
+      0x0201EF02 (  1 refs)
+      0x0201EF20 (  1 refs)
+      0x0201EF22 (  1 refs)
+      0x0201EF2F (  1 refs)
+      0x0201EF33 (  1 refs)
+      0x0201EFE3 (  1 refs)
+      0x0201EFEE (  2 refs)
+      0x0201EFF1 (  2 refs)
+      0x0201F000 (  1 refs)
+      ... and 392 more
+
+  Cluster 0x02021774-0x020218AC (8 vars, 312 bytes span, 20 total refs)
+      0x02021774 (  2 refs)
+      0x020217E1 (  1 refs)
+      0x020217F4 (  4 refs)
+      0x02021821 (  1 refs)
+      0x02021834 (  3 refs)
+      0x02021835 (  4 refs)
+      0x02021838 (  4 refs)
+      0x020218AC (  1 refs)
+
+  Cluster 0x02021B10-0x02022700 (86 vars, 3056 bytes span, 1663 total refs)
+      0x02021B10 (  1 refs)
+      0x02021B13 (  1 refs)
+      0x02021B18 (  1 refs)
+      0x02021B23 (  1 refs)
+      0x02021B38 (  6 refs)
+      0x02021B3A (  4 refs)
+      0x02021B3C (  7 refs)
+      0x02021B57 (  1 refs)
+      0x02021BBC ( 33 refs)
+      0x02021BBE ( 35 refs)
+      0x02021BC0 ( 17 refs)
+      0x02021C70 (  1 refs)
+      0x02021CC0 (  3 refs)
+      0x02021CC4 (516 refs)
+      0x02021DC4 (298 refs)
+      0x02021E44 (  1 refs)
+      0x02021EC4 (110 refs)
+      0x02021EFE (  1 refs)
+      0x02021F01 (  1 refs)
+      0x02021F0E (  1 refs)
+      ... and 66 more
+
+  Cluster 0x02022AD4-0x020237CC (204 vars, 3320 bytes span, 10321 total refs)
+      0x02022AD4 (  1 refs)
+      0x02022B23 (  1 refs)
+      0x02022BC4 ( 40 refs)
+      0x02022C00 (  1 refs)
+      0x02022C12 (  1 refs)
+      0x02022CC4 (  4 refs)
+      0x02022CC6 ( 36 refs)
+      0x02022CC8 (  2 refs)
+      0x02022CCC (  5 refs)
+      0x02022CE8 (130 refs)
+      0x02022CF0 ( 35 refs)
+      0x02022D03 (  1 refs)
+      0x02022D0C (  2 refs)
+      0x02022D28 (  1 refs)
+      0x02022D74 (  4 refs)
+      0x02022DE3 (  1 refs)
+      0x02022DEF (  1 refs)
+      0x02022E00 (  6 refs)
+      0x02022E08 (  2 refs)
+      0x02022E0C (  1 refs)
+      ... and 184 more
+
+  Cluster 0x02023922-0x02024289 (105 vars, 2407 bytes span, 4424 total refs)
+    Known: gPlayerParty, gPlayerPartyCount, gEnemyParty
+      0x02023922 (  1 refs)
+      0x0202394C (  1 refs)
+      0x02023958 ( 19 refs)
+      0x0202395A (  4 refs)
+      0x0202395C (  2 refs)
+      0x02023960 ( 16 refs)
+      0x02023968 (  3 refs)
+      0x020239D0 (299 refs)
+      0x020239D4 (  1 refs)
+      0x020239DC (  1 refs)
+      0x020239DF (  4 refs)
+      0x020239E0 (  8 refs)
+      0x020239E4 ( 13 refs)
+      0x020239E6 (  1 refs)
+      0x020239E7 (  9 refs)
+      0x020239E8 (  3 refs)
+      0x020239E9 (  1 refs)
+      0x020239EA ( 32 refs)
+      0x020239EB ( 10 refs)
+      0x020239EC (  2 refs)
+      ... and 85 more
+
+  Cluster 0x02024960-0x02024DCD (9 vars, 1133 bytes span, 10 total refs)
+      0x02024960 (  1 refs)
+      0x020249E3 (  1 refs)
+      0x02024AE2 (  1 refs)
+      0x02024BA4 (  1 refs)
+      0x02024C08 (  1 refs)
+      0x02024CBC (  2 refs)
+      0x02024CC3 (  1 refs)
+      0x02024D0F (  1 refs)
+      0x02024DCD (  1 refs)
+
+  Cluster 0x02028779-0x02028848 (3 vars, 207 bytes span, 4 total refs)
+    Known: gPokemonStorage
+      0x02028779 (  1 refs)
+      0x02028804 (  1 refs)
+      0x02028848 (  2 refs) <-- gPokemonStorage
+
+  Cluster 0x0202C13D-0x0202C3D1 (7 vars, 660 bytes span, 7 total refs)
+      0x0202C13D (  1 refs)
+      0x0202C200 (  1 refs)
+      0x0202C2FB (  1 refs)
+      0x0202C319 (  1 refs)
+      0x0202C32D (  1 refs)
+      0x0202C33D (  1 refs)
+      0x0202C3D1 (  1 refs)
+
+  Cluster 0x0202C992-0x0202CC09 (6 vars, 631 bytes span, 6 total refs)
+      0x0202C992 (  1 refs)
+      0x0202C9E1 (  1 refs)
+      0x0202CAAC (  1 refs)
+      0x0202CB31 (  1 refs)
+      0x0202CB62 (  1 refs)
+      0x0202CC09 (  1 refs)
+
+  Cluster 0x0202D130-0x0202D45F (12 vars, 815 bytes span, 12 total refs)
+      0x0202D130 (  1 refs)
+      0x0202D13E (  1 refs)
+      0x0202D15D (  1 refs)
+      0x0202D1DE (  1 refs)
+      0x0202D1EE (  1 refs)
+      0x0202D1EF (  1 refs)
+      0x0202D1FE (  1 refs)
+      0x0202D202 (  1 refs)
+      0x0202D2EE (  1 refs)
+      0x0202D3B8 (  1 refs)
+      0x0202D3ED (  1 refs)
+      0x0202D45F (  1 refs)
+
+  Cluster 0x0202D9EE-0x0202E3DB (55 vars, 2541 bytes span, 69 total refs)
+      0x0202D9EE (  1 refs)
+      0x0202DA76 (  1 refs)
+      0x0202DAA6 (  1 refs)
+      0x0202DB22 (  1 refs)
+      0x0202DB23 (  1 refs)
+      0x0202DB33 (  1 refs)
+      0x0202DC13 (  1 refs)
+      0x0202DC24 (  1 refs)
+      0x0202DC52 (  1 refs)
+      0x0202DC54 (  1 refs)
+      0x0202DD30 (  1 refs)
+      0x0202DDDE (  1 refs)
+      0x0202DDF0 (  1 refs)
+      0x0202DE02 (  1 refs)
+      0x0202DE23 (  1 refs)
+      0x0202DE2F (  1 refs)
+      0x0202DE30 (  1 refs)
+      0x0202DE53 (  1 refs)
+      0x0202DEDD (  1 refs)
+      0x0202DEDE (  2 refs)
+      ... and 35 more
+
+  Cluster 0x0202E9E4-0x0202F3CC (74 vars, 2536 bytes span, 125 total refs)
+      0x0202E9E4 (  2 refs)
+      0x0202E9EE (  1 refs)
+      0x0202EA16 (  1 refs)
+      0x0202EA1B (  1 refs)
+      0x0202EAEE (  1 refs)
+      0x0202EBDE (  1 refs)
+      0x0202EBF1 (  1 refs)
+      0x0202EC13 (  1 refs)
+      0x0202EC33 (  1 refs)
+      0x0202ECA6 (  1 refs)
+      0x0202ECFE (  1 refs)
+      0x0202ED01 (  1 refs)
+      0x0202ED22 (  1 refs)
+      0x0202EDCF (  1 refs)
+      0x0202EDDD (  1 refs)
+      0x0202EDE2 (  1 refs)
+      0x0202EE11 (  1 refs)
+      0x0202EE12 (  1 refs)
+      0x0202EE22 (  1 refs)
+      0x0202EE2E (  1 refs)
+      ... and 54 more
+
+  Cluster 0x0202F901-0x02030909 (270 vars, 4104 bytes span, 666 total refs)
+      0x0202F901 (  1 refs)
+      0x0202F911 (  1 refs)
+      0x0202F92F (  1 refs)
+      0x0202F9F2 (  1 refs)
+      0x0202F9F6 (  1 refs)
+      0x0202F9FF (  1 refs)
+      0x0202FA21 (  1 refs)
+      0x0202FA2F (  1 refs)
+      0x0202FB00 (  1 refs)
+      0x0202FB01 (  1 refs)
+      0x0202FB11 (  1 refs)
+      0x0202FB12 (  1 refs)
+      0x0202FB23 (  1 refs)
+      0x0202FB32 (  1 refs)
+      0x0202FBF2 (  2 refs)
+      0x0202FBF3 (  1 refs)
+      0x0202FBFA (  1 refs)
+      0x0202FC00 (  1 refs)
+      0x0202FC01 (  1 refs)
+      0x0202FC1F (  1 refs)
+      ... and 250 more
+
+  Cluster 0x02030C16-0x02030E13 (7 vars, 509 bytes span, 8 total refs)
+      0x02030C16 (  1 refs)
+      0x02030C98 (  2 refs)
+      0x02030D03 (  1 refs)
+      0x02030D17 (  1 refs)
+      0x02030DD2 (  1 refs)
+      0x02030DDD (  1 refs)
+      0x02030E13 (  1 refs)
+
+  Cluster 0x02031002-0x020313EF (79 vars, 1005 bytes span, 92 total refs)
+      0x02031002 (  2 refs)
+      0x02031008 (  1 refs)
+      0x0203100B (  1 refs)
+      0x02031010 (  1 refs)
+      0x02031011 (  1 refs)
+      0x02031012 (  1 refs)
+      0x02031013 (  2 refs)
+      0x02031015 (  1 refs)
+      0x02031016 (  2 refs)
+      0x0203101E (  3 refs)
+      0x02031021 (  1 refs)
+      0x02031022 (  3 refs)
+      0x02031023 (  1 refs)
+      0x02031024 (  1 refs)
+      0x02031025 (  1 refs)
+      0x02031026 (  1 refs)
+      0x02031028 (  1 refs)
+      0x0203102B (  1 refs)
+      0x02031031 (  1 refs)
+      0x02031033 (  3 refs)
+      ... and 59 more
+
+  Cluster 0x02031744-0x020318DC (25 vars, 408 bytes span, 435 total refs)
+    Known: sWarpDestination
+      0x02031744 (  2 refs)
+      0x02031748 (  5 refs)
+      0x0203174C (  4 refs)
+      0x02031784 (  4 refs)
+      0x02031854 (  1 refs)
+      0x0203185C ( 13 refs)
+      0x02031860 (119 refs)
+      0x02031864 ( 87 refs)
+      0x02031868 (126 refs)
+      0x0203186C (  1 refs)
+      0x02031880 (  1 refs)
+      0x02031894 (  1 refs)
+      0x0203189A (  5 refs)
+      0x0203189B (  3 refs)
+      0x0203189E (  3 refs)
+      0x020318A0 (  5 refs)
+      0x020318A8 ( 12 refs) <-- sWarpDestination
+      0x020318B0 (  5 refs)
+      0x020318B8 (  4 refs)
+      0x020318C0 (  2 refs)
+      ... and 5 more
+
+  Cluster 0x02031D62-0x02032566 (52 vars, 2052 bytes span, 57 total refs)
+      0x02031D62 (  1 refs)
+      0x02031DE3 (  1 refs)
+      0x02031ED1 (  1 refs)
+      0x02031F1F (  1 refs)
+      0x02031F29 (  1 refs)
+      0x02031F33 (  1 refs)
+      0x0203200B (  1 refs)
+      0x02032025 (  1 refs)
+      0x02032026 (  1 refs)
+      0x02032031 (  2 refs)
+      0x02032033 (  1 refs)
+      0x0203203A (  1 refs)
+      0x02032043 (  1 refs)
+      0x02032044 (  3 refs)
+      0x02032048 (  1 refs)
+      0x0203204B (  1 refs)
+      0x02032055 (  3 refs)
+      0x02032063 (  1 refs)
+      0x02032064 (  1 refs)
+      0x02032077 (  1 refs)
+      ... and 32 more
+
+  Cluster 0x02032D20-0x02032E3D (6 vars, 285 bytes span, 6 total refs)
+      0x02032D20 (  1 refs)
+      0x02032D22 (  1 refs)
+      0x02032D33 (  1 refs)
+      0x02032E12 (  1 refs)
+      0x02032E2E (  1 refs)
+      0x02032E3D (  1 refs)
+
+  Cluster 0x02032FF1-0x02033451 (27 vars, 1120 bytes span, 28 total refs)
+      0x02032FF1 (  1 refs)
+      0x02033000 (  1 refs)
+      0x02033034 (  1 refs)
+      0x02033054 (  1 refs)
+      0x02033055 (  2 refs)
+      0x02033064 (  1 refs)
+      0x02033065 (  1 refs)
+      0x02033088 (  1 refs)
+      0x02033099 (  1 refs)
+      0x020330A9 (  1 refs)
+      0x020330D0 (  1 refs)
+      0x020330D5 (  1 refs)
+      0x020330E7 (  1 refs)
+      0x020330EC (  1 refs)
+      0x020330EE (  1 refs)
+      0x020330EF (  1 refs)
+      0x020331E3 (  1 refs)
+      0x02033203 (  1 refs)
+      0x02033223 (  1 refs)
+      0x02033252 (  1 refs)
+      ... and 7 more
+
+  Cluster 0x02033F1F-0x02034122 (18 vars, 515 bytes span, 19 total refs)
+      0x02033F1F (  1 refs)
+      0x02033F24 (  1 refs)
+      0x02034007 (  1 refs)
+      0x02034011 (  2 refs)
+      0x02034020 (  1 refs)
+      0x02034027 (  1 refs)
+      0x0203402A (  1 refs)
+      0x0203403D (  1 refs)
+      0x02034049 (  1 refs)
+      0x02034054 (  1 refs)
+      0x02034057 (  1 refs)
+      0x02034073 (  1 refs)
+      0x02034091 (  1 refs)
+      0x02034092 (  1 refs)
+      0x020340A0 (  1 refs)
+      0x020340F8 (  1 refs)
+      0x020340FB (  1 refs)
+      0x02034122 (  1 refs)
+
+  Cluster 0x02034234-0x02034650 (9 vars, 1052 bytes span, 9 total refs)
+      0x02034234 (  1 refs)
+      0x020342EE (  1 refs)
+      0x0203431F (  1 refs)
+      0x02034321 (  1 refs)
+      0x02034355 (  1 refs)
+      0x02034402 (  1 refs)
+      0x02034492 (  1 refs)
+      0x02034550 (  1 refs)
+      0x02034650 (  1 refs)
+
+  Cluster 0x02034F2C-0x020351E8 (13 vars, 700 bytes span, 13 total refs)
+      0x02034F2C (  1 refs)
+      0x02035009 (  1 refs)
+      0x0203500F (  1 refs)
+      0x02035016 (  1 refs)
+      0x02035023 (  1 refs)
+      0x02035034 (  1 refs)
+      0x02035046 (  1 refs)
+      0x02035082 (  1 refs)
+      0x020350A0 (  1 refs)
+      0x020350E3 (  1 refs)
+      0x020350FB (  1 refs)
+      0x02035108 (  1 refs)
+      0x020351E8 (  1 refs)
+
+  Cluster 0x020368DC-0x02036914 (6 vars, 56 bytes span, 475 total refs)
+      0x020368DC (139 refs)
+      0x020368F8 (  6 refs)
+      0x02036904 (  5 refs)
+      0x0203690C (  2 refs)
+      0x02036910 (  2 refs)
+      0x02036914 (321 refs)
+
+  Cluster 0x02036B54-0x02036EE4 (60 vars, 912 bytes span, 1421 total refs)
+      0x02036B54 (221 refs)
+      0x02036B68 (  1 refs)
+      0x02036B70 (  2 refs)
+      0x02036B78 (  4 refs)
+      0x02036B7C ( 13 refs)
+      0x02036B80 (  2 refs)
+      0x02036B84 (  8 refs)
+      0x02036B88 (  2 refs)
+      0x02036B8A (  7 refs)
+      0x02036B8C (  3 refs)
+      0x02036B8E (  3 refs)
+      0x02036B90 (  3 refs)
+      0x02036B94 (  2 refs)
+      0x02036B96 (  2 refs)
+      0x02036B98 (  5 refs)
+      0x02036B9A (  5 refs)
+      0x02036B9C (  3 refs)
+      0x02036B9E (  1 refs)
+      0x02036BA0 (252 refs)
+      0x02036BA2 (144 refs)
+      ... and 40 more
+
+  Cluster 0x02037003-0x02037312 (17 vars, 783 bytes span, 126 total refs)
+      0x02037003 (  2 refs)
+      0x02037063 (  1 refs)
+      0x020370D4 ( 99 refs)
+      0x020370E8 (  1 refs)
+      0x02037112 (  2 refs)
+      0x02037114 (  2 refs)
+      0x02037132 (  2 refs)
+      0x02037174 (  1 refs)
+      0x02037184 (  1 refs)
+      0x0203718C (  2 refs)
+      0x0203718E (  1 refs)
+      0x02037190 (  2 refs)
+      0x020371B4 (  1 refs)
+      0x020371C0 (  1 refs)
+      0x02037294 (  1 refs)
+      0x020372D4 (  4 refs)
+      0x02037312 (  3 refs)
+
+  Cluster 0x020379A8-0x02037A14 (27 vars, 108 bytes span, 1744 total refs)
+      0x020379A8 (  6 refs)
+      0x020379AC (  5 refs)
+      0x020379B0 ( 51 refs)
+      0x020379B4 (  2 refs)
+      0x020379B8 ( 18 refs)
+      0x020379BC ( 16 refs)
+      0x020379BD ( 18 refs)
+      0x020379BE ( 20 refs)
+      0x020379BF ( 13 refs)
+      0x020379C0 ( 14 refs)
+      0x020379C4 ( 12 refs)
+      0x020379C8 ( 12 refs)
+      0x020379CA (  5 refs)
+      0x020379DA ( 13 refs)
+      0x020379DC (  9 refs)
+      0x020379DE (648 refs)
+      0x020379EE (  6 refs)
+      0x020379F0 (  7 refs)
+      0x020379F2 ( 16 refs)
+      0x020379F3 (  8 refs)
+      ... and 7 more
+
+  Cluster 0x02038000-0x02038234 (35 vars, 564 bytes span, 560 total refs)
+      0x02038000 (  1 refs)
+      0x02038010 (  1 refs)
+      0x020380BF (  1 refs)
+      0x020380E6 (  1 refs)
+      0x02038168 (  1 refs)
+      0x02038188 (  4 refs)
+      0x020381A8 (  8 refs)
+      0x020381AA (  1 refs)
+      0x020381AC ( 11 refs)
+      0x020381AE (123 refs)
+      0x020381B0 ( 59 refs)
+      0x020381B2 ( 23 refs)
+      0x020381B4 (  9 refs)
+      0x020381B8 (  7 refs)
+      0x020381BC (  4 refs)
+      0x020381C0 (  7 refs)
+      0x020381C4 (  4 refs)
+      0x020381C8 (  9 refs)
+      0x020381CC (  9 refs)
+      0x020381D0 ( 10 refs)
+      ... and 15 more
+
+  Cluster 0x02039130-0x02039176 (10 vars, 70 bytes span, 200 total refs)
+      0x02039130 ( 41 refs)
+      0x0203914C (  3 refs)
+      0x02039150 (  9 refs)
+      0x02039154 (115 refs)
+      0x02039158 (  5 refs)
+      0x0203915A (  5 refs)
+      0x0203915C ( 14 refs)
+      0x02039160 (  6 refs)
+      0x02039174 (  1 refs)
+      0x02039176 (  1 refs)
+
+  Cluster 0x020392F0-0x0203983C (125 vars, 1356 bytes span, 2496 total refs)
+      0x020392F0 ( 93 refs)
+      0x020392F4 ( 38 refs)
+      0x020392F8 ( 21 refs)
+      0x020392FC ( 14 refs)
+      0x02039300 (  2 refs)
+      0x02039308 (  2 refs)
+      0x0203930C (  8 refs)
+      0x02039310 (342 refs)
+      0x02039314 ( 15 refs)
+      0x02039315 (  3 refs)
+      0x02039316 (  3 refs)
+      0x02039317 (  5 refs)
+      0x02039318 (  2 refs)
+      0x0203931A (  4 refs)
+      0x0203931C (  7 refs)
+      0x02039380 ( 33 refs)
+      0x02039381 ( 46 refs)
+      0x02039382 ( 31 refs)
+      0x02039383 (  6 refs)
+      0x02039384 (  3 refs)
+      ... and 105 more
+
+  Cluster 0x0203A03C-0x0203A1EC (84 vars, 432 bytes span, 943 total refs)
+      0x0203A03C (  1 refs)
+      0x0203A05C (  2 refs)
+      0x0203A05E (  2 refs)
+      0x0203A060 ( 15 refs)
+      0x0203A061 (  6 refs)
+      0x0203A062 (  3 refs)
+      0x0203A064 (  3 refs)
+      0x0203A06C (  7 refs)
+      0x0203A077 (  1 refs)
+      0x0203A0E7 (  1 refs)
+      0x0203A0EC (  8 refs)
+      0x0203A0F0 (  2 refs)
+      0x0203A0F4 (  6 refs)
+      0x0203A0F8 (  3 refs)
+      0x0203A0FC (  3 refs)
+      0x0203A100 (  5 refs)
+      0x0203A104 (  3 refs)
+      0x0203A108 (  2 refs)
+      0x0203A10C (  3 refs)
+      0x0203A110 (  3 refs)
+      ... and 64 more
+
+  Cluster 0x0203B1F0-0x0203B364 (52 vars, 372 bytes span, 527 total refs)
+      0x0203B1F0 (  4 refs)
+      0x0203B264 ( 41 refs)
+      0x0203B268 ( 12 refs)
+      0x0203B270 ( 13 refs)
+      0x0203B2B0 (  6 refs)
+      0x0203B2B2 (  3 refs)
+      0x0203B2B8 ( 41 refs)
+      0x0203B2BC ( 48 refs)
+      0x0203B2C0 ( 35 refs)
+      0x0203B2C4 (  2 refs)
+      0x0203B2C8 (  2 refs)
+      0x0203B2CC (  6 refs)
+      0x0203B2CE (  2 refs)
+      0x0203B2D0 (  5 refs)
+      0x0203B2D4 (  5 refs)
+      0x0203B2D8 (  5 refs)
+      0x0203B2DC ( 52 refs)
+      0x0203B2E0 (  4 refs)
+      0x0203B2E4 (  5 refs)
+      0x0203B2E8 ( 23 refs)
+      ... and 32 more
+
+  Cluster 0x0203BDC4-0x0203BDF0 (15 vars, 44 bytes span, 54 total refs)
+      0x0203BDC4 (  6 refs)
+      0x0203BDCC (  2 refs)
+      0x0203BDD4 (  2 refs)
+      0x0203BDDC (  5 refs)
+      0x0203BDDD (  2 refs)
+      0x0203BDDE (  4 refs)
+      0x0203BDDF (  4 refs)
+      0x0203BDE0 (  2 refs)
+      0x0203BDE4 ( 11 refs)
+      0x0203BDE5 (  3 refs)
+      0x0203BDE6 (  2 refs)
+      0x0203BDE7 (  2 refs)
+      0x0203BDE8 (  2 refs)
+      0x0203BDEC (  4 refs)
+      0x0203BDF0 (  3 refs)
+
+  Cluster 0x0203BF5D-0x0203C0FB (6 vars, 414 bytes span, 8 total refs)
+      0x0203BF5D (  1 refs)
+      0x0203C013 (  1 refs)
+      0x0203C022 (  1 refs)
+      0x0203C025 (  1 refs)
+      0x0203C048 (  3 refs)
+      0x0203C0FB (  1 refs)
+
+  Cluster 0x0203C2A0-0x0203C5CD (107 vars, 813 bytes span, 1358 total refs)
+      0x0203C2A0 (  2 refs)
+      0x0203C2B0 (  6 refs)
+      0x0203C2B4 (  1 refs)
+      0x0203C2CD (  1 refs)
+      0x0203C300 (  3 refs)
+      0x0203C301 (  2 refs)
+      0x0203C309 (  2 refs)
+      0x0203C30A (  2 refs)
+      0x0203C30C (  2 refs)
+      0x0203C318 (  3 refs)
+      0x0203C31C (  8 refs)
+      0x0203C334 (  6 refs)
+      0x0203C394 ( 13 refs)
+      0x0203C398 ( 21 refs)
+      0x0203C39C ( 16 refs)
+      0x0203C3A0 (  2 refs)
+      0x0203C3A4 (  1 refs)
+      0x0203C3A8 ( 52 refs)
+      0x0203C3AC (  4 refs)
+      0x0203C3B0 (  8 refs)
+      ... and 87 more
+
+  Cluster 0x0203D0EE-0x0203D1FE (5 vars, 272 bytes span, 6 total refs)
+      0x0203D0EE (  1 refs)
+      0x0203D101 (  1 refs)
+      0x0203D12F (  2 refs)
+      0x0203D14F (  1 refs)
+      0x0203D1FE (  1 refs)
+
+  Cluster 0x0203D3C7-0x0203D4FC (6 vars, 309 bytes span, 6 total refs)
+      0x0203D3C7 (  1 refs)
+      0x0203D402 (  1 refs)
+      0x0203D41C (  1 refs)
+      0x0203D429 (  1 refs)
+      0x0203D432 (  1 refs)
+      0x0203D4FC (  1 refs)
+
+  Cluster 0x0203DB12-0x0203DDA3 (5 vars, 657 bytes span, 5 total refs)
+      0x0203DB12 (  1 refs)
+      0x0203DB42 (  1 refs)
+      0x0203DC40 (  1 refs)
+      0x0203DD13 (  1 refs)
+      0x0203DDA3 (  1 refs)
+
+  Cluster 0x0203DEED-0x0203E513 (28 vars, 1574 bytes span, 29 total refs)
+      0x0203DEED (  1 refs)
+      0x0203DEFE (  1 refs)
+      0x0203DF30 (  1 refs)
+      0x0203DF31 (  1 refs)
+      0x0203DFDC (  2 refs)
+      0x0203DFFE (  1 refs)
+      0x0203E006 (  1 refs)
+      0x0203E0E0 (  1 refs)
+      0x0203E115 (  1 refs)
+      0x0203E122 (  1 refs)
+      0x0203E129 (  1 refs)
+      0x0203E12A (  1 refs)
+      0x0203E12F (  1 refs)
+      0x0203E13F (  1 refs)
+      0x0203E1D1 (  1 refs)
+      0x0203E1DD (  1 refs)
+      0x0203E2DD (  1 refs)
+      0x0203E2E2 (  1 refs)
+      0x0203E2EE (  1 refs)
+      0x0203E2F1 (  1 refs)
+      ... and 8 more
+
+  Cluster 0x0203EF21-0x0203F32F (16 vars, 1038 bytes span, 17 total refs)
+      0x0203EF21 (  1 refs)
+      0x0203EF22 (  1 refs)
+      0x0203F01E (  1 refs)
+      0x0203F07F (  1 refs)
+      0x0203F099 (  1 refs)
+      0x0203F0EB (  1 refs)
+      0x0203F100 (  1 refs)
+      0x0203F110 (  1 refs)
+      0x0203F11E (  2 refs)
+      0x0203F1EE (  1 refs)
+      0x0203F1F4 (  1 refs)
+      0x0203F1FF (  1 refs)
+      0x0203F201 (  1 refs)
+      0x0203F253 (  1 refs)
+      0x0203F2EE (  1 refs)
+      0x0203F32F (  1 refs)
+
+  Cluster 0x0203F609-0x0203F804 (8 vars, 507 bytes span, 9 total refs)
+      0x0203F609 (  1 refs)
+      0x0203F6E3 (  1 refs)
+      0x0203F6F6 (  1 refs)
+      0x0203F6FE (  1 refs)
+      0x0203F761 (  2 refs)
+      0x0203F801 (  1 refs)
+      0x0203F802 (  1 refs)
+      0x0203F804 (  1 refs)
+
+  Cluster 0x0203FD51-0x0203FFFF (17 vars, 686 bytes span, 17 total refs)
+      0x0203FD51 (  1 refs)
+      0x0203FDDC (  1 refs)
+      0x0203FDF8 (  1 refs)
+      0x0203FDFA (  1 refs)
+      0x0203FDFE (  1 refs)
+      0x0203FE00 (  1 refs)
+      0x0203FE02 (  1 refs)
+      0x0203FE21 (  1 refs)
+      0x0203FEF9 (  1 refs)
+      0x0203FEFA (  1 refs)
+      0x0203FF04 (  1 refs)
+      0x0203FF1E (  1 refs)
+      0x0203FFF7 (  1 refs)
+      0x0203FFFB (  1 refs)
+      0x0203FFFC (  1 refs)
+      0x0203FFFE (  1 refs)
+      0x0203FFFF (  1 refs)
+
+======================================================================
+  SCAN COMPLETE
+======================================================================

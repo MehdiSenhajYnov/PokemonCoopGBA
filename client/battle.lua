@@ -1,24 +1,38 @@
 --[[
-  Battle Module — PvP Combat Management
+  Battle Module — GBA-PK Buffer Relay Approach
 
-  Handles:
-  - Party data reading and injection
-  - Battle triggering via gBattleTypeFlags
-  - AI choice interception and replacement
-  - RNG synchronization
-  - Battle outcome detection
+  Approach: Keep BATTLE_TYPE_LINK active throughout the battle. Instead of clearing
+  LINK and swapping to AI controllers, relay gBattleBufferA/B between players via TCP.
+  The ROM's link battle engine handles sprites, animations, turn order natively.
 
-  This module is used in conjunction with the duel warp system.
-  After both players warp to the duel room:
+  Init chain: CB2_InitBattle → CB2_InitBattleInternal → CB2_HandleStartBattle → BattleMainCB2
+
+  IS_MASTER: Only master gets BATTLE_TYPE_IS_MASTER (like real link cable).
+  A BEQ→NOP patch at InitBtlControllersInternal ensures slave still gets BeginBattleIntro.
+
+  Slot mapping (asymmetric):
+    Master (GetMultiplayerId=0): battler 0 = Player, battler 1 = LinkOpponent
+    Slave  (GetMultiplayerId=1): battler 0 = LinkOpponent, battler 1 = Player
+
+  Buffer relay (MAIN_LOOP) — GBA-PK Stage 7:
+    Host reads gBattleControllerExecFlags[1-4] each frame.
+    When a battler's high-nibble bit is set (PLAYERS2), that battler needs network service.
+    Host reads bufferA/B from memory, sends to client via TCP.
+    Client writes received bufferA/B to memory, acknowledges.
+    Exec flags manage synchronization: bits 0-3 active, bits 4-7 network.
+    Battle end: bufferA command ID 0x37 = GetAwayExit.
+
+  Flow:
   1. Exchange party data via network
   2. Inject opponent's party into gEnemyParty
-  3. Trigger battle with BATTLE_TYPE_SECRET_BASE
-  4. Intercept AI decisions and replace with real player choices
-  5. Sync RNG each turn to ensure identical outcomes
-  6. Detect battle end and return to origin
-
-  IMPORTANT: The battle addresses must be scanned and configured in
-  config/run_and_bun.lua before this module will work.
+  3. Apply ROM/EWRAM patches to fake link hardware
+  4. Set gBattleTypeFlags, gMain.savedCallback, callback2 = CB2_InitBattle
+  5. Game runs full initialization chain (11 link sync cases, VS screen)
+  6. At BattleMainCB2: transition to MAIN_LOOP (LINK stays active!)
+  7. Engine pacing via GetBlockReceivedStatus: return 0 to block, 0x0F to unblock
+  8. Action sync: read gChosenAction/Move locally, relay via TCP, inject remote choice
+  9. Battle ends naturally → gMain.savedCallback returns to overworld
+  10. Restore ROM patches, return to origin
 ]]
 
 local Battle = {}
@@ -26,73 +40,241 @@ local Battle = {}
 -- Configuration (loaded from game config)
 local config = nil
 local ADDRESSES = nil
+local LINK = nil  -- battle_link section
 local HAL = nil
 
--- Battle type flags (loaded from config.battleFlags if available, fallback to hardcoded)
-local BATTLE_TYPE_DOUBLE = 0x00000001
+-- Battle type flags (from config.battleFlags, with fallbacks)
 local BATTLE_TYPE_LINK = 0x00000002
 local BATTLE_TYPE_IS_MASTER = 0x00000004
 local BATTLE_TYPE_TRAINER = 0x00000008
-local BATTLE_TYPE_FIRST_BATTLE = 0x00000010
-local BATTLE_TYPE_RECORDED = 0x01000000
-local BATTLE_TYPE_SECRET_BASE = 0x08000000
+local BATTLE_TYPE_LINK_IN_BATTLE = 0x00000020  -- Bit 5: auto-set by engine when LINK starts
+local BATTLE_TYPE_RECORDED = 0x01000000  -- Bit 24: needed for BattleMainCB2 transition gate
 
--- Special trainer ID that preserves gEnemyParty
-local TRAINER_SECRET_BASE = 1024
+-- Party structure constants
+local PARTY_SIZE = 600
+local POKEMON_SIZE = 100
+local POKEMON_HP_OFFSET = 86
 
--- Party structure constants (defaults, overridden from config.pokemon if available)
-local PARTY_SIZE = 600      -- 6 Pokemon x 100 bytes each (FULL_PARTY_BYTES)
-local POKEMON_SIZE = 100    -- sizeof(struct Pokemon) = BoxPokemon(80) + stats(20)
-local POKEMON_HP_OFFSET = 86  -- +0x56: u16 current HP (decimal for clarity)
+-- Buffer relay constants (GBA-PK reads 256 bytes for both bufA and bufB per battler)
+local BUFFER_READ_SIZE = 256    -- bytes to read/relay from bufferA/B per battler
+local BATTLER_BUFFER_STRIDE = 0x200  -- 512 bytes per battler slot
 
--- Battle state
-local battleState = {
-  active = false,
-  isMaster = false,
-  opponentParty = nil,      -- 600 bytes of opponent's party
-  localChoice = nil,        -- Our choice this turn
-  remoteChoice = nil,       -- Choice received from opponent
-  waitingForRemote = false, -- Waiting for opponent's choice
-  prevExecFlags = 0,        -- Previous gBattleControllerExecFlags value
-  turnCount = 0,
-  originPos = nil,          -- Position to return to after battle
-  prevInBattle = 0,         -- Previous inBattle value for transition detection
-  battleDetected = false,   -- True once inBattle 0→1 seen (actual combat running)
+-- Exec flag constants (from GBA-PK)
+local FLAGS_SENDING   = 1
+local FLAGS_WRITTEN   = 2
+local FLAGS_ACTIVATED = 4
+local FLAGS_FINISHED  = 8
+local FLAGS_UPDATE_PKMN = 64
+local PLAYERS  = { [1]=0x01, [2]=0x02, [3]=0x04, [4]=0x08 } -- bits 0-3: exec active
+local PLAYERS2 = { [1]=0x10, [2]=0x20, [3]=0x40, [4]=0x80 } -- bits 4-7: network wait
+
+-- Battle end command ID
+local CMD_GET_AWAY_EXIT = 0x37
+
+-- Helper: convert absolute EWRAM address to WRAM offset
+local function toWRAMOffset(address)
+  return address - 0x02000000
+end
+
+-- Helper: convert absolute IWRAM address to IWRAM offset
+local function toIWRAMOffset(address)
+  return address - 0x03000000
+end
+
+-- Helper: check if an address is in IWRAM range
+local function isIWRAM(address)
+  return address >= 0x03000000 and address < 0x03008000
+end
+
+-- Helper: read from the correct memory domain
+local function readMem8(address)
+  if isIWRAM(address) then
+    return emu.memory.iwram:read8(toIWRAMOffset(address))
+  else
+    return emu.memory.wram:read8(toWRAMOffset(address))
+  end
+end
+
+local function readMem16(address)
+  if isIWRAM(address) then
+    return emu.memory.iwram:read16(toIWRAMOffset(address))
+  else
+    return emu.memory.wram:read16(toWRAMOffset(address))
+  end
+end
+
+local function readMem32(address)
+  if isIWRAM(address) then
+    return emu.memory.iwram:read32(toIWRAMOffset(address))
+  else
+    return emu.memory.wram:read32(toWRAMOffset(address))
+  end
+end
+
+local function writeMem8(address, value)
+  if isIWRAM(address) then
+    emu.memory.iwram:write8(toIWRAMOffset(address), value)
+  else
+    emu.memory.wram:write8(toWRAMOffset(address), value)
+  end
+end
+
+local function writeMem16(address, value)
+  if isIWRAM(address) then
+    emu.memory.iwram:write16(toIWRAMOffset(address), value)
+  else
+    emu.memory.wram:write16(toWRAMOffset(address), value)
+  end
+end
+
+local function writeMem32(address, value)
+  if isIWRAM(address) then
+    emu.memory.iwram:write32(toIWRAMOffset(address), value)
+  else
+    emu.memory.wram:write32(toWRAMOffset(address), value)
+  end
+end
+
+-- Forward declarations (defined after startLinkBattle, called from within it)
+local initLocalLinkPlayer
+local triggerLoadscript37
+
+-- ============================================================
+-- State Machine
+-- ============================================================
+
+local STAGE = {
+  IDLE           = 0,
+  STARTING       = 3,   -- callback2 = CB2_InitBattle, waiting for battle engine to start
+  MAIN_LOOP      = 5,   -- Battle running, relay buffers (GBA-PK Stage 7)
+  ENDING         = 6,   -- Battle ending, wait then cleanup
+  RESTORING      = 7,   -- Restoring patches
+  DONE           = 8,   -- Battle complete
 }
 
---[[
-  Initialize the battle module with game configuration.
-  @param gameConfig table containing battle addresses
-]]
+local state = {
+  stage = STAGE.IDLE,
+  isMaster = false,
+  opponentParty = nil,
+  prevInBattle = 0,
+  battleDetected = false,
+  battleCallbackSeen = false,
+  stageTimer = 0,
+  remoteBuffers = {},
+  romPatches = {},
+  ewramPatches = {},
+  battleFlags = nil,
+  isLinkBattle = false,
+  remoteReady = false,
+  sendFn = nil,
+  savedCallback1 = nil,  -- save callback1 before battle to restore after
+  localPartyBackup = nil,     -- backup of gPlayerParty BEFORE battle init (Cases 4/6 overwrite it!)
+  battleEntryMethod = "direct_write",  -- "loadscript37", "direct_write", or "direct_fallback"
+  battleMainReached = false,  -- BattleMainCB2 callback detected
+  cachedOutcome = nil,        -- Outcome cached at detection time (before DMA corruption)
+  forceEndPending = false,
+  forceEndFrame = 0,
+
+  -- GBA-PK Buffer Relay state
+  relay = {
+    -- Slot mapping (0-indexed for memory, 1-indexed for PLAYERS/PLAYERS2)
+    localSlot = 0,       -- master=0, slave=1 (0-indexed)
+    remoteSlot = 1,      -- master=1, slave=0 (0-indexed)
+    localBattler = 1,    -- master=1, slave=2 (1-indexed for PLAYERS arrays)
+    remoteBattler = 2,   -- master=2, slave=1 (1-indexed for PLAYERS arrays)
+
+    -- GBA-PK protocol state (mirrors playerBattle.Waiting_Status bitmask)
+    waitingStatus = 0,
+    bufferID = 0,        -- which battler we're servicing (1-indexed, 0 = none)
+    sendID = 0,          -- bitmask of battler slots we've sent
+
+    -- Remote player's GBA-PK state (mirrors otherplayerBattle)
+    remoteWaitingStatus = 0,
+    remoteBufferID = 0,
+    remoteSendID = 0,
+    remoteBattleflags = { 0, 0, 0, 0 },
+    remoteTransferStage = 0,
+
+    -- Remote buffer data (received via TCP)
+    remoteBufferA = nil,   -- array of bytes
+    remoteBufferB = nil,   -- array of bytes
+    remoteAttacker = 0,
+    remoteTarget = 0,
+    remoteAbsent = 0,
+    remoteEffect = 0,
+
+    -- Has remote sent us any data yet?
+    remoteDataReceived = false,
+
+    -- Comm advancement (stages 5-6 in GBA-PK)
+    commAdvanced = false,
+    commReady = false,
+
+    -- Action sync state (GBA-PK buffer relay approach)
+    localReady = false,
+    remoteReady = false,
+    remoteAction = nil,      -- {action=N, move=M} or nil
+    localAction = nil,       -- {action=N, move=M} or nil
+    lastTurn = -1,
+    introComplete = false,
+    remoteMainloopReady = false,  -- true when remote player enters MAIN_LOOP (GBA-PK readiness)
+    engineBlocked = true,    -- GetBlockReceivedStatus returns 0 when true
+    turnPhase = "idle",      -- "idle" | "selecting" | "waiting_remote" | "executing"
+    lastComm0 = 0,           -- previous gBattleCommunication[0] for turn boundary detection
+    savedBattleStruct = nil,    -- cached pointer for protection
+    savedBattleResources = nil, -- cached pointer for protection
+    lastRelayActivityFrame = 0,
+  },
+}
+
+-- ============================================================
+-- Initialization
+-- ============================================================
+
 function Battle.init(gameConfig, halModule)
   config = gameConfig
   HAL = halModule
   if config and config.battle then
     ADDRESSES = config.battle
-    -- Load pokemon struct constants from config if available
+    LINK = config.battle_link or {}
+
     if config.pokemon then
       PARTY_SIZE = config.pokemon.FULL_PARTY_BYTES or PARTY_SIZE
       POKEMON_SIZE = config.pokemon.PARTY_MON_SIZE or POKEMON_SIZE
       POKEMON_HP_OFFSET = config.pokemon.HP_OFFSET or POKEMON_HP_OFFSET
     end
-    -- Load battle flag constants from config if available
-    if config.battleFlags then
-      BATTLE_TYPE_TRAINER = config.battleFlags.TRAINER or BATTLE_TYPE_TRAINER
-      BATTLE_TYPE_SECRET_BASE = config.battleFlags.SECRET_BASE or BATTLE_TYPE_SECRET_BASE
-      BATTLE_TYPE_IS_MASTER = config.battleFlags.IS_MASTER or BATTLE_TYPE_IS_MASTER
+    if LINK and LINK.battlerBufferSize then
+      BATTLER_BUFFER_STRIDE = LINK.battlerBufferSize
     end
-    console:log("[Battle] Initialized with battle config")
+    if config.battleFlags then
+      BATTLE_TYPE_LINK = config.battleFlags.LINK or BATTLE_TYPE_LINK
+      BATTLE_TYPE_LINK_IN_BATTLE = config.battleFlags.LINK_IN_BATTLE or BATTLE_TYPE_LINK_IN_BATTLE
+      BATTLE_TYPE_IS_MASTER = config.battleFlags.IS_MASTER or BATTLE_TYPE_IS_MASTER
+      BATTLE_TYPE_TRAINER = config.battleFlags.TRAINER or BATTLE_TYPE_TRAINER
+      BATTLE_TYPE_RECORDED = config.battleFlags.RECORDED or BATTLE_TYPE_RECORDED
+    end
+
+    console:log("[Battle] Initialized (GBA-PK buffer relay mode)")
     console:log(string.format("[Battle] gPlayerParty=0x%08X gEnemyParty=0x%08X",
       ADDRESSES.gPlayerParty or 0, ADDRESSES.gEnemyParty or 0))
+
+    if LINK and LINK.CB2_InitBattle then
+      console:log(string.format("[Battle] CB2_InitBattle=0x%08X", LINK.CB2_InitBattle))
+    else
+      console:log("[Battle] WARNING: CB2_InitBattle not configured -- run find_cb2_initbattle.lua")
+    end
+
+    -- Clean up stale ROM patches from previous sessions
+    Battle.cleanupStalePatches()
   else
     console:log("[Battle] WARNING: No battle config available")
   end
 end
 
---[[
-  Check if battle module is properly configured.
-  @return boolean
-]]
+function Battle.setSendFn(fn)
+  state.sendFn = fn
+end
+
 function Battle.isConfigured()
   return ADDRESSES ~= nil
     and ADDRESSES.gPlayerParty ~= nil
@@ -100,33 +282,82 @@ function Battle.isConfigured()
     and ADDRESSES.gBattleTypeFlags ~= nil
 end
 
---[[
-  Convert absolute EWRAM address to WRAM offset.
-  @param address absolute address (0x02XXXXXX)
-  @return offset for emu.memory.wram
-]]
-local function toWRAMOffset(address)
-  return address - 0x02000000
+function Battle.isLinkConfigured()
+  return LINK ~= nil and LINK.GetMultiplayerId ~= nil
 end
 
---[[
-  Convert absolute IWRAM address to IWRAM offset.
-  @param address absolute address (0x03XXXXXX)
-  @return offset for emu.memory.iwram
-]]
-local function toIWRAMOffset(address)
-  return address - 0x03000000
-end
+-- ============================================================
+-- Stale Patch Cleanup
+-- ============================================================
 
---[[
-  Read local player's party data (600 bytes).
-  @return table of 600 bytes, or nil on error
-]]
-function Battle.readLocalParty()
-  if not ADDRESSES or not ADDRESSES.gPlayerParty then
-    console:log("[Battle] ERROR: gPlayerParty address not configured")
-    return nil
+function Battle.cleanupStalePatches()
+  if not LINK or not LINK.patches then return end
+  local cleaned = 0
+
+  local patchRestore = {
+    { name = "playerBufExecSkip",       patchVal = 0xE01C, origVal = 0xD01C, sz = 2 },
+    { name = "linkOpponentBufExecSkip", patchVal = 0xE01C, origVal = 0xD01C, sz = 2 },
+    { name = "prepBufDataTransferLocal",  patchVal = 0xE008, origVal = 0xD008, sz = 2 },
+    { name = "isLinkTaskFinished",      patchVal = 0x47702001, origVal = nil, sz = 4 },
+    { name = "getBlockReceivedStatus",  patchVal = 0x4770200F, origVal = nil, sz = 4 },
+    -- markBattlerExecLocal, isBattlerExecLocal, markAllBattlersExecLocal:
+    -- REMOVED from active patches (GBA-PK uses bits 28-31 for link exec).
+    -- Still clean up stale patches from previous sessions:
+    { name = "markBattlerExecLocal",    patchVal = 0xE010, origVal = 0xD010, sz = 2, romOffset = 0x040F50 },
+    { name = "isBattlerExecLocal",      patchVal = 0xE00E, origVal = 0xD00E, sz = 2, romOffset = 0x040EFC },
+    { name = "markAllBattlersExecLocal", patchVal = 0xE018, origVal = 0xD018, sz = 2, romOffset = 0x040E88 },
+    { name = "initBtlControllersBeginIntro", patchVal = 0x46C0, origVal = 0xD01D, sz = 2 },
+    -- OLD WRONG patches (targeted PlayerBufferExecCompleted instead of HandleLinkBattleSetup):
+    { name = "nopHandleLinkBattleSetup_hi", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x06F420 },
+    { name = "nopHandleLinkBattleSetup_lo", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x06F422 },
+    -- CORRECT HandleLinkBattleSetup NOP patches (restore on cleanup):
+    { name = "nopHandleLinkSetup_SetUpBV_hi", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x032494 },
+    { name = "nopHandleLinkSetup_SetUpBV_lo", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x032496 },
+    { name = "nopHandleLinkSetup_CB2Init_hi", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x036456 },
+    { name = "nopHandleLinkSetup_CB2Init_lo", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x036458 },
+    -- TryReceiveLinkBattleData NOP in VBlankIntrHandler:
+    { name = "nopTryRecvLinkBattleData_hi", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x0007BC },
+    { name = "nopTryRecvLinkBattleData_lo", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x0007BE },
+  }
+
+  for _, pr in ipairs(patchRestore) do
+    local patch = LINK.patches and LINK.patches[pr.name]
+    local offset = (patch and patch.romOffset) or pr.romOffset
+    if offset then
+      if pr.sz == 2 then
+        local ok, cur = pcall(function() return emu.memory.cart0:read16(offset) end)
+        if ok and cur == pr.patchVal and pr.origVal then
+          pcall(function() emu.memory.cart0:write16(offset, pr.origVal) end)
+          cleaned = cleaned + 1
+        end
+      elseif pr.sz == 4 then
+        local ok, cur = pcall(function() return emu.memory.cart0:read32(offset) end)
+        if ok and cur == pr.patchVal then
+          console:log(string.format("[Battle] WARNING: %s still patched (restart mGBA)", pr.name))
+        end
+      end
+    end
   end
+
+  if LINK.GetMultiplayerId then
+    local gmidOff = (LINK.GetMultiplayerId & 0xFFFFFFFE) - 0x08000000
+    local ok, instr = pcall(function() return emu.memory.cart0:read16(gmidOff) end)
+    if ok and (instr == 0x2000 or instr == 0x2001) then
+      console:log("[Battle] WARNING: GetMultiplayerId still patched -- restart mGBA for clean ROM")
+    end
+  end
+
+  if cleaned > 0 then
+    console:log(string.format("[Battle] Cleaned %d stale ROM patches", cleaned))
+  end
+end
+
+-- ============================================================
+-- Party Read/Write
+-- ============================================================
+
+function Battle.readLocalParty()
+  if not ADDRESSES or not ADDRESSES.gPlayerParty then return nil end
 
   local data = {}
   local baseOffset = toWRAMOffset(ADDRESSES.gPlayerParty)
@@ -137,30 +368,16 @@ function Battle.readLocalParty()
     end
   end)
 
-  if ok and #data == PARTY_SIZE then
-    console:log("[Battle] Local party read (600 bytes)")
-    return data
-  end
-
-  console:log("[Battle] ERROR: Failed to read local party")
+  if ok and #data == PARTY_SIZE then return data end
   return nil
 end
 
---[[
-  Inject opponent's party into gEnemyParty.
-  @param partyData table of 600 bytes
-  @return boolean success
-]]
-function Battle.injectEnemyParty(partyData)
-  if not ADDRESSES or not ADDRESSES.gEnemyParty then
-    console:log("[Battle] ERROR: gEnemyParty address not configured")
-    return false
-  end
+function Battle.injectEnemyParty(partyData, isMasterParam)
+  if not ADDRESSES or not ADDRESSES.gEnemyParty then return false end
+  if not partyData or #partyData ~= PARTY_SIZE then return false end
 
-  if not partyData or #partyData ~= PARTY_SIZE then
-    console:log("[Battle] ERROR: Invalid party data (expected 600 bytes)")
-    return false
-  end
+  local effectiveIsMaster = state.isMaster
+  if isMasterParam ~= nil then effectiveIsMaster = isMasterParam end
 
   local baseOffset = toWRAMOffset(ADDRESSES.gEnemyParty)
 
@@ -171,335 +388,1819 @@ function Battle.injectEnemyParty(partyData)
   end)
 
   if ok then
-    console:log("[Battle] Enemy party injected (600 bytes)")
-    battleState.opponentParty = partyData
+    -- Count non-empty party members (personality != 0 = valid Pokemon)
+    local count = 0
+    local healthFlags = 0
+    for i = 0, 5 do
+      local off = i * POKEMON_SIZE
+      local p = partyData[off + 1] + partyData[off + 2] * 256
+                + partyData[off + 3] * 65536 + partyData[off + 4] * 16777216
+      if p ~= 0 then
+        count = count + 1
+        local hp = partyData[off + POKEMON_HP_OFFSET + 1] + partyData[off + POKEMON_HP_OFFSET + 2] * 256
+        if hp > 0 then
+          healthFlags = healthFlags | (1 << (i * 2))
+        else
+          healthFlags = healthFlags | (3 << (i * 2))
+        end
+      end
+    end
+
+    -- Set gEnemyPartyCount
+    if ADDRESSES.gEnemyPartyCount then
+      pcall(writeMem8, ADDRESSES.gEnemyPartyCount, count)
+    end
+
+    -- Write party to gBlockRecvBuffer for CB2_HandleStartBattle's memcpy
+    if LINK and LINK.gBlockRecvBuffer then
+      local enemySlot = effectiveIsMaster and 1 or 0
+      local stride = LINK.gBlockRecvBufferStride or 0x100
+      local bufAddr = LINK.gBlockRecvBuffer + enemySlot * stride
+      local bufOff = toWRAMOffset(bufAddr)
+      pcall(function()
+        emu.memory.wram:write8(bufOff + 0, 0x00)                    -- versionSignatureLo = 0
+        emu.memory.wram:write8(bufOff + 1, 0x03)                    -- versionSignatureHi = 3 (Emerald)
+        emu.memory.wram:write8(bufOff + 2, healthFlags & 0xFF)      -- vsScreenHealthFlagsLo
+        emu.memory.wram:write8(bufOff + 3, (healthFlags >> 8) & 0xFF)  -- vsScreenHealthFlagsHi
+        for i = 1, math.min(PARTY_SIZE, 252) do
+          emu.memory.wram:write8(bufOff + 4 + i - 1, partyData[i])
+        end
+      end)
+    end
+
+    -- Write local player's health flags to own gBlockRecvBuffer slot (for VS screen pokeballs)
+    if LINK and LINK.gBlockRecvBuffer and ADDRESSES.gPlayerParty then
+      local localStride = LINK.gBlockRecvBufferStride or 0x100
+      local localSlot = effectiveIsMaster and 0 or 1
+      local localBufOff = toWRAMOffset(LINK.gBlockRecvBuffer + localSlot * localStride)
+      local localHealthFlags = 0
+      pcall(function()
+        for i = 0, 5 do
+          local pOff = toWRAMOffset(ADDRESSES.gPlayerParty) + i * POKEMON_SIZE
+          local p = emu.memory.wram:read32(pOff)
+          if p ~= 0 then
+            local hp = emu.memory.wram:read16(pOff + POKEMON_HP_OFFSET)
+            if hp > 0 then
+              localHealthFlags = localHealthFlags | (1 << (i * 2))
+            else
+              localHealthFlags = localHealthFlags | (3 << (i * 2))
+            end
+          end
+        end
+        emu.memory.wram:write8(localBufOff + 0, 0x00)                          -- versionSignatureLo = 0
+        emu.memory.wram:write8(localBufOff + 1, 0x03)                          -- versionSignatureHi = 3 (Emerald)
+        emu.memory.wram:write8(localBufOff + 2, localHealthFlags & 0xFF)       -- vsScreenHealthFlagsLo
+        emu.memory.wram:write8(localBufOff + 3, (localHealthFlags >> 8) & 0xFF) -- vsScreenHealthFlagsHi
+      end)
+    end
+
+    -- Set up gLinkPlayers entries for link battle identification
+    if LINK and LINK.gLinkPlayers then
+      local lpOff = toWRAMOffset(LINK.gLinkPlayers)
+      pcall(function()
+        -- Player 0 (master)
+        emu.memory.wram:write16(lpOff + 0x00, 3)          -- version = Emerald
+        emu.memory.wram:write8(lpOff + 0x13, 0)           -- gender = male
+        emu.memory.wram:write32(lpOff + 0x14, 0x2233)     -- linkType = SINGLE_BATTLE
+        emu.memory.wram:write16(lpOff + 0x18, 0)          -- id = 0
+        emu.memory.wram:write16(lpOff + 0x1A, 2)          -- language = English
+        -- Player 1 (slave)
+        local p1 = lpOff + 0x1C
+        emu.memory.wram:write16(p1 + 0x00, 3)             -- version = Emerald
+        emu.memory.wram:write8(p1 + 0x13, 0)              -- gender = male
+        emu.memory.wram:write32(p1 + 0x14, 0x2233)        -- linkType = SINGLE_BATTLE
+        emu.memory.wram:write16(p1 + 0x18, 1)             -- id = 1
+        emu.memory.wram:write16(p1 + 0x1A, 2)             -- language = English
+      end)
+    end
+
+    console:log(string.format("[Battle] Enemy party injected (600 bytes, %d Pokemon, healthFlags=0x%04X)", count, healthFlags))
+    state.opponentParty = partyData
     return true
   end
-
-  console:log("[Battle] ERROR: Failed to inject enemy party")
   return false
 end
 
---[[
-  Start a PvP battle.
-  Prerequisites: gEnemyParty already injected, player in duel room.
+-- ============================================================
+-- ROM Patching
+-- ============================================================
 
-  @param isMaster boolean - true if this player is the RNG master
-  @param originPos table - {x, y, mapGroup, mapId} to return to after battle
-  @return boolean success
-]]
-function Battle.startBattle(isMaster, originPos)
+local function applyRAMPatch(addr, value, size)
+  local original, ok
+  if size == 1 then
+    ok, original = pcall(readMem8, addr)
+    if ok then pcall(writeMem8, addr, value) end
+  elseif size == 2 then
+    ok, original = pcall(readMem16, addr)
+    if ok then pcall(writeMem16, addr, value) end
+  elseif size == 4 then
+    ok, original = pcall(readMem32, addr)
+    if ok then pcall(writeMem32, addr, value) end
+  end
+  if ok then
+    table.insert(state.ewramPatches, { addr = addr, size = size, original = original })
+    return true
+  end
+  return false
+end
+
+local function applyROMPatch(romOffset, value, size)
+  local original, okRead, okWrite
+  if size == 2 then
+    okRead, original = pcall(emu.memory.cart0.read16, emu.memory.cart0, romOffset)
+    if okRead then okWrite = pcall(emu.memory.cart0.write16, emu.memory.cart0, romOffset, value) end
+  elseif size == 4 then
+    okRead, original = pcall(emu.memory.cart0.read32, emu.memory.cart0, romOffset)
+    if okRead then okWrite = pcall(emu.memory.cart0.write32, emu.memory.cart0, romOffset, value) end
+  end
+
+  if okRead and okWrite then
+    local okV, rb
+    if size == 2 then
+      okV, rb = pcall(emu.memory.cart0.read16, emu.memory.cart0, romOffset)
+    else
+      okV, rb = pcall(emu.memory.cart0.read32, emu.memory.cart0, romOffset)
+    end
+    if okV and rb == value then
+      table.insert(state.romPatches, { romOffset = romOffset, size = size, original = original })
+      return true
+    end
+  end
+  return false
+end
+
+function Battle.applyPatches(isMaster)
+  state.romPatches = {}
+  state.ewramPatches = {}
+  local patchCount = 0
+  local romPatchWorks = false
+
+  -- RAM patches: gWirelessCommType = 0, gReceivedRemoteLinkPlayers = 1
+  if LINK and LINK.gWirelessCommType then
+    if applyRAMPatch(LINK.gWirelessCommType, 0, 1) then patchCount = patchCount + 1 end
+  end
+  if LINK and LINK.gReceivedRemoteLinkPlayers then
+    if applyRAMPatch(LINK.gReceivedRemoteLinkPlayers, 1, 1) then patchCount = patchCount + 1 end
+  end
+
+  -- ROM patch: GetMultiplayerId -> MOV R0,#n; BX LR
+  if LINK and LINK.GetMultiplayerId then
+    local romOff = (LINK.GetMultiplayerId & 0xFFFFFFFE) - 0x08000000
+    local movValue = isMaster and 0x2000 or 0x2001
+    if applyROMPatch(romOff, movValue, 2) then
+      romPatchWorks = true
+      patchCount = patchCount + 1
+      if applyROMPatch(romOff + 2, 0x4770, 2) then patchCount = patchCount + 1 end
+      console:log(string.format("[Battle] Patched GetMultiplayerId: MOV R0,#%d; BX LR", isMaster and 0 or 1))
+    end
+  end
+
+  -- Additional ROM patches (BEQ->B skips, NOP patches)
+  if romPatchWorks and LINK and LINK.patches then
+    for name, patch in pairs(LINK.patches) do
+      if patch.romOffset and patch.value and patch.size then
+        if applyROMPatch(patch.romOffset, patch.value, patch.size) then
+          patchCount = patchCount + 1
+          console:log(string.format("[Battle] Applied ROM patch: %s", name))
+        end
+      end
+    end
+  end
+
+  console:log(string.format("[Battle] Applied %d patches (%d ROM, %d RAM)",
+    patchCount, #state.romPatches, #state.ewramPatches))
+  return patchCount > 0
+end
+
+function Battle.restorePatches()
+  local restored = 0
+
+  for _, patch in ipairs(state.romPatches) do
+    local ok
+    if patch.size == 2 then
+      ok = pcall(emu.memory.cart0.write16, emu.memory.cart0, patch.romOffset, patch.original)
+    elseif patch.size == 4 then
+      ok = pcall(emu.memory.cart0.write32, emu.memory.cart0, patch.romOffset, patch.original)
+    end
+    if ok then restored = restored + 1 end
+  end
+
+  for _, patch in ipairs(state.ewramPatches) do
+    local ok
+    if patch.size == 1 then ok = pcall(writeMem8, patch.addr, patch.original)
+    elseif patch.size == 2 then ok = pcall(writeMem16, patch.addr, patch.original)
+    elseif patch.size == 4 then ok = pcall(writeMem32, patch.addr, patch.original)
+    end
+    if ok then restored = restored + 1 end
+  end
+
+  console:log(string.format("[Battle] Restored %d/%d patches",
+    restored, #state.romPatches + #state.ewramPatches))
+  state.romPatches = {}
+  state.ewramPatches = {}
+end
+
+-- ============================================================
+-- Battle Setup
+-- ============================================================
+
+function Battle.startLinkBattle(isMaster)
   if not Battle.isConfigured() then
-    console:log("[Battle] ERROR: Battle module not configured")
+    console:log("[Battle] ERROR: not configured")
     return false
   end
 
-  battleState.isMaster = isMaster
-  battleState.active = true
-  battleState.turnCount = 0
-  battleState.originPos = originPos
-  battleState.waitingForRemote = false
-  battleState.localChoice = nil
-  battleState.remoteChoice = nil
-  battleState.prevExecFlags = 0
-
-  -- Set gBattleTypeFlags = TRAINER | SECRET_BASE (and optionally IS_MASTER)
-  local flags = BATTLE_TYPE_TRAINER + BATTLE_TYPE_SECRET_BASE
-  if isMaster then
-    flags = flags + BATTLE_TYPE_IS_MASTER
-  end
-
-  local ok1 = pcall(emu.memory.wram.write32, emu.memory.wram,
-    toWRAMOffset(ADDRESSES.gBattleTypeFlags), flags)
-
-  if not ok1 then
-    console:log("[Battle] ERROR: Failed to write gBattleTypeFlags")
-    battleState.active = false
+  if not config or not config.warp then
+    console:log("[Battle] ERROR: no warp config")
     return false
   end
 
-  console:log(string.format("[Battle] Battle flags written: 0x%08X master=%s",
-    flags, tostring(isMaster)))
+  state.isMaster = isMaster
+  state.prevInBattle = 0
+  state.battleDetected = false
+  state.battleCallbackSeen = false
+  state.stageTimer = 0
+  state.remoteBuffers = {}
+  state.remoteReady = false
 
-  -- Trigger battle via CB2_LoadMap (detects battle flags and loads battle scene)
-  if HAL then
-    HAL.blankScreen()
-    HAL.triggerMapLoad()
-    console:log("[Battle] triggerMapLoad called — CB2_LoadMap will start battle")
+  -- Set up buffer relay slot mapping (GBA-PK: 1-indexed battler IDs)
+  state.relay.localSlot = isMaster and 0 or 1     -- 0-indexed for memory addressing
+  state.relay.remoteSlot = isMaster and 1 or 0     -- 0-indexed for memory addressing
+  state.relay.localBattler = isMaster and 1 or 2   -- 1-indexed for PLAYERS/PLAYERS2
+  state.relay.remoteBattler = isMaster and 2 or 1  -- 1-indexed for PLAYERS/PLAYERS2
+  state.relay.waitingStatus = 0
+  state.relay.bufferID = 0
+  state.relay.sendID = 0
+  state.relay.remoteWaitingStatus = 0
+  state.relay.remoteBufferID = 0
+  state.relay.remoteSendID = 0
+  state.relay.remoteBattleflags = { 0, 0, 0, 0 }
+  state.relay.remoteTransferStage = 7  -- Start at 7 (active battle)
+  state.relay.remoteBufferA = nil
+  state.relay.remoteBufferB = nil
+  state.relay.remoteAttacker = 0
+  state.relay.remoteTarget = 0
+  state.relay.remoteAbsent = 0
+  state.relay.remoteEffect = 0
+  state.relay.commAdvanced = false
+  state.relay.commReady = false
+  state.relay.lastBufferHash = {}
+
+  -- Initialize buffer relay tables early (onRemoteBufferCmd can arrive during STARTING)
+  state.relay.battleflags = { 0, 0, 0, 0 }
+  state.relay.pendingRelay = {}
+  state.relay.pendingCmd = {}
+  state.relay.processingCmd = {}
+  state.relay.remoteBufferB_queue = {}
+  state.relay.introComplete = false
+
+  -- CRITICAL: Save local party BEFORE battle init!
+  state.localPartyBackup = Battle.readLocalParty()
+  if state.localPartyBackup then
+    console:log(string.format("[Battle] Local party backed up (%d bytes)", #state.localPartyBackup))
   else
-    console:log("[Battle] WARNING: HAL not available — cannot trigger battle")
-    battleState.active = false
+    console:log("[Battle] WARNING: Could not backup local party!")
+  end
+
+  -- Determine battle entry point
+  local battleEntryAddr = nil
+  local entryName = "?"
+
+  if LINK and LINK.CB2_InitBattle then
+    battleEntryAddr = LINK.CB2_InitBattle
+    entryName = "CB2_InitBattle"
+  elseif LINK and LINK.CB2_HandleStartBattle then
+    battleEntryAddr = LINK.CB2_HandleStartBattle
+    entryName = "CB2_HandleStartBattle (fallback)"
+  else
+    console:log("[Battle] ERROR: no battle entry address configured")
     return false
+  end
+
+  -- Set battle type flags
+  -- GBA-PK style: Only HOST gets IS_MASTER. Slave gets LINK+TRAINER only.
+  -- This prevents DMA corruption on the master that was caused by both having IS_MASTER.
+  local flags = BATTLE_TYPE_LINK | BATTLE_TYPE_TRAINER
+  if isMaster then
+    flags = flags | BATTLE_TYPE_IS_MASTER
+  end
+  state.battleFlags = flags
+  state.isLinkBattle = true
+
+  local ok = pcall(writeMem32, ADDRESSES.gBattleTypeFlags, flags)
+  if not ok then
+    console:log("[Battle] ERROR: failed to write gBattleTypeFlags")
+    return false
+  end
+  console:log(string.format("[Battle] gBattleTypeFlags = 0x%08X (master=%s)", flags, tostring(isMaster)))
+
+  -- Apply ROM+EWRAM patches BEFORE triggering battle
+  Battle.applyPatches(isMaster)
+
+  -- GBA-PK style: clear stale controller function pointers from previous battles
+  if LINK and LINK.gBattlerControllerFuncs then
+    for i = 0, 3 do pcall(writeMem32, LINK.gBattlerControllerFuncs + i * 4, 0) end
+    console:log("[Battle] Pre-cleared gBattlerControllerFuncs (4 x u32 = 0)")
+  end
+
+  -- Set gBlockReceivedStatus to 0x0F (bitmask: all 4 players received)
+  if LINK and LINK.gBlockReceivedStatus then
+    for i = 0, 3 do pcall(writeMem8, LINK.gBlockReceivedStatus + i, 0x0F) end
+  end
+
+  -- Clear link status byte
+  if LINK and LINK.linkStatusByte then
+    pcall(writeMem8, LINK.linkStatusByte, 0)
+  end
+
+  -- Set gMain.savedCallback for proper return-to-overworld after battle
+  local gMainBase = config.warp.callback2Addr - 4  -- callback2 is at gMain+0x04
+  local savedCbOffset = (LINK and LINK.savedCallbackOffset) or 0x08
+  local savedCallbackAddr = gMainBase + savedCbOffset
+  if LINK and LINK.CB2_ReturnToField then
+    pcall(writeMem32, savedCallbackAddr, LINK.CB2_ReturnToField)
+    console:log(string.format("[Battle] savedCallback = 0x%08X (CB2_ReturnToField)", LINK.CB2_ReturnToField))
+  elseif config.warp.cb2Overworld then
+    pcall(writeMem32, savedCallbackAddr, config.warp.cb2Overworld)
+    console:log(string.format("[Battle] savedCallback = 0x%08X (CB2_Overworld fallback)", config.warp.cb2Overworld))
+  end
+
+  -- Save callback1 so we can restore it after battle
+  local ok1, cb1 = pcall(readMem32, gMainBase + 0x00)
+  if ok1 and cb1 >= 0x08000000 and cb1 < 0x0A000000 then
+    state.savedCallback1 = cb1
+    console:log(string.format("[Battle] Saved callback1 = 0x%08X", cb1))
+  end
+
+  -- NULL callback1 before triggering battle
+  pcall(writeMem32, gMainBase + 0x00, 0)
+
+  -- Clear gBattleCommunication[MULTIUSE_STATE]
+  if LINK and LINK.gBattleCommunication then
+    pcall(writeMem8, LINK.gBattleCommunication, 0)
+  end
+
+  -- GBA-PK: Initialize local link player (reads real name from SaveBlock2)
+  -- Must be called BEFORE triggering battle so VS screen shows real player name
+  if initLocalLinkPlayer() then
+    console:log("[Battle] InitLocalLinkPlayer: real name written to gLinkPlayers[0]")
+  else
+    console:log("[Battle] InitLocalLinkPlayer: using fallback names (PLAYER/RIVAL)")
+  end
+
+  -- Clear sBlockSend (10 bytes) — GBA-PK clears this at stage 2
+  if LINK and LINK.sBlockSend then
+    for i = 0, 9 do pcall(writeMem8, LINK.sBlockSend + i, 0) end
+  end
+
+  -- Clear gLinkCallback — prevent stale link callback from firing
+  if LINK and LINK.gLinkCallback then
+    pcall(writeMem32, LINK.gLinkCallback, 0)
+  end
+
+  -- GBA-PK: Do NOT blank screen — battle engine handles transitions naturally
+
+  -- Reset gMain.state to 0
+  local stateOff = config.warp.gMainStateOffset or 0x438
+  pcall(writeMem16, gMainBase + stateOff, 0)
+
+  -- === Battle Entry: Loadscript(37) or direct write fallback ===
+  local scriptOk = false
+  if LINK and LINK.gScriptData and LINK.gNativeData and LINK.gScriptLoad
+     and LINK.CreateTask and LINK.Task_StartWiredCableClubBattle
+     and LINK.gSpecialVar_8000 then
+      scriptOk = triggerLoadscript37()
+  end
+
+  if scriptOk then
+      state.battleEntryMethod = "loadscript37"
+      console:log("[Battle] Loadscript(37) triggered — task will call SetMainCallback2")
+  else
+      -- Fallback: direct callback2 write (ancien approach)
+      pcall(writeMem32, config.warp.callback2Addr, battleEntryAddr)
+      state.battleEntryMethod = "direct_write"
+      console:log(string.format("[Battle] callback2 = 0x%08X (direct write)", battleEntryAddr))
+  end
+
+  -- Transition to STARTING stage
+  state.stage = STAGE.STARTING
+  state.stageTimer = 0
+
+  if state.sendFn then
+    state.sendFn({ type = "duel_stage", stage = STAGE.STARTING })
+  end
+
+  console:log(string.format("[Battle] Battle started (master=%s, entry=%s)", tostring(isMaster), entryName))
+  return true
+end
+
+-- ============================================================
+-- Buffer Relay Helpers
+-- ============================================================
+
+local function readEWRAMBlock(addr, size)
+  local offset = toWRAMOffset(addr)
+  local data = {}
+  local ok = pcall(function()
+    for i = 0, size - 1 do data[i + 1] = emu.memory.wram:read8(offset + i) end
+  end)
+  if ok and #data == size then return data end
+  return nil
+end
+
+local function writeEWRAMBlock(addr, data)
+  local offset = toWRAMOffset(addr)
+  local ok = pcall(function()
+    for i = 1, #data do emu.memory.wram:write8(offset + i - 1, data[i]) end
+  end)
+  return ok
+end
+
+local function hashBytes(data)
+  if not data then return 0 end
+  local h = 0
+  for i = 1, #data do
+    h = ((h << 5) + h + data[i]) & 0xFFFFFFFF
+  end
+  return h
+end
+
+-- Cached buffer base addresses (verified once, reused)
+local cachedBufABase = nil
+local cachedBufBBase = nil
+local bufferAddressesVerified = false
+
+-- Dereference gBattleResources to get heap-allocated buffer base addresses
+local function getBufferAddresses()
+  -- Return cached if already verified
+  if bufferAddressesVerified and cachedBufABase then
+    return cachedBufABase, cachedBufBBase
+  end
+
+  if not LINK or not LINK.gBattleResources then return nil, nil end
+
+  local ok, resPtr = pcall(readMem32, LINK.gBattleResources)
+  if not ok or not resPtr or resPtr < 0x02000000 or resPtr > 0x0203FFFF then
+    return nil, nil
+  end
+
+  -- Try configured offset first, fallback to vanilla expansion offset
+  local offsets_to_try = {
+    { a = LINK.bufferA_offset or 0x024, b = LINK.bufferB_offset or 0x824, label = "R&B" },
+    { a = 0x010, b = 0x810, label = "vanilla-expansion" },
+  }
+
+  for _, off in ipairs(offsets_to_try) do
+    local bufABase = resPtr + off.a
+    local bufBBase = resPtr + off.b
+    -- Verify: bufferB should be exactly bufferA + 0x800 (4 battlers × 0x200)
+    if bufBBase - bufABase == 0x800 then
+      -- Verify the computed addresses are in valid EWRAM range
+      if bufABase >= 0x02000000 and bufBBase + 0x800 <= 0x02040000 then
+        if not bufferAddressesVerified then
+          console:log(string.format("[Battle] Buffer addresses: resPtr=0x%08X bufA=0x%08X bufB=0x%08X (%s offsets 0x%03X/0x%03X)",
+            resPtr, bufABase, bufBBase, off.label, off.a, off.b))
+          bufferAddressesVerified = true
+        end
+        cachedBufABase = bufABase
+        cachedBufBBase = bufBBase
+        return bufABase, bufBBase
+      end
+    end
+  end
+
+  return nil, nil
+end
+
+-- Read bufferA and bufferB for a given battler slot (0-indexed)
+-- GBA-PK reads 256 bytes per buffer per battler
+local function readBattlerBuffers(battlerSlot)
+  local bufABase, bufBBase = getBufferAddresses()
+  if not bufABase or not bufBBase then return nil, nil end
+
+  local bufAAddr = bufABase + battlerSlot * BATTLER_BUFFER_STRIDE
+  local bufBAddr = bufBBase + battlerSlot * BATTLER_BUFFER_STRIDE
+
+  local bufA = readEWRAMBlock(bufAAddr, BUFFER_READ_SIZE)
+  local bufB = readEWRAMBlock(bufBAddr, BUFFER_READ_SIZE)
+
+  return bufA, bufB
+end
+
+-- Write bufferA and bufferB for a given battler slot (0-indexed)
+local function writeBattlerBuffers(battlerSlot, bufA, bufB)
+  local bufABase, bufBBase = getBufferAddresses()
+  if not bufABase or not bufBBase then return false end
+
+  if bufA and #bufA > 0 then
+    local bufAAddr = bufABase + battlerSlot * BATTLER_BUFFER_STRIDE
+    writeEWRAMBlock(bufAAddr, bufA)
+  end
+
+  if bufB and #bufB > 0 then
+    local bufBAddr = bufBBase + battlerSlot * BATTLER_BUFFER_STRIDE
+    writeEWRAMBlock(bufBAddr, bufB)
   end
 
   return true
 end
 
---[[
-  Called every frame during battle.
-  Detects AI decisions and intercepts them.
-]]
-function Battle.tick()
-  if not battleState.active then return end
-  if not ADDRESSES or not ADDRESSES.gBattleControllerExecFlags then return end
+-- ============================================================
+-- Buffer Relay Network Handlers
+-- ============================================================
 
-  -- Read current exec flags
-  local ok, flags = pcall(emu.memory.wram.read32, emu.memory.wram,
-    toWRAMOffset(ADDRESSES.gBattleControllerExecFlags))
-  if not ok then return end
+function Battle.onRemoteBuffer(message)
+  if not message then return end
+  local relay = state.relay
 
-  local opponentBit = 0x02  -- Bit 1 = opponent controller (battler index 1)
+  -- Store remote player's GBA-PK protocol state (mirrors otherplayerBattle in GBA-PK)
+  if message.p ~= nil then relay.remoteWaitingStatus = message.p end
+  if message.bufID ~= nil then relay.remoteBufferID = message.bufID end
+  if message.sendID ~= nil then relay.remoteSendID = message.sendID end
+  if message.ef then relay.remoteBattleflags = message.ef end
 
-  -- Detect: AI just decided (bit went from 1 to 0)
-  local prevHadBit = (battleState.prevExecFlags & opponentBit) ~= 0
-  local currHasBit = (flags & opponentBit) ~= 0
+  -- Store buffer data for writing in next tick
+  if message.bufA then relay.remoteBufferA = message.bufA end
+  if message.bufB then relay.remoteBufferB = message.bufB end
+  if message.attacker ~= nil then relay.remoteAttacker = message.attacker end
+  if message.target ~= nil then relay.remoteTarget = message.target end
+  if message.absent ~= nil then relay.remoteAbsent = message.absent end
+  if message.effect ~= nil then relay.remoteEffect = message.effect end
 
-  if prevHadBit and not currHasBit then
-    -- AI decided! Freeze by putting the bit back
-    pcall(emu.memory.wram.write32, emu.memory.wram,
-      toWRAMOffset(ADDRESSES.gBattleControllerExecFlags), flags | opponentBit)
-
-    battleState.waitingForRemote = true
-    console:log("[Battle] AI decided — waiting for remote choice")
-  end
-
-  -- If we have the remote choice, inject it
-  if battleState.waitingForRemote and battleState.remoteChoice then
-    Battle.injectRemoteChoice(battleState.remoteChoice)
-    battleState.remoteChoice = nil
-    battleState.waitingForRemote = false
-    battleState.turnCount = battleState.turnCount + 1
-  end
-
-  battleState.prevExecFlags = flags
+  -- Mark that we have received at least one message from remote
+  relay.remoteDataReceived = true
 end
 
---[[
-  Inject remote player's choice into gBattleBufferB[opponent].
-  @param choice table {action="move"|"switch", slot/switchIndex, target}
-]]
-function Battle.injectRemoteChoice(choice)
-  if not ADDRESSES or not ADDRESSES.gBattleBufferB then
-    console:log("[Battle] ERROR: gBattleBufferB not configured")
+function Battle.onRemoteChoice(message)
+  if not message then return end
+  if message.action ~= nil then
+    state.relay.remoteAction = {
+      action = message.action,
+      move = message.move or 0
+    }
+    state.relay.remoteReady = true
+    console:log(string.format("[Battle] Remote choice received: action=%d move=%d",
+      message.action, message.move or 0))
+  end
+end
+
+-- GBA-PK Buffer Relay: CLIENT receives command from HOST (bufferA)
+function Battle.onRemoteBufferCmd(message)
+  if not message or message.battler == nil then return end
+  state.relay.lastRelayActivityFrame = state.stageTimer
+  -- Store both bufA and ctx (attacker/target/absent/effect) for the relay protocol
+  state.relay.pendingCmd[message.battler] = { bufA = message.bufA, ctx = message.ctx }
+  console:log(string.format("[Battle] CLIENT: Received bufA cmd from HOST for battler %d (cmd=0x%02X)",
+    message.battler, (message.bufA and message.bufA[1]) or 0))
+end
+
+-- GBA-PK Buffer Relay: HOST receives response from CLIENT (bufferB)
+function Battle.onRemoteBufferResp(message)
+  if not message or message.battler == nil then return end
+  state.relay.lastRelayActivityFrame = state.stageTimer
+  state.relay.remoteBufferB_queue[message.battler] = message.bufB
+  console:log(string.format("[Battle] HOST: Received bufB resp from CLIENT for battler %d",
+    message.battler))
+end
+
+function Battle.onRemoteStage(remoteStage)
+  -- Handle string stage names (GBA-PK readiness signaling)
+  if remoteStage == "mainloop_ready" then
+    state.relay.remoteMainloopReady = true
+    console:log("[Battle] Remote player entered MAIN_LOOP — relay enabled")
     return
   end
-
-  -- Opponent's buffer is at gBattleBufferB + 0x200 (battler 1, 512 bytes per buffer)
-  local bufferOffset = toWRAMOffset(ADDRESSES.gBattleBufferB) + 0x200
-
-  if choice.action == "move" then
-    -- CONTROLLER_TWORETURNVALUES command for move selection
-    pcall(emu.memory.wram.write8, emu.memory.wram, bufferOffset + 0, 0x22)
-    pcall(emu.memory.wram.write8, emu.memory.wram, bufferOffset + 1, 10)  -- action type
-    pcall(emu.memory.wram.write8, emu.memory.wram, bufferOffset + 2, choice.slot or 0)
-    pcall(emu.memory.wram.write8, emu.memory.wram, bufferOffset + 3, choice.target or 0)
-
-  elseif choice.action == "switch" then
-    -- CONTROLLER_CHOSENMONRETURNVALUE command for switch
-    pcall(emu.memory.wram.write8, emu.memory.wram, bufferOffset + 0, 0x23)
-    pcall(emu.memory.wram.write8, emu.memory.wram, bufferOffset + 1, choice.switchIndex or 0)
+  local stageNum = tonumber(remoteStage)
+  if stageNum and stageNum >= STAGE.STARTING then
+    state.remoteReady = true
   end
-
-  -- Unfreeze: clear opponent bit
-  local ok, flags = pcall(emu.memory.wram.read32, emu.memory.wram,
-    toWRAMOffset(ADDRESSES.gBattleControllerExecFlags))
-  if ok then
-    pcall(emu.memory.wram.write32, emu.memory.wram,
-      toWRAMOffset(ADDRESSES.gBattleControllerExecFlags), flags & ~0x02)
-  end
-
-  console:log(string.format("[Battle] Injected remote choice: %s", choice.action))
 end
 
---[[
-  Capture local player's choice from gBattleBufferB[player].
-  @return table {action, slot, target} or {action, switchIndex} or nil
-]]
-function Battle.captureLocalChoice()
-  if not ADDRESSES or not ADDRESSES.gBattleBufferB then
-    return nil
+-- ============================================================
+-- Maintain Link State (called every frame while LINK active)
+-- ============================================================
+
+local function maintainLinkState(blockRecvStatus)
+  if not LINK then return end
+  -- blockRecvStatus: 0x0F during STARTING (engine needs "all received" to advance),
+  --                  0x00 during MAIN_LOOP (prevent VBlank functions from reading garbage gBlockRecvBuffer data)
+  local brs = blockRecvStatus or 0x0F
+  if LINK.gReceivedRemoteLinkPlayers then
+    pcall(writeMem8, LINK.gReceivedRemoteLinkPlayers, 1)
   end
-
-  -- Player's buffer is at gBattleBufferB + 0x000 (battler 0)
-  local bufferOffset = toWRAMOffset(ADDRESSES.gBattleBufferB)
-
-  local ok, cmd = pcall(emu.memory.wram.read8, emu.memory.wram, bufferOffset + 0)
-  if not ok then return nil end
-
-  if cmd == 0x22 then  -- CONTROLLER_TWORETURNVALUES (move)
-    local slot = emu.memory.wram:read8(bufferOffset + 2)
-    local target = emu.memory.wram:read8(bufferOffset + 3)
-    return { action = "move", slot = slot, target = target }
-
-  elseif cmd == 0x23 then  -- CONTROLLER_CHOSENMONRETURNVALUE (switch)
-    local switchIndex = emu.memory.wram:read8(bufferOffset + 1)
-    return { action = "switch", switchIndex = switchIndex }
+  if LINK.gWirelessCommType then
+    pcall(writeMem8, LINK.gWirelessCommType, 0)
   end
-
-  return nil
+  if LINK.gBlockReceivedStatus then
+    for i = 0, 3 do pcall(writeMem8, LINK.gBlockReceivedStatus + i, brs) end
+  end
+  if LINK.linkStatusByte then
+    pcall(writeMem8, LINK.linkStatusByte, 0)
+  end
+  -- Sanitize gBlockRecvBuffer: zero dataSize field (byte 2 in each slot) to prevent
+  -- any VBlank function from doing a garbage-sized memcpy over the EWRAM heap
+  if LINK.gBlockRecvBuffer then
+    local stride = LINK.gBlockRecvBufferStride or 0x100
+    for slot = 0, 3 do
+      pcall(writeMem8, LINK.gBlockRecvBuffer + slot * stride + 2, 0)
+    end
+  end
 end
 
---[[
-  Check if local player has made their choice this turn.
-  @return boolean
-]]
-function Battle.hasPlayerChosen()
-  if not ADDRESSES or not ADDRESSES.gBattleControllerExecFlags then
+-- ============================================================
+-- Maintain gLinkPlayers names (prevent infinite text print)
+-- ROOT CAUSE: DoBattleIntro expands "{LINK_OPPONENT} wants to battle!" text
+-- GBA-PK style: write proper gLinkPlayers struct fields like InitiateBattle().
+-- struct LinkPlayer (28 bytes = 0x1C):
+--   0x00 u16 version     (VERSION_EMERALD = 3)
+--   0x04 u32 trainerId
+--   0x08 u8[8] name      (GBA encoded, 7 chars + 0xFF terminator)
+--   0x13 u8 gender        (0=male, 1=female)
+--   0x14 u32 linkType
+--   0x18 u16 id           (battler id: 0 or 1)
+--   0x1A u16 language     (LANGUAGE_ENGLISH = 2)
+-- Must be called EVERY frame during DoBattleIntro (DMA/link ops can zero it).
+-- ============================================================
+
+-- GBA encoded fallback names: "PLAYER" and "RIVAL"
+local GBA_NAME_PLAYER = {0xCA, 0xC6, 0xBB, 0xD3, 0xBF, 0xCC, 0xFF, 0x00}  -- "PLAYER" + terminator
+local GBA_NAME_RIVAL  = {0xCC, 0xC3, 0xD5, 0xBB, 0xC6, 0xFF, 0x00, 0x00}  -- "RIVAL" + terminator
+
+-- Cached real player name (read once from SaveBlock2 via initLocalLinkPlayer)
+local cachedLocalName = nil
+local cachedLocalGender = 0
+local cachedLocalTrainerId = 0
+
+-- Cached opponent data (received via TCP duel_player_info)
+local cachedOpponentName = nil
+local cachedOpponentGender = 0
+local cachedOpponentTrainerId = 0
+
+-- ============================================================
+-- InitLocalLinkPlayer — Lua equivalent of ROM function
+-- Reads player name, gender, trainerId from gSaveBlock2Ptr
+-- and writes them to gLinkPlayers[0] (the local player entry).
+-- This makes the VS screen show the real player name instead of "PLAYER".
+--
+-- SaveBlock2 layout (pokeemerald-expansion):
+--   +0x00: u8[8]  playerName (GBA encoded, 7 chars + 0xFF terminator)
+--   +0x08: u8     playerGender (0=male, 1=female)
+--   +0x09: u8     specialSaveWarpFlags
+--   +0x0A: u8[4]  playerTrainerId
+--
+-- LinkPlayer struct (28 bytes = 0x1C):
+--   +0x00: u16 version     (VERSION_EMERALD = 3)
+--   +0x04: u32 trainerId
+--   +0x08: u8[8] name      (GBA encoded, 7 chars + 0xFF terminator)
+--   +0x13: u8 gender       (0=male, 1=female)
+--   +0x14: u32 linkType
+--   +0x18: u16 id           (battler id: 0 or 1)
+--   +0x1A: u16 language     (LANGUAGE_ENGLISH = 2)
+-- ============================================================
+
+initLocalLinkPlayer = function()
+  if not LINK or not LINK.gLinkPlayers then return false end
+  if not LINK.gSaveBlock2Ptr then
+    console:log("[Battle] initLocalLinkPlayer: no gSaveBlock2Ptr configured, using fallback names")
     return false
   end
 
-  local ok, flags = pcall(emu.memory.wram.read32, emu.memory.wram,
-    toWRAMOffset(ADDRESSES.gBattleControllerExecFlags))
-  if not ok then return false end
-
-  -- Player bit (bit 0) cleared = player has chosen
-  local playerBit = 0x01
-  return (flags & playerBit) == 0
-end
-
---[[
-  Set the remote choice received from network.
-  @param choice table {action, slot/switchIndex, target}
-]]
-function Battle.setRemoteChoice(choice)
-  battleState.remoteChoice = choice
-end
-
---[[
-  Read the current RNG value.
-  @return u32 RNG value
-]]
-function Battle.readRng()
-  if not ADDRESSES or not ADDRESSES.gRngValue then
-    return 0
+  -- Read gSaveBlock2Ptr (IWRAM pointer to EWRAM data)
+  local ok, sb2Addr = pcall(readMem32, LINK.gSaveBlock2Ptr)
+  if not ok or sb2Addr < 0x02000000 or sb2Addr > 0x0203FFFF then
+    console:log(string.format("[Battle] initLocalLinkPlayer: invalid gSaveBlock2Ptr = 0x%08X", sb2Addr or 0))
+    return false
   end
 
-  local addr = ADDRESSES.gRngValue
-  local ok, val
-
-  if addr >= 0x03000000 and addr < 0x03008000 then
-    ok, val = pcall(emu.memory.iwram.read32, emu.memory.iwram, toIWRAMOffset(addr))
-  else
-    ok, val = pcall(emu.memory.wram.read32, emu.memory.wram, toWRAMOffset(addr))
+  -- Read player name (8 bytes at SB2+0x00)
+  local playerName = {}
+  for i = 0, 7 do
+    local okN, byte = pcall(readMem8, sb2Addr + i)
+    playerName[i + 1] = (okN and byte) or 0xFF
   end
+  -- Ensure 0xFF terminator
+  if playerName[8] ~= 0xFF then playerName[8] = 0xFF end
 
-  if ok then return val end
-  return 0
+  -- Read gender (SB2+0x08)
+  local okG, gender = pcall(readMem8, sb2Addr + 0x08)
+  gender = (okG and gender) or 0
+
+  -- Read trainerId (4 bytes at SB2+0x0A, stored as u32)
+  local okT, trainerId = pcall(readMem32, sb2Addr + 0x0A)
+  trainerId = (okT and trainerId) or 0
+
+  -- Cache for maintainLinkPlayers
+  cachedLocalName = playerName
+  cachedLocalGender = gender
+  cachedLocalTrainerId = trainerId
+
+  -- Write to gLinkPlayers[0]
+  local glp = LINK.gLinkPlayers
+  pcall(function()
+    writeMem16(glp + 0x00, 3)            -- version = VERSION_EMERALD
+    writeMem32(glp + 0x04, trainerId)    -- trainerId
+    for i = 0, 7 do                      -- name
+      writeMem8(glp + 0x08 + i, playerName[i + 1])
+    end
+    writeMem8(glp + 0x13, gender)        -- gender
+    writeMem32(glp + 0x14, 0x2233)       -- linkType = SINGLE_BATTLE
+    writeMem16(glp + 0x18, 0)            -- id = 0 (local player)
+    writeMem16(glp + 0x1A, 2)            -- language = LANGUAGE_ENGLISH
+  end)
+
+  -- Log the decoded name for debugging
+  local nameStr = ""
+  for i = 1, 7 do
+    local b = playerName[i]
+    if b == 0xFF then break end
+    -- GBA text: A=0xBB, a=0xD5, space=0x00
+    if b >= 0xBB and b <= 0xD4 then
+      nameStr = nameStr .. string.char(string.byte("A") + (b - 0xBB))
+    elseif b >= 0xD5 and b <= 0xEE then
+      nameStr = nameStr .. string.char(string.byte("a") + (b - 0xD5))
+    elseif b == 0x00 then
+      nameStr = nameStr .. " "
+    else
+      nameStr = nameStr .. string.format("<%02X>", b)
+    end
+  end
+  console:log(string.format("[Battle] initLocalLinkPlayer: name='%s' gender=%d trainerId=0x%08X", nameStr, gender, trainerId))
+  return true
 end
 
---[[
-  Write RNG value for synchronization.
-  @param value u32 RNG value
-]]
-function Battle.writeRng(value)
-  if not ADDRESSES or not ADDRESSES.gRngValue then
+-- ============================================================
+-- Loadscript(37) — Battle Entry via Script Engine (GBA-PK)
+-- ============================================================
+
+triggerLoadscript37 = function()
+    if not LINK then return false end
+    local gSD = LINK.gScriptData
+    local gND = LINK.gNativeData
+    local gSL = LINK.gScriptLoad
+    local cTask = LINK.CreateTask
+    local tFunc = LINK.Task_StartWiredCableClubBattle
+    local sv8k = LINK.gSpecialVar_8000
+    if not (gSD and gND and gSL and cTask and tFunc and sv8k) then return false end
+
+    -- 1. Write ASM to gNativeData (cart0) — GBA-PK writes ASM FIRST
+    local asmCode = {
+        0x2101B500, 0x80014806, 0x80194B06, 0x21804A02,
+        0x47104802, 0x4600BD00,
+        cTask + 1, tFunc + 1, sv8k + 8, sv8k + 10
+    }
+    local ndOff = gND - 0x08000000
+    for i, w in ipairs(asmCode) do
+        emu.memory.cart0:write32(ndOff + (i-1)*4, w)
+    end
+
+    -- 2. Write script bytecode to gScriptData (cart0)
+    -- Adapted: skip InitLocalLinkPlayer (inlined, handled by Lua)
+    local scriptCode = {0x23000000, gND + 1, 0xFFFFFF02}
+    local sdOff = gSD - 0x08000000
+    for i, w in ipairs(scriptCode) do
+        emu.memory.cart0:write32(sdOff + (i-1)*4, w)
+    end
+
+    -- 3. Trigger script engine via gScriptLoad (IWRAM)
+    -- Mode 256 = ASM, Word 4 = gScriptData (no +1 for ASM mode)
+    local loadData = {0, 0, 256, 0, gSD, 0, 0, 0, 0, 0, 0, 0}
+    local slOff = gSL - 0x03000000
+    for i, w in ipairs(loadData) do
+        emu.memory.iwram:write32(slOff + (i-1)*4, w)
+    end
+
+    -- Verify cart0 write
+    local v = emu.memory.cart0:read32(ndOff)
+    if v ~= asmCode[1] then return false end
+    return true
+end
+
+local function loadscriptClear()
+    if not (LINK and LINK.gScriptLoad) then return end
+    -- GBA-PK RemoveScriptFromMemory: mode=513, ptr=0 = disabled
+    local clearData = {0, 0, 513, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    local slOff = LINK.gScriptLoad - 0x03000000
+    for i, w in ipairs(clearData) do
+        emu.memory.iwram:write32(slOff + (i-1)*4, w)
+    end
+end
+
+local function maintainLinkPlayers()
+  if not LINK or not LINK.gLinkPlayers then return end
+  pcall(function()
+    local LP_SIZE = 0x1C  -- sizeof(struct LinkPlayer) = 28 bytes
+
+    -- Use real names from SaveBlock2 (local) and TCP exchange (opponent)
+    local localName = cachedLocalName or (state.isMaster and GBA_NAME_PLAYER or GBA_NAME_RIVAL)
+    local remoteName = cachedOpponentName or GBA_NAME_RIVAL
+    local names = {
+      [0] = state.isMaster and localName or remoteName,
+      [1] = state.isMaster and remoteName or localName,
+    }
+
+    -- Write entries 0 and 1 (host and client)
+    for i = 0, 1 do
+      local base = LINK.gLinkPlayers + i * LP_SIZE
+      -- version = VERSION_EMERALD (3)
+      writeMem16(base + 0x00, 3)
+      -- trainerId (local for our slot, opponent for remote slot)
+      local tid = 0
+      if (i == 0 and state.isMaster) or (i == 1 and not state.isMaster) then
+        tid = cachedLocalTrainerId
+      else
+        tid = cachedOpponentTrainerId
+      end
+      if tid ~= 0 then writeMem32(base + 0x04, tid) end
+      -- name (8 bytes at offset 0x08)
+      for j = 0, 7 do
+        writeMem8(base + 0x08 + j, names[i][j + 1])
+      end
+      -- gender (local for our slot, opponent for remote slot)
+      local g = 0
+      if (i == 0 and state.isMaster) or (i == 1 and not state.isMaster) then
+        g = cachedLocalGender
+      else
+        g = cachedOpponentGender
+      end
+      writeMem8(base + 0x13, g)
+      -- id = battler index
+      writeMem16(base + 0x18, i)
+      -- language = LANGUAGE_ENGLISH (2)
+      writeMem16(base + 0x1A, 2)
+    end
+
+    -- Entry 4 (offset 4*0x1C = 0x70): battle text uses this for opponent name display
+    local opponentEntry = state.isMaster and 1 or 0
+    local textBase = LINK.gLinkPlayers + 4 * LP_SIZE
+    writeMem16(textBase + 0x00, 3)
+    for j = 0, 7 do
+      writeMem8(textBase + 0x08 + j, names[opponentEntry][j + 1])
+    end
+    writeMem8(textBase + 0x13, 0)
+    writeMem16(textBase + 0x1A, 2)
+  end)
+end
+
+-- ============================================================
+-- Kill Link Tasks (prevent EWRAM heap corruption)
+-- gTasks at 0x03005E10 (IWRAM), 16 tasks × 40 bytes
+-- Task.func at +0x00, Task.isActive at +0x04
+-- ============================================================
+local GTASKS_ADDR = 0x03005E10  -- IWRAM
+local TASK_SIZE = 40
+local TASK_COUNT = 16
+local TASK_DUMMY = 0x080C6FF1   -- TaskDummy (THUMB) — safe no-op function
+
+local function killLinkTasks()
+  local killedTasks = 0
+  local activeTasks = {}
+  pcall(function()
+    for i = 0, TASK_COUNT - 1 do
+      local taskBase = GTASKS_ADDR + i * TASK_SIZE
+      local isActive = emu.memory.iwram:read8(toIWRAMOffset(taskBase) + 4)
+      if isActive == 1 then
+        local func = emu.memory.iwram:read32(toIWRAMOffset(taskBase))
+        table.insert(activeTasks, { idx = i, func = func })
+
+        -- Kill tasks in link/comm ROM range (0x08025000-0x0804A000)
+        -- This covers: link_rfu.c, link.c, cable_club.c, battle_controllers.c link tasks
+        -- Including: HandleLinkBattleSetup, Task_WaitForLinkPlayerConnection,
+        -- Task_HandleSendLinkBuffersData, Task_HandleCopyReceivedLinkBuffersData
+        local funcBase = func & 0xFFFFFFFE  -- Clear THUMB bit
+        local isLinkRange = (funcBase >= 0x08025000 and funcBase < 0x0804A000)
+
+        if isLinkRange then
+          emu.memory.iwram:write32(toIWRAMOffset(taskBase), TASK_DUMMY)
+          killedTasks = killedTasks + 1
+        end
+      end
+    end
+  end)
+  return killedTasks, activeTasks
+end
+
+-- ============================================================
+-- State Machine Tick
+-- ============================================================
+
+function Battle.tick()
+  if state.stage == STAGE.IDLE then return end
+
+  state.stageTimer = state.stageTimer + 1
+
+  -- Read inBattle (bitfield: bit 1 of byte at gMain+0x439)
+  local inBattle = nil
+  if ADDRESSES and ADDRESSES.gMainInBattle then
+    local ok, val = pcall(readMem8, ADDRESSES.gMainInBattle)
+    if ok then
+      inBattle = ((val & 0x02) ~= 0) and 1 or 0
+    end
+  end
+
+  -- Track inBattle transitions
+  if inBattle then
+    if state.prevInBattle == 0 and inBattle == 1 then
+      state.battleDetected = true
+      console:log("[Battle] inBattle 0->1: battle engine running")
+    end
+    state.prevInBattle = inBattle
+  end
+
+  -- === STAGE: STARTING ===
+  -- GBA-PK stages 3-6: ROM patches, party exchange, comm advancement, VS screen
+  if state.stage == STAGE.STARTING then
+    -- Loadscript(37) fallback: if callback2 hasn't changed after 30 frames, direct write
+    if state.battleEntryMethod == "loadscript37" and state.stageTimer == 30 then
+      local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
+      if okCb then
+        local isBattle = (cb2 == LINK.CB2_InitBattle or cb2 == LINK.CB2_InitBattleInternal
+            or cb2 == LINK.CB2_HandleStartBattle or cb2 == ADDRESSES.CB2_BattleMain)
+        if not isBattle then
+          console:log("[Battle] Loadscript(37) timeout — direct write fallback")
+          local entry = LINK.CB2_InitBattle or LINK.CB2_HandleStartBattle
+          if entry then pcall(writeMem32, config.warp.callback2Addr, entry) end
+          state.battleEntryMethod = "direct_fallback"
+        end
+      end
+    end
+
+    -- Keep link-related RAM values correct during init
+    -- GBA-PK: 0x0F before comm advancement (engine needs it to advance through early cases)
+    --         0x03 after comm advancement to 12 (stage 4-6: only players 0+1 "received")
+    -- Note: GetBlockReceivedStatus is patched to return 0x0F always, so memory value
+    -- doesn't affect engine behavior — but this aligns with GBA-PK's timing.
+    local brsValue = state.relay.commAdvanced and 0x03 or 0x0F
+    maintainLinkState(brsValue)
+
+    -- Maintain gLinkPlayers names DURING STARTING to ensure 0xFF terminators
+    -- are present BEFORE DoBattleIntro begins (which starts at MAIN_LOOP).
+    -- This is belt-and-suspenders: the main defense is in MAIN_LOOP every frame.
+    maintainLinkPlayers()
+
+    -- Kill link tasks EARLY to prevent DMA corruption (esp. on master)
+    -- The task at 0x08035975 does link buffer operations that corrupt EWRAM heap
+    -- when IS_MASTER is set. Kill every 30 frames in case tasks get re-created.
+    if state.stageTimer <= 5 or state.stageTimer % 30 == 0 then
+      local killed, tasks = killLinkTasks()
+      if killed > 0 then
+        local taskLog = {}
+        for _, t in ipairs(tasks) do
+          table.insert(taskLog, string.format("[%d]=0x%08X", t.idx, t.func))
+        end
+        console:log(string.format("[Battle] STARTING: killed %d link tasks: %s", killed, table.concat(taskLog, " ")))
+      end
+    end
+
+    -- Force battle type flags during init (keep LINK active)
+    if ADDRESSES and ADDRESSES.gBattleTypeFlags and state.battleFlags then
+      local ok, currentFlags = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
+      if ok then
+        local merged = currentFlags | state.battleFlags
+        if merged ~= currentFlags then
+          pcall(writeMem32, ADDRESSES.gBattleTypeFlags, merged)
+        end
+      end
+    end
+
+    -- Detect CB2_HandleStartBattle (needed for comm advancement)
+    local inHandleStartBattle = false
+    if LINK and LINK.CB2_HandleStartBattle and config and config.warp then
+      local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
+      if okCb and cb2 == LINK.CB2_HandleStartBattle then
+        inHandleStartBattle = true
+      end
+    end
+
+    -- Re-inject BOTH parties every 10 frames during CB2_HandleStartBattle
+    -- (Cases 4/6/8 copy from gBlockRecvBuffer and overwrite parties)
+    if inHandleStartBattle and state.stageTimer % 10 == 0 then
+      if state.localPartyBackup and ADDRESSES and ADDRESSES.gPlayerParty then
+        local baseOffset = toWRAMOffset(ADDRESSES.gPlayerParty)
+        pcall(function()
+          for i = 1, PARTY_SIZE do
+            emu.memory.wram:write8(baseOffset + i - 1, state.localPartyBackup[i])
+          end
+        end)
+      end
+      if state.opponentParty and ADDRESSES and ADDRESSES.gEnemyParty then
+        local baseOffset = toWRAMOffset(ADDRESSES.gEnemyParty)
+        pcall(function()
+          for i = 1, PARTY_SIZE do
+            emu.memory.wram:write8(baseOffset + i - 1, state.opponentParty[i])
+          end
+        end)
+      end
+    end
+
+    -- === GBA-PK STAGE 4-5: Wait for comm==2, inject BAT3 data, skip to 12 ===
+    -- GBA-PK flow: wait for engine to reach comm[0]==2 (gSendBuffer ready / case 1 done),
+    -- then inject BAT3 header into gBlockRecvBuffer, set gBlockReceivedStatus=0x03,
+    -- and advance comm to 12 (skip link exchange cases 3-11).
+    -- Cases 12+ handle controller setup, VS screen, display init.
+    if inHandleStartBattle and not state.relay.commAdvanced and LINK and LINK.gBattleCommunication then
+      local okC, comm0 = pcall(readMem8, LINK.gBattleCommunication)
+      if okC then
+        if comm0 >= 2 and comm0 < 12 then
+          -- GBA-PK Stage 4: Re-inject parties into gBlockRecvBuffer at the moment
+          -- the engine expects link data (comm==2 = gSendBuffer populated).
+          -- This ensures gBlockRecvBuffer has correct health flags for case 12+ (VS screen).
+          if state.opponentParty and ADDRESSES and ADDRESSES.gEnemyParty then
+            Battle.injectEnemyParty(state.opponentParty)
+          end
+          if state.localPartyBackup and ADDRESSES and ADDRESSES.gPlayerParty then
+            local baseOffset = toWRAMOffset(ADDRESSES.gPlayerParty)
+            pcall(function()
+              for i = 1, PARTY_SIZE do
+                emu.memory.wram:write8(baseOffset + i - 1, state.localPartyBackup[i])
+              end
+            end)
+          end
+
+          -- GBA-PK Stage 5: Advance comm to 12 (skip link data exchange cases 3-11)
+          pcall(writeMem8, LINK.gBattleCommunication, 12)
+          -- Set gBlockReceivedStatus = 0x03 (GBA-PK stage 4: players 0+1 "received")
+          if LINK.gBlockReceivedStatus then
+            for i = 0, 3 do pcall(writeMem8, LINK.gBlockReceivedStatus + i, 0x03) end
+          end
+          if ADDRESSES and ADDRESSES.gBattleTypeFlags and state.battleFlags then
+            pcall(writeMem32, ADDRESSES.gBattleTypeFlags, state.battleFlags)
+          end
+          pcall(writeMem8, LINK.gReceivedRemoteLinkPlayers, 1)
+          -- GBA-PK defense-in-depth: clear exec flags + bufferA at comm skip (L12855-12858)
+          if LINK.gBattleControllerExecFlags then
+            pcall(writeMem32, LINK.gBattleControllerExecFlags, 0)
+          end
+          local bufAClr = getBufferAddresses()
+          if bufAClr then pcall(writeMem32, bufAClr, 0) end
+          -- Re-apply savedCallback (Task_StartWiredCableClubBattle overwrites it at case 7)
+          if LINK.CB2_ReturnToField and config and config.warp then
+            local gmBase = config.warp.callback2Addr - 4
+            local savedCbAddr = gmBase + ((LINK and LINK.savedCallbackOffset) or 0x08)
+            pcall(writeMem32, savedCbAddr, LINK.CB2_ReturnToField)
+          end
+          state.relay.commAdvanced = true
+          console:log(string.format("[Battle] Stage 4-5: comm[0]=%d → 12, gBlockReceivedStatus=0x03, parties re-injected", comm0))
+        elseif comm0 >= 12 then
+          state.relay.commAdvanced = true
+        end
+      end
+    end
+
+    -- === GBA-PK STAGE 6: VS screen advancement ===
+    if inHandleStartBattle and state.relay.commAdvanced and not state.relay.commReady and LINK and LINK.gBattleCommunication then
+      local okC, comm0 = pcall(readMem8, LINK.gBattleCommunication)
+      if okC then
+        if comm0 == 16 then
+          pcall(writeMem8, LINK.gBattleCommunication, 18)
+          state.relay.commReady = true
+          console:log("[Battle] Stage 6: comm[0] 16 -> 18 (VS screen done)")
+        elseif comm0 > 16 then
+          state.relay.commReady = true
+        end
+      end
+    end
+
+    -- Wait for BattleMainCB2 (GBA-PK Stage 7 transition)
+    local battleReady = false
+    local battleReadyReason = "none"
+    local battleReadyCb2 = 0
+    if ADDRESSES and ADDRESSES.CB2_BattleMain and config and config.warp then
+      local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
+      if okCb then
+        battleReadyCb2 = cb2
+        if cb2 == ADDRESSES.CB2_BattleMain then
+          battleReady = true
+          battleReadyReason = string.format("cb2_match(0x%08X)", cb2)
+        end
+      end
+    elseif state.battleDetected and state.stageTimer > 300 then
+      battleReady = true
+      battleReadyReason = string.format("timeout(%d)", state.stageTimer)
+    end
+
+    -- Phase A: BattleMainCB2 detected → signal readiness, wait for opponent
+    -- GBA-PK: sets Text_Stage=7, then waits for otherplayerBattle.Text_Stage==7
+    if battleReady and not state.battleMainReached then
+      state.battleMainReached = true
+      state.battleReadyReason = battleReadyReason
+      console:log(string.format("[Battle] BattleMainCB2 detected! reason=%s cb2=0x%08X tick=%d",
+        battleReadyReason, battleReadyCb2, state.stageTimer))
+
+      -- Final party re-injection
+      if state.localPartyBackup and ADDRESSES and ADDRESSES.gPlayerParty then
+        local baseOffset = toWRAMOffset(ADDRESSES.gPlayerParty)
+        pcall(function()
+          for i = 1, PARTY_SIZE do
+            emu.memory.wram:write8(baseOffset + i - 1, state.localPartyBackup[i])
+          end
+        end)
+      end
+      if state.opponentParty and ADDRESSES and ADDRESSES.gEnemyParty then
+        Battle.injectEnemyParty(state.opponentParty)
+      end
+
+      -- Signal remote player (GBA-PK: otherplayerBattle.Text_Stage = 7)
+      if state.sendFn then
+        state.sendFn({ type = "duel_stage", stage = "mainloop_ready" })
+      end
+      console:log("[Battle] Sent mainloop_ready, waiting for opponent...")
+    end
+
+    -- Phase B: Both players at Stage 7 → enter MAIN_LOOP
+    -- GBA-PK: Text_Stage==7 AND otherplayerBattle.Text_Stage==7
+    if state.battleMainReached and state.relay.remoteMainloopReady then
+      -- === TRANSITION TO MAIN_LOOP (GBA-PK Stage 7) ===
+      -- LINK stays active! Link controllers handle everything.
+      -- ROM patches simulate link hardware completion.
+      -- We just manage exec flags and relay buffers via TCP.
+
+      -- Clear exec flags for clean start
+      if LINK and LINK.gBattleControllerExecFlags then
+        pcall(writeMem32, LINK.gBattleControllerExecFlags, 0)
+      end
+
+      -- Clear gBattleBufferA command IDs
+      local bufABase, _ = getBufferAddresses()
+      if bufABase then
+        pcall(writeMem32, bufABase, 0)
+        pcall(writeMem32, bufABase + BATTLER_BUFFER_STRIDE, 0)
+      end
+
+      pcall(function() emu:screenshot("transition_to_mainloop.png") end)
+      console:log("[Battle] Both players ready → MAIN_LOOP (GBA-PK Stage 7: LINK active, buffer relay)")
+      state.stage = STAGE.MAIN_LOOP
+      state.stageTimer = 0
+      if state.sendFn then
+        state.sendFn({ type = "duel_stage", stage = STAGE.MAIN_LOOP, reason = state.battleReadyReason or "sync" })
+      end
+    end
+
+    -- Diagnostic logging
+    if (state.stageTimer <= 5 or state.stageTimer % 30 == 0) and config and config.warp then
+      local cb2Str = "?"
+      local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
+      if okCb then cb2Str = string.format("0x%08X", cb2) end
+
+      local commState = "?"
+      if LINK and LINK.gBattleCommunication then
+        local okC, cs = pcall(readMem8, LINK.gBattleCommunication)
+        if okC then commState = tostring(cs) end
+      end
+
+      local bmfStr = "?"
+      if LINK and LINK.gBattleMainFunc then
+        local okB, bmf = pcall(readMem32, LINK.gBattleMainFunc)
+        if okB then bmfStr = string.format("0x%08X", bmf) end
+      end
+
+      -- Verify NOP patches every 30 frames in STARTING
+      local nopOk = true
+      if state.stageTimer % 30 == 1 then
+        local nopChecks = {
+          { off = 0x032494, name = "HLS_SBV" },
+          { off = 0x032496, name = "HLS_SBV2" },
+          { off = 0x036456, name = "HLS_CB2" },
+          { off = 0x036458, name = "HLS_CB22" },
+          { off = 0x0007BC, name = "TryRecv" },
+          { off = 0x0007BE, name = "TryRecv2" },
+        }
+        for _, nc in ipairs(nopChecks) do
+          local okR, v = pcall(emu.memory.cart0.read16, emu.memory.cart0, nc.off)
+          if okR and v ~= 0x46C0 then
+            nopOk = false
+            console:log(string.format("[Battle] WARNING: NOP patch %s NOT applied! val=0x%04X", nc.name, v))
+          end
+        end
+      end
+
+      console:log(string.format("[Battle] STARTING tick=%d cb2=%s bmf=%s inBattle=%s comm[0]=%s HSB=%s",
+        state.stageTimer, cb2Str, bmfStr, tostring(inBattle), commState, tostring(inHandleStartBattle)))
+    end
+
+    -- Screenshot every 150 frames in STARTING
+    if state.stageTimer % 150 == 0 and state.stageTimer > 0 then
+      pcall(function() emu:screenshot(string.format("starting_f%04d.png", state.stageTimer)) end)
+    end
+
+    -- Timeout: 45 seconds
+    if state.stageTimer > 2700 then
+      console:log("[Battle] WARNING: Battle start timeout (45s)")
+      Battle.restorePatches()
+      state.stage = STAGE.DONE
+      state.stageTimer = 0
+    end
     return
   end
 
-  local addr = ADDRESSES.gRngValue
+  -- === STAGE: MAIN_LOOP ===
+  -- GBA-PK style: HOST/CLIENT buffer relay protocol.
+  -- HOST drives the battle engine. CLIENT mirrors via TCP.
+  -- Exec flags bytes 0-3 (bits 0-3 = active, bits 4-7 = network wait).
+  -- No GBRS dynamic patching, no HTASS action sync, no iState restoration.
+  if state.stage == STAGE.MAIN_LOOP then
 
-  if addr >= 0x03000000 and addr < 0x03008000 then
-    pcall(emu.memory.iwram.write32, emu.memory.iwram, toIWRAMOffset(addr), value)
-  else
-    pcall(emu.memory.wram.write32, emu.memory.wram, toWRAMOffset(addr), value)
-  end
-end
-
---[[
-  Called when receiving RNG sync from network (master -> slave).
-  @param rngValue u32 RNG value from master
-]]
-function Battle.onRngSync(rngValue)
-  if not battleState.isMaster then
-    Battle.writeRng(rngValue)
-    console:log(string.format("[Battle] RNG synced: 0x%08X", rngValue))
-  end
-end
-
---[[
-  Check if we're waiting for remote choice.
-  @return boolean
-]]
-function Battle.isWaitingForRemote()
-  return battleState.waitingForRemote
-end
-
---[[
-  Check if this is a new turn (for RNG sync timing).
-  Based on turnCount changing.
-  @return boolean
-]]
-function Battle.isNewTurn()
-  -- This would need more sophisticated detection
-  -- For now, we sync RNG when we inject a remote choice
-  return false
-end
-
---[[
-  Check if battle is active.
-  @return boolean
-]]
-function Battle.isActive()
-  return battleState.active
-end
-
---[[
-  Check if this player is the master.
-  @return boolean
-]]
-function Battle.isMaster()
-  return battleState.isMaster
-end
-
---[[
-  Check if battle has finished.
-  Uses transition tracking: battle is finished when inBattle goes from 1→0.
-  @return boolean
-]]
-function Battle.isFinished()
-  if not battleState.active then return false end
-
-  -- Method 1: Check gBattleOutcome (if available)
-  if ADDRESSES and ADDRESSES.gBattleOutcome then
-    local ok, outcome = pcall(emu.memory.wram.read8, emu.memory.wram,
-      toWRAMOffset(ADDRESSES.gBattleOutcome))
-    if ok and outcome ~= 0 then
-      return true
-    end
-  end
-
-  -- Method 2: Transition tracking on gMain.inBattle
-  -- Only finished if we SAW inBattle=1 (battle started) and now it's 0 (battle ended)
-  if ADDRESSES and ADDRESSES.gMainInBattle then
-    local ok, inBattle = pcall(emu.memory.wram.read8, emu.memory.wram,
-      toWRAMOffset(ADDRESSES.gMainInBattle))
-    if ok then
-      -- Detect 0→1: battle actually started
-      if battleState.prevInBattle == 0 and inBattle == 1 then
-        battleState.battleDetected = true
-        console:log("[Battle] inBattle 0→1: combat is running")
+    -- Force-end: re-inject 0x37 every frame for 30 frames (GBA-PK approach)
+    if state.forceEndPending then
+      local framesSinceForce = state.stageTimer - (state.forceEndFrame or 0)
+      local bufABase, _ = getBufferAddresses()
+      if bufABase then
+        pcall(writeMem8, bufABase, CMD_GET_AWAY_EXIT)
       end
-      -- Detect 1→0: battle ended (only if we saw it start)
-      if battleState.battleDetected and battleState.prevInBattle == 1 and inBattle == 0 then
-        console:log("[Battle] inBattle 1→0: combat finished")
+      if LINK and LINK.gBattleControllerExecFlags then
+        local ok, ef0 = pcall(readMem8, LINK.gBattleControllerExecFlags)
+        if ok then
+          pcall(writeMem8, LINK.gBattleControllerExecFlags, (ef0 | PLAYERS[1]) & 0xCF)
+        end
+        pcall(writeMem8, LINK.gBattleControllerExecFlags + 2, 0)
+        pcall(writeMem8, LINK.gBattleControllerExecFlags + 3, 0)
+      end
+      if framesSinceForce >= 30 then
+        state.forceEndPending = false
+        state.stage = STAGE.ENDING
+        state.stageTimer = 0
+        console:log("[Battle] Force-exit: 30f injection done → ENDING")
+      end
+      return  -- skip normal relay during force-end
+    end
+
+    -- Read gBattleMainFunc for context
+    local currentBmf = 0
+    if LINK and LINK.gBattleMainFunc then
+      local okBmf, bmfVal = pcall(readMem32, LINK.gBattleMainFunc)
+      if okBmf then currentBmf = bmfVal end
+    end
+
+    local isDoBattleIntro = (LINK and LINK.DoBattleIntro and currentBmf == LINK.DoBattleIntro)
+
+    -- === FIRST FRAME: Init relay state ===
+    if state.stageTimer == 1 then
+      state.relay.screenshotDir = state.isMaster and "pvp_screenshots/master/" or "pvp_screenshots/slave/"
+      pcall(function() emu:screenshot(state.relay.screenshotDir .. "mainloop_start.png") end)
+
+      maintainLinkState(0x0F)
+      maintainLinkPlayers()
+      state.relay.localBtf = state.battleFlags
+
+      -- Initialize GBA-PK buffer relay state
+      state.relay.battleflags = { 0, 0, 0, 0 }
+      state.relay.pendingRelay = {}
+      state.relay.pendingCmd = {}
+      state.relay.processingCmd = {}
+      state.relay.remoteBufferB_queue = {}
+      state.relay.introComplete = false
+
+      -- Clear exec flags for clean start
+      if LINK and LINK.gBattleControllerExecFlags then
+        pcall(writeMem32, LINK.gBattleControllerExecFlags, 0)
+      end
+
+      -- Kill link tasks
+      local killedTasks, activeTasks = killLinkTasks()
+      local taskLog = {}
+      for _, t in ipairs(activeTasks) do
+        table.insert(taskLog, string.format("[%d]=0x%08X", t.idx, t.func))
+      end
+
+      -- Re-inject parties
+      if state.localPartyBackup and ADDRESSES and ADDRESSES.gPlayerParty then
+        local baseOffset = toWRAMOffset(ADDRESSES.gPlayerParty)
+        pcall(function()
+          for i = 1, PARTY_SIZE do
+            emu.memory.wram:write8(baseOffset + i - 1, state.localPartyBackup[i])
+          end
+        end)
+      end
+      if state.opponentParty and ADDRESSES and ADDRESSES.gEnemyParty then
+        Battle.injectEnemyParty(state.opponentParty)
+      end
+
+      if state.sendFn then
+        state.sendFn({
+          type = "duel_stage", stage = "tasks",
+          taskCount = #activeTasks, killed = killedTasks,
+          tasks = table.concat(taskLog, " ")
+        })
+      end
+
+      -- (mainloop_ready already sent in STARTING phase A — both players synced before entering MAIN_LOOP)
+
+      console:log(string.format("[Battle] MAIN_LOOP frame 1: GBA-PK buffer relay, master=%s, btf=0x%08X",
+        tostring(state.isMaster), state.battleFlags))
+    end
+
+    -- ================================================================
+    -- EVERY FRAME: Maintain link state + exec flags buffer relay
+    -- ================================================================
+
+    maintainLinkState(0x0F)
+
+    -- Kill link tasks every 30 frames
+    if state.stageTimer % 30 == 0 and state.stageTimer > 1 then
+      killLinkTasks()
+    end
+
+    -- Enforce gBattleTypeFlags
+    if ADDRESSES and ADDRESSES.gBattleTypeFlags and state.relay.localBtf then
+      local okBTF, btfNow = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
+      if okBTF and btfNow ~= state.relay.localBtf then
+        pcall(writeMem32, ADDRESSES.gBattleTypeFlags, state.relay.localBtf)
+      end
+    end
+
+    -- DoBattleIntro: maintain gLinkPlayers + auto-press A
+    if isDoBattleIntro then
+      maintainLinkPlayers()
+      if _G.AUTO_DUEL and state.stageTimer % 15 == 0 then
+        pcall(function()
+          local keys = emu:getKeys()
+          emu:setKeys(keys | 0x01)
+        end)
+      end
+    end
+
+    -- Detect DoBattleIntro completion
+    if not state.relay.introComplete and state.stageTimer > 10 and not isDoBattleIntro and currentBmf ~= 0 then
+      state.relay.introComplete = true
+      console:log(string.format("[Battle] Intro complete! bmf=0x%08X tick=%d", currentBmf, state.stageTimer))
+      pcall(function() emu:screenshot((state.relay.screenshotDir or "pvp_screenshots/") .. "intro_complete.png") end)
+    end
+
+    -- Auto-press A after intro (only if AUTO_DUEL)
+    if _G.AUTO_DUEL and state.relay.introComplete and state.stageTimer % 15 == 0 then
+      pcall(function()
+        local keys = emu:getKeys()
+        emu:setKeys(keys | 0x01)
+      end)
+    end
+
+    -- ================================================================
+    -- GBA-PK EXEC FLAGS BUFFER RELAY PROTOCOL
+    -- ================================================================
+    -- Read exec flags as 4 individual bytes
+    -- byte0 = bits 0-7 (PLAYERS low active + PLAYERS2 low network)
+    -- byte1 = bits 8-15
+    -- byte2 = bits 16-23
+    -- byte3 = bits 24-31 (PLAYERS2 high = link controller marks)
+    -- ================================================================
+    -- (remoteMainloopReady gate removed: both players synced before MAIN_LOOP entry)
+    if LINK and LINK.gBattleControllerExecFlags then
+      local efAddr = LINK.gBattleControllerExecFlags
+      local efOk, byte0, byte1, byte2, byte3
+      efOk = true
+      local ok0, b0 = pcall(readMem8, efAddr + 0)
+      local ok1, b1 = pcall(readMem8, efAddr + 1)
+      local ok2, b2 = pcall(readMem8, efAddr + 2)
+      local ok3, b3 = pcall(readMem8, efAddr + 3)
+      if ok0 and ok1 and ok2 and ok3 then
+        byte0, byte1, byte2, byte3 = b0, b1, b2, b3
+      else
+        efOk = false
+        byte0, byte1, byte2, byte3 = 0, 0, 0, 0
+      end
+
+      local bufABase, bufBBase = getBufferAddresses()
+
+      if efOk and bufABase and bufBBase then
+        -- ============================================================
+        -- GBA-PK style byte3 nibble shift:
+        -- MarkBattlerForControllerExec may set bits in byte3's LOW nibble
+        -- (bits 24-27) instead of HIGH nibble (bits 28-31). Shift them up
+        -- so our PLAYERS2 checks work correctly.
+        -- ============================================================
+        if byte3 ~= 0 and (byte3 >> 4) == 0 then
+          byte3 = byte3 << 4
+        end
+
+        -- Clear byte2 every frame (GBA-PK does this)
+        byte2 = 0
+
+        local remoteSlot = state.relay.remoteSlot  -- 0-indexed: master=1, slave=0
+        local localSlot = state.relay.localSlot     -- 0-indexed: master=0, slave=1
+
+        -- ============================================================
+        -- HOST: Relay ALL battlers (like GBA-PK)
+        -- GBA-PK sends bufferA for EVERY battler with byte3 set.
+        -- For remote battlers: copy CLIENT's bufferB to memory.
+        -- For local battlers: relay but DON'T copy bufferB (just ACK).
+        -- ============================================================
+        if state.isMaster then
+          for battler = 0, 1 do
+            local p2bit = (1 << (4 + battler))  -- PLAYERS2 bit in byte3
+            local pbit = (1 << battler)          -- PLAYERS bit in byte0
+            local isRemote = (battler == remoteSlot)
+
+            -- Detect new command in byte3 for ANY battler
+            if (byte3 & p2bit) ~= 0 and not state.relay.pendingRelay[battler] then
+              local bufAAddr = bufABase + battler * BATTLER_BUFFER_STRIDE
+              local bufA = readEWRAMBlock(bufAAddr, BUFFER_READ_SIZE)
+              -- GBA-PK also sends bufferB alongside bufferA (L13038-13046)
+              -- CLIENT controllers may read bufferB for context before overwriting it
+              local bufBAddr = bufBBase + battler * BATTLER_BUFFER_STRIDE
+              local bufB = readEWRAMBlock(bufBAddr, BUFFER_READ_SIZE)
+
+              if bufA and state.sendFn then
+                -- Read context variables that CLIENT needs
+                local ctx = {}
+                if LINK then
+                  if LINK.gBattlerAttacker then
+                    local ok, v = pcall(readMem8, LINK.gBattlerAttacker)
+                    if ok then ctx.attacker = v end
+                  end
+                  if LINK.gBattlerTarget then
+                    local ok, v = pcall(readMem8, LINK.gBattlerTarget)
+                    if ok then ctx.target = v end
+                  end
+                  if LINK.gAbsentBattlerFlags then
+                    local ok, v = pcall(readMem8, LINK.gAbsentBattlerFlags)
+                    if ok then ctx.absent = v end
+                  end
+                  if LINK.gEffectBattler then
+                    local ok, v = pcall(readMem8, LINK.gEffectBattler)
+                    if ok then ctx.effect = v end
+                  end
+                end
+
+                state.sendFn({
+                  type = "duel_buffer_cmd",
+                  battler = battler,
+                  bufA = bufA,
+                  bufB = bufB,
+                  ctx = ctx
+                })
+                state.relay.lastRelayActivityFrame = state.stageTimer
+
+                -- Clear byte3, set PLAYERS+PLAYERS2 in byte0 (network wait)
+                byte3 = byte3 & ~p2bit
+                byte0 = byte0 | pbit | (1 << (4 + battler))
+                state.relay.pendingRelay[battler] = true
+
+                if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                  console:log(string.format("[Battle] HOST: Sent bufA for battler %d %s (cmd=0x%02X)",
+                    battler, isRemote and "REMOTE" or "LOCAL", bufA[1] or 0))
+                end
+              end
+            end
+
+            -- Check completion: controller done AND CLIENT responded
+            if state.relay.pendingRelay[battler] then
+              local controllerDone = (byte0 & pbit) == 0
+              local hasBufB = state.relay.remoteBufferB_queue[battler] ~= nil
+
+              if controllerDone and hasBufB then
+                if isRemote then
+                  -- REMOTE battler: write CLIENT's bufferB to memory
+                  local bufBAddr = bufBBase + battler * BATTLER_BUFFER_STRIDE
+                  writeEWRAMBlock(bufBAddr, state.relay.remoteBufferB_queue[battler])
+                end
+                -- LOCAL battler: don't copy bufferB (HOST's own controller wrote it)
+                -- Just ACK and clear, like GBA-PK (battler 1/3 = no copy)
+
+                -- Clear PLAYERS2 in byte0
+                byte0 = byte0 & ~(1 << (4 + battler))
+                state.relay.pendingRelay[battler] = false
+                state.relay.remoteBufferB_queue[battler] = nil
+
+                if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                  console:log(string.format("[Battle] HOST: bufB done for battler %d %s%s",
+                    battler, isRemote and "REMOTE" or "LOCAL", isRemote and " (written)" or " (ACK only)"))
+                end
+              elseif controllerDone and not hasBufB then
+                -- Controller done but no bufferB yet — keep PLAYERS2 to signal waiting
+                byte0 = byte0 | (1 << (4 + battler))
+              end
+            end
+          end
+
+        -- ============================================================
+        -- CLIENT side
+        -- HOST drives ALL battlers. CLIENT processes HOST commands
+        -- for ANY battler (not just remote). For battlers the HOST
+        -- doesn't relay (HOST's local), CLIENT handles byte3 locally.
+        -- ============================================================
+        else
+          for battler = 0, 1 do
+            local pbit = (1 << battler)
+            local p2bit = (1 << (4 + battler))
+
+            -- Priority 1: Process HOST command if one is pending
+            if state.relay.pendingCmd[battler] and not state.relay.processingCmd[battler] then
+              -- Write HOST's bufferA AND bufferB into local memory (GBA-PK L13038-13046)
+              -- bufferB carries context from HOST that CLIENT controllers may read
+              local bufAAddr = bufABase + battler * BATTLER_BUFFER_STRIDE
+              local cmdData = state.relay.pendingCmd[battler]
+              writeEWRAMBlock(bufAAddr, cmdData.bufA or cmdData)
+              if cmdData.bufB then
+                local bufBAddr = bufBBase + battler * BATTLER_BUFFER_STRIDE
+                writeEWRAMBlock(bufBAddr, cmdData.bufB)
+              end
+
+              -- Write context variables if provided
+              local ctx = cmdData.ctx
+              if ctx and LINK then
+                if ctx.attacker and LINK.gBattlerAttacker then pcall(writeMem8, LINK.gBattlerAttacker, ctx.attacker) end
+                if ctx.target and LINK.gBattlerTarget then pcall(writeMem8, LINK.gBattlerTarget, ctx.target) end
+                if ctx.absent and LINK.gAbsentBattlerFlags then pcall(writeMem8, LINK.gAbsentBattlerFlags, ctx.absent) end
+                if ctx.effect and LINK.gEffectBattler then pcall(writeMem8, LINK.gEffectBattler, ctx.effect) end
+              end
+
+              -- Set PLAYERS in byte0 to trigger local controller
+              byte0 = byte0 | pbit
+              -- Clear any byte3 bit for this battler (HOST already sent it)
+              byte3 = byte3 & ~p2bit
+
+              state.relay.pendingCmd[battler] = nil
+              state.relay.processingCmd[battler] = true
+
+              if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                console:log(string.format("[Battle] CLIENT: Processing HOST cmd for battler %d (cmd=0x%02X)",
+                  battler, (cmdData.bufA and cmdData.bufA[1]) or 0))
+              end
+
+            -- Priority 2: No HOST command — handle byte3 locally
+            -- (for battlers HOST handles on its own, e.g. HOST's local = CLIENT's remote)
+            elseif (byte3 & p2bit) ~= 0 and not state.relay.processingCmd[battler] then
+              byte3 = byte3 & ~p2bit
+              byte0 = byte0 | pbit  -- PLAYERS only, no PLAYERS2
+              if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                console:log(string.format("[Battle] CLIENT: Local byte3→byte0 for battler %d (no HOST cmd)", battler))
+              end
+            end
+
+            -- Check if controller finished processing a HOST command
+            if state.relay.processingCmd[battler] then
+              local controllerDone = (byte0 & pbit) == 0
+
+              if controllerDone then
+                -- Read bufferB result and send to HOST
+                local bufBAddr = bufBBase + battler * BATTLER_BUFFER_STRIDE
+                local bufB = readEWRAMBlock(bufBAddr, BUFFER_READ_SIZE)
+
+                if bufB and state.sendFn then
+                  state.sendFn({
+                    type = "duel_buffer_resp",
+                    battler = battler,
+                    bufB = bufB
+                  })
+                end
+
+                state.relay.processingCmd[battler] = false
+
+                if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                  console:log(string.format("[Battle] CLIENT: Sent bufB resp for battler %d", battler))
+                end
+              end
+            end
+          end
+
+          -- CLIENT: always clear byte3 at end (HOST drives command detection)
+          byte3 = 0
+        end
+
+        -- Write exec flags back to memory
+        pcall(writeMem8, efAddr + 0, byte0)
+        pcall(writeMem8, efAddr + 1, byte1)
+        pcall(writeMem8, efAddr + 2, byte2)
+        pcall(writeMem8, efAddr + 3, byte3)
+      end
+    end
+
+    -- ================================================================
+    -- Periodic screenshots (every 300 frames)
+    -- ================================================================
+    if state.stageTimer % 300 == 0 and state.stageTimer > 1 then
+      pcall(function()
+        emu:screenshot(string.format("%sf%04d.png", state.relay.screenshotDir or "pvp_screenshots/", state.stageTimer))
+      end)
+    end
+
+    -- ================================================================
+    -- BATTLE END DETECTION
+    -- ================================================================
+    if state.relay.introComplete and state.stageTimer > 120 and Battle.detectBattleEnd(inBattle) then
+      state.cachedOutcome = Battle.readOutcomeRaw()
+      state.stage = STAGE.ENDING
+      state.stageTimer = 0
+      console:log(string.format("[Battle] Battle end detected, cached outcome: %s", state.cachedOutcome or "nil"))
+      return
+    end
+
+    -- ================================================================
+    -- DIAGNOSTIC (every 60 frames)
+    -- ================================================================
+    if state.stageTimer % 60 == 0 or state.stageTimer <= 5 then
+      if state.sendFn then
+        local ef32 = 0
+        if LINK and LINK.gBattleControllerExecFlags then
+          local okEf, efVal = pcall(readMem32, LINK.gBattleControllerExecFlags)
+          if okEf then ef32 = efVal end
+        end
+
+        local diagData = {
+          type = "duel_stage", stage = state.stageTimer,
+          bmf = string.format("0x%08X", currentBmf),
+          ef = string.format("0x%08X", ef32),
+          intro = state.relay.introComplete and 1 or 0,
+          master = state.isMaster and 1 or 0,
+        }
+        if config and config.warp then
+          local okCb2, cb2val = pcall(readMem32, config.warp.callback2Addr)
+          if okCb2 then diagData.cb2 = string.format("0x%08X", cb2val) end
+        end
+        if LINK and LINK.gBattlerControllerFuncs then
+          local ok0, c0 = pcall(readMem32, LINK.gBattlerControllerFuncs)
+          local ok1, c1 = pcall(readMem32, LINK.gBattlerControllerFuncs + 4)
+          if ok0 then diagData.ctrl0 = string.format("0x%08X", c0) end
+          if ok1 then diagData.ctrl1 = string.format("0x%08X", c1) end
+        end
+        if ADDRESSES and ADDRESSES.gBattleTypeFlags then
+          local okBTF, btf = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
+          if okBTF then diagData.btf = string.format("0x%08X", btf) end
+        end
+        if LINK and LINK.gBattleCommunication then
+          local okC, c = pcall(readMem8, LINK.gBattleCommunication)
+          if okC then diagData.comm0 = c end
+        end
+        -- Pending relay info
+        local pendingCount = 0
+        for _ in pairs(state.relay.pendingRelay) do pendingCount = pendingCount + 1 end
+        local procCount = 0
+        for _ in pairs(state.relay.processingCmd) do procCount = procCount + 1 end
+        diagData.pendRelay = pendingCount
+        diagData.procCmd = procCount
+        state.sendFn(diagData)
+      end
+    end
+
+    -- Local stuck detection: no relay activity for 10 seconds
+    local RELAY_TIMEOUT_FRAMES = 600  -- 10s at 60fps
+    if state.relay.introComplete and state.stageTimer > 300 then
+      if state.relay.lastRelayActivityFrame > 0 then
+        local sinceLastActivity = state.stageTimer - state.relay.lastRelayActivityFrame
+        if sinceLastActivity > RELAY_TIMEOUT_FRAMES then
+          console:log(string.format("[Battle] STUCK: No relay activity for %d frames — forcing exit", sinceLastActivity))
+          Battle.forceEnd("completed")
+        end
+      elseif state.stageTimer > RELAY_TIMEOUT_FRAMES * 2 then
+        console:log("[Battle] STUCK: Never received any relay — forcing exit")
+        Battle.forceEnd("completed")
+      end
+    end
+
+    -- Safety timeout (1 minute)
+    if state.stageTimer > 3600 then
+      console:log("[Battle] WARNING: Battle timeout (1 min)")
+      state.stage = STAGE.ENDING
+      state.stageTimer = 0
+    end
+    return
+  end
+
+  -- === STAGE: ENDING ===
+  if state.stage == STAGE.ENDING then
+    local gameCleanupDone = false
+    if config and config.warp then
+      local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
+      if okCb then
+        if cb2 == config.warp.cb2Overworld then
+          gameCleanupDone = true
+        elseif LINK and LINK.CB2_ReturnToField and cb2 == LINK.CB2_ReturnToField then
+          gameCleanupDone = true
+        end
+      end
+    end
+
+    -- Clear link-related state during ending
+    if LINK and LINK.gReceivedRemoteLinkPlayers then
+      pcall(writeMem8, LINK.gReceivedRemoteLinkPlayers, 0)
+    end
+    -- Clear LINK flags so engine doesn't try link operations during cleanup
+    if ADDRESSES and ADDRESSES.gBattleTypeFlags then
+      local okF, flags = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
+      if okF and flags then
+        local clearMask = BATTLE_TYPE_LINK | BATTLE_TYPE_LINK_IN_BATTLE | BATTLE_TYPE_IS_MASTER | BATTLE_TYPE_RECORDED
+        local newFlags = flags & ~clearMask
+        if newFlags ~= flags then
+          pcall(writeMem32, ADDRESSES.gBattleTypeFlags, newFlags)
+        end
+      end
+    end
+
+    -- Ensure exec flags allow exit
+    if LINK and LINK.gBattleControllerExecFlags then
+      local ef_wram = toWRAMOffset(LINK.gBattleControllerExecFlags)
+      local okEf, ef1 = pcall(emu.memory.wram.read8, emu.memory.wram, ef_wram)
+      if okEf and (ef1 & PLAYERS[1]) == 0 then
+        pcall(emu.memory.wram.write8, emu.memory.wram, ef_wram, ef1 | PLAYERS[1])
+      end
+    end
+
+    if state.stageTimer <= 30 then
+      local bufABase, _ = getBufferAddresses()
+      if bufABase then pcall(writeMem8, bufABase, CMD_GET_AWAY_EXIT) end
+    end
+
+    if gameCleanupDone or state.stageTimer > 60 then
+      Battle.restorePatches()
+
+      -- Restore callback1 if we saved it
+      if state.savedCallback1 and config and config.warp then
+        local gMainBase = config.warp.callback2Addr - 4
+        pcall(writeMem32, gMainBase + 0x00, state.savedCallback1)
+        console:log(string.format("[Battle] Restored callback1 = 0x%08X", state.savedCallback1))
+      end
+
+      -- Post-battle link state cleanup (GBA-PK stages 8-9)
+      -- Clear sBlockSend (10 bytes) — prevent stale send buffer data
+      if LINK and LINK.sBlockSend then
+        for i = 0, 9 do pcall(writeMem8, LINK.sBlockSend + i, 0) end
+      end
+      -- Clear gLinkCallback — stop link callback from firing post-battle
+      if LINK and LINK.gLinkCallback then
+        pcall(writeMem32, LINK.gLinkCallback, 0)
+      end
+      -- Clear script engine (GBA-PK RemoveScriptFromMemory)
+      loadscriptClear()
+      -- Ensure savedCallback points to overworld for clean return
+      if config and config.warp then
+        local gMainBase = config.warp.callback2Addr - 4
+        local savedCbOffset = (LINK and LINK.savedCallbackOffset) or 0x08
+        local returnCb = (LINK and LINK.CB2_ReturnToField) or config.warp.cb2Overworld
+        if returnCb then
+          pcall(writeMem32, gMainBase + savedCbOffset, returnCb)
+        end
+      end
+
+      -- Clear cached link player data
+      cachedLocalName = nil
+      cachedLocalGender = 0
+      cachedLocalTrainerId = 0
+      cachedOpponentName = nil
+      cachedOpponentGender = 0
+      cachedOpponentTrainerId = 0
+
+      state.stage = STAGE.DONE
+      state.stageTimer = 0
+      console:log(string.format("[Battle] Patches restored + link cleanup, stage=DONE (cleanup=%s, frames=%d)",
+        tostring(gameCleanupDone), state.stageTimer))
+    end
+    return
+  end
+end
+
+-- ============================================================
+-- Battle End Detection
+-- ============================================================
+
+function Battle.detectBattleEnd(inBattle)
+  -- Method 1: inBattle 1->0
+  if state.battleDetected and inBattle == 0 then
+    console:log("[Battle] End: inBattle 1->0")
+    return true
+  end
+
+  -- Method 2: callback2 changed to CB2_Overworld or CB2_ReturnToField
+  if state.battleDetected and config and config.warp then
+    local ok, cb2 = pcall(readMem32, config.warp.callback2Addr)
+    if ok then
+      if cb2 == config.warp.cb2Overworld then
+        console:log("[Battle] End: callback2 = CB2_Overworld")
         return true
       end
-      battleState.prevInBattle = inBattle
+      if LINK and LINK.CB2_ReturnToField and cb2 == LINK.CB2_ReturnToField then
+        console:log("[Battle] End: callback2 = CB2_ReturnToField")
+        return true
+      end
     end
   end
 
   return false
 end
 
---[[
-  Get battle outcome.
-  @return string "win", "lose", "flee", "completed", or nil
-]]
-function Battle.getOutcome()
-  -- Method 1: Use gBattleOutcome if available
+-- ============================================================
+-- Status Queries
+-- ============================================================
+
+function Battle.isActive()
+  return state.stage ~= STAGE.IDLE and state.stage ~= STAGE.DONE
+end
+
+function Battle.isMasterPlayer()
+  return state.isMaster
+end
+
+function Battle.isFinished()
+  return state.stage == STAGE.DONE
+end
+
+function Battle.getStage()
+  return state.stage
+end
+
+-- Read outcome directly from memory (call at detection time before cleanup)
+function Battle.readOutcomeRaw()
+  -- Method 1: gBattleOutcome
   if ADDRESSES and ADDRESSES.gBattleOutcome then
-    local ok, outcome = pcall(emu.memory.wram.read8, emu.memory.wram,
-      toWRAMOffset(ADDRESSES.gBattleOutcome))
+    local ok, outcome = pcall(readMem8, ADDRESSES.gBattleOutcome)
     if ok and outcome ~= 0 then
       if outcome == 1 then return "win"
       elseif outcome == 2 then return "lose"
@@ -508,62 +2209,142 @@ function Battle.getOutcome()
     end
   end
 
-  -- Method 2: Fallback — check HP of both parties for PvP outcome
+  -- Method 2: HP comparison (use localPartyBackup for player HP if available,
+  -- since gPlayerParty may have been overwritten during battle cleanup)
   if ADDRESSES and ADDRESSES.gPlayerParty and ADDRESSES.gEnemyParty then
-    local playerHP = 0
-    local enemyHP = 0
-    local playerBase = toWRAMOffset(ADDRESSES.gPlayerParty)
-    local enemyBase = toWRAMOffset(ADDRESSES.gEnemyParty)
+    local playerHP, enemyHP = 0, 0
     for i = 0, 5 do
-      local ok1, hp1 = pcall(emu.memory.wram.read16, emu.memory.wram,
-        playerBase + i * POKEMON_SIZE + POKEMON_HP_OFFSET)
+      local ok1, hp1 = pcall(readMem16, ADDRESSES.gPlayerParty + i * POKEMON_SIZE + POKEMON_HP_OFFSET)
       if ok1 then playerHP = playerHP + hp1 end
-      local ok2, hp2 = pcall(emu.memory.wram.read16, emu.memory.wram,
-        enemyBase + i * POKEMON_SIZE + POKEMON_HP_OFFSET)
+      local ok2, hp2 = pcall(readMem16, ADDRESSES.gEnemyParty + i * POKEMON_SIZE + POKEMON_HP_OFFSET)
       if ok2 then enemyHP = enemyHP + hp2 end
     end
-    if playerHP == 0 then
-      return "lose"
-    elseif enemyHP == 0 then
-      return "win"
-    end
+    if playerHP == 0 then return "lose" end
+    if enemyHP == 0 then return "win" end
   end
 
-  -- Final fallback: battle completed but outcome unknown
   return "completed"
 end
 
---[[
-  Get the origin position (for returning after battle).
-  @return table {x, y, mapGroup, mapId} or nil
-]]
-function Battle.getOriginPos()
-  return battleState.originPos
+function Battle.getOutcome()
+  -- Use cached outcome (captured at detection time, before DMA corruption)
+  if state.cachedOutcome then return state.cachedOutcome end
+  -- Fallback to live read
+  return Battle.readOutcomeRaw()
 end
 
---[[
-  Get turn count.
-  @return number
-]]
-function Battle.getTurnCount()
-  return battleState.turnCount
+
+function Battle.forceEnd(outcome)
+  state.cachedOutcome = outcome or state.cachedOutcome
+  if state.stage == STAGE.MAIN_LOOP then
+    -- Don't transition immediately — inject 0x37 every frame for 30f
+    state.forceEndPending = true
+    state.forceEndFrame = state.stageTimer
+    console:log(string.format("[Battle] Force-exit initiated: outcome=%s", outcome or "?"))
+  elseif state.stage == STAGE.STARTING then
+    state.stage = STAGE.DONE
+    state.stageTimer = 0
+  end
 end
 
---[[
-  Reset the battle module state.
-]]
+function Battle.getLocalPlayerInfo()
+  if not LINK or not LINK.gSaveBlock2Ptr then return nil end
+  if not cachedLocalName then initLocalLinkPlayer() end
+  if not cachedLocalName then return nil end
+  return { name = cachedLocalName, gender = cachedLocalGender, trainerId = cachedLocalTrainerId }
+end
+
+function Battle.setOpponentInfo(name, gender, trainerId)
+  cachedOpponentName = name
+  cachedOpponentGender = gender or 0
+  cachedOpponentTrainerId = trainerId or 0
+  if name then
+    console:log(string.format("[Battle] Opponent info set: gender=%d trainerId=0x%08X", cachedOpponentGender, cachedOpponentTrainerId))
+  end
+end
+
 function Battle.reset()
-  battleState.active = false
-  battleState.isMaster = false
-  battleState.opponentParty = nil
-  battleState.localChoice = nil
-  battleState.remoteChoice = nil
-  battleState.waitingForRemote = false
-  battleState.prevExecFlags = 0
-  battleState.turnCount = 0
-  battleState.originPos = nil
-  battleState.prevInBattle = 0
-  battleState.battleDetected = false
+  if #state.romPatches > 0 or #state.ewramPatches > 0 then
+    Battle.restorePatches()
+  end
+
+  -- Reset buffer address cache
+  cachedBufABase = nil
+  cachedBufBBase = nil
+  bufferAddressesVerified = false
+
+  -- Reset cached link player data
+  cachedLocalName = nil
+  cachedLocalGender = 0
+  cachedLocalTrainerId = 0
+  cachedOpponentName = nil
+  cachedOpponentGender = 0
+  cachedOpponentTrainerId = 0
+
+  state.stage = STAGE.IDLE
+  state.isMaster = false
+  state.battleEntryMethod = "direct_write"
+  state.opponentParty = nil
+  state.prevInBattle = 0
+  state.battleDetected = false
+  state.battleCallbackSeen = false
+  state.cachedOutcome = nil
+  state.forceEndPending = false
+  state.forceEndFrame = 0
+  state.stageTimer = 0
+  state.remoteBuffers = {}
+  state.romPatches = {}
+  state.ewramPatches = {}
+  state.battleFlags = nil
+  state.isLinkBattle = false
+  state.remoteReady = false
+  state.savedCallback1 = nil
+  state.localPartyBackup = nil
+  state.battleMainReached = false
+
+  -- Reset relay state
+  state.relay.localSlot = 0
+  state.relay.remoteSlot = 1
+  state.relay.localBattler = 1
+  state.relay.remoteBattler = 2
+  state.relay.waitingStatus = 0
+  state.relay.bufferID = 0
+  state.relay.sendID = 0
+  state.relay.remoteWaitingStatus = 0
+  state.relay.remoteBufferID = 0
+  state.relay.remoteSendID = 0
+  state.relay.remoteBattleflags = { 0, 0, 0, 0 }
+  state.relay.remoteDataReceived = false
+  state.relay.remoteBufferA = nil
+  state.relay.remoteBufferB = nil
+  state.relay.remoteAttacker = 0
+  state.relay.remoteTarget = 0
+  state.relay.remoteAbsent = 0
+  state.relay.remoteEffect = 0
+  state.relay.commAdvanced = false
+  state.relay.commReady = false
+  -- Action sync state (kept for backup)
+  state.relay.localReady = false
+  state.relay.remoteReady = false
+  state.relay.remoteAction = nil
+  state.relay.localAction = nil
+  state.relay.lastTurn = -1
+  state.relay.introComplete = false
+  state.relay.remoteMainloopReady = false
+  state.relay.engineBlocked = true
+  state.relay.turnPhase = "idle"
+  state.relay.lastComm0 = 0
+  state.relay.savedBattleStruct = nil
+  state.relay.savedBattleResources = nil
+  -- GBA-PK buffer relay state (new)
+  state.relay.battleflags = { 0, 0, 0, 0 }
+  state.relay.pendingRelay = {}
+  state.relay.pendingCmd = {}
+  state.relay.processingCmd = {}
+  state.relay.remoteBufferB_queue = {}
+  state.relay.lastRelayActivityFrame = 0
 end
+
+Battle.STAGE = STAGE
 
 return Battle

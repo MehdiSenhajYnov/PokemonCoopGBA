@@ -1,0 +1,1 @@
+Script works! Frame 60 reached.

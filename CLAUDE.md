@@ -7,7 +7,7 @@ Framework générique pour multijoueur "Seamless" sur ROM et ROM hacks GBA Poké
 ### Objectifs
 - **Ghosting**: Voir les autres joueurs en temps réel (Overlay)
 - **Generic Architecture**: Support multi-jeux via profils d'offsets
-- **Synchronized Duel (Warp Mode)**: Téléportation synchronisée dans une salle de combat Link
+- **Synchronized Duel (PvP Battle)**: Combat PvP Link via buffer relay (pas de warp physique)
 
 ### Cible Prioritaire
 **Pokémon Run & Bun** - ROM hack avancé basé sur **pokeemerald-expansion** (RHH). Créateur: dekzeh.
@@ -108,37 +108,24 @@ Le joueur GBA est toujours centré à l'écran (120, 80). Le ghost est positionn
 - BG layer occlusion: les tiles du layer BG1 (toits, arbres) sont redessinées par-dessus les ghosts via Painter API
 - Label joueur au-dessus du ghost
 
-### C. Duel Warp (Feature Signature)
+### C. Duel System (PvP Battle Trigger)
 **Trigger:** Bouton A près du ghost (< 2 tiles, edge-detect)
 
 **Workflow:**
 1. Joueur A appuie sur A près d'un ghost → `duel_request` au serveur
 2. Serveur forward au joueur cible uniquement → prompt affiché
 3. Joueur B accepte (A) ou refuse (B)
-4. Si accepté → serveur envoie `duel_warp` aux deux joueurs avec coords différentes
-5. Warp via direct memory write (sWarpDestination + triggerMapLoad)
-6. Verrouillage inputs pendant le chargement (5 secondes timeout)
-7. Placement dans MAP_BATTLE_COLOSSEUM_2P (mapGroup=28, mapId=24)
-   - Player A: (3, 5) | Player B: (10, 5)
+4. Si accepté → serveur envoie `duel_warp` aux deux joueurs (isMaster flag)
+5. **Pas de warp physique** — CB2_InitBattle prend le plein écran directement (GBA-PK style)
+6. Échange de party et player info via TCP (`duel_party` + `duel_player_info`), suivi d'un handshake `duel_ready`
+7. Battle engine link lance le combat avec buffer relay
 
-**Warp Mechanism (direct warp via ROM-scanned SetCB2WarpAndLoadMap):**
-- `HAL.performDirectWarp()` handles the entire sequence:
-  1. Find sWarpData address (cluster scan for sDummyWarpData pair in EWRAM, cached)
-  2. Find SetCB2WarpAndLoadMap ROM address (scans ROM literal pools for CB2_LoadMap reference)
-  3. Blank screen (fill palette RAM with black)
-  4. Write destination to sWarpDestination (0x020318A8) + SaveBlock1->location
-  5. Inject EWRAM trampoline (24 bytes THUMB code at 0x0203FF00)
-  6. Set callback2 = trampoline address (THUMB bit set)
-- **EWRAM Code Injection**: GBA has no MMU — EWRAM is executable. The trampoline is a tiny
-  THUMB stub that calls WarpIntoMap() then CB2_LoadMap(). This is necessary because CB2_LoadMap
-  alone HANGS — WarpIntoMap() must run first to call LoadCurrentMapData() (loads gMapHeader).
-- **Finding WarpIntoMap**: Multi-phase ROM scanner using sWarpDestination (0x020318A8) as anchor.
-  Phase 1: find sWarpDestination in ROM literal pools (3-10 refs vs 280 for CB2_LoadMap).
-  Phase 2: identify containing functions (ApplyCurrentWarp, SetWarpDestination).
-  Phase 3: search nearby ROM for 3-BL function calling a Phase 2 function = WarpIntoMap.
-  Fallback: extract BL targets before LDR =CB2_LoadMap instructions.
-- sWarpData auto-calibrated via `trackCallback2()` on every natural map transition
-- No emulator save state or door interception needed — works immediately from any game state
+**Battle Entry (GBA-PK style — no physical warp):**
+- No map warp needed — CB2_InitBattle takes over full screen from any overworld position
+- Loadscript(37) triggers battle via GBA script engine (Task_StartWiredCableClubBattle)
+- Fallback: direct callback2 write to CB2_InitBattle after 30 frame timeout
+- After battle, savedCallback = CB2_ReturnToField returns to overworld at original position
+- Player stays on their map throughout — no colosseum warp
 
 **Disconnect safety:** pendingDuel nettoyé au disconnect, `duel_cancelled` envoyé si nécessaire
 
@@ -160,7 +147,7 @@ PokemonCoop/
 │   ├── occlusion.lua        # BG layer occlusion (reads BG1 tilemap, redraws cover tiles over ghosts via Painter)
 │   ├── interpolate.lua      # Smooth ghost movement (FIFO waypoint queue + adaptive catch-up)
 │   ├── duel.lua             # Duel warp system (trigger, request/accept UI, proximity detection)
-│   ├── battle.lua           # PvP battle system (party injection, AI interception, RNG sync)
+│   ├── battle.lua           # PvP battle system (Link Battle Emulation: buffer relay, ROM patching, state machine)
 │   ├── core.lua             # Core Engine
 │   └── README.md
 ├── config/                   # Profils ROM
@@ -174,7 +161,13 @@ PokemonCoop/
 │   └── pokeemerald-expansion/     # Source decomp (structs, headers, constantes)
 ├── scripts/                  # Scripts de scan mémoire mGBA
 │   ├── README.md            # Guide d'utilisation
+│   ├── testing/             # Autonomous test framework
+│   │   ├── runner.lua       # Test runner (save state, suites, JSON output, screenshots)
+│   │   ├── assertions.lua   # Assertion library (assertEqual, assertRange, etc.)
+│   │   ├── run_all.lua      # Entry point (mGBA --script target)
+│   │   └── suites/          # Test suites (memory, rom_patches, battle, warp, network)
 │   ├── scanners/            # Scripts de scan actifs
+│   ├── discovery/           # Battle system discovery scripts (P3_11)
 │   ├── debug/               # Scripts de debug
 │   └── archive/             # Scripts archivés
 └── docs/                     # Documentation
@@ -201,7 +194,7 @@ PokemonCoop/
 - [x] **Intégrer network.lua dans main.lua** (2026-02-02)
 - [x] **Test connexion client-serveur bout en bout** (2026-02-03)
 
-### Phase 2: Ghosting (CURRENT)
+### Phase 2: Ghosting (DONE)
 - [x] Synchronisation positions
 - [x] Offsets caméra trouvés (IWRAM 0x03005DFC, 0x03005DF8)
 - [x] Overlay graphique (render.lua) — Painter API, map filtering
@@ -225,29 +218,58 @@ PokemonCoop/
 - [x] Synchronisation téléportation (server coordinates both players → duel_warp)
 - [x] Verrouillage inputs (180 frames lock after warp)
 - [x] Interface utilisateur (Painter API overlay — request prompt + accept/decline)
-- [x] Duel room: MAP_BATTLE_COLOSSEUM_2P (mapGroup=28, mapId=24)
 - [x] Disconnect handling (pendingDuel cleanup, duel_cancelled message)
-- [x] Warp mechanism — direct warp via sWarpDestination + triggerMapLoad (no golden state or door fallback needed)
+- [x] No physical warp — CB2_InitBattle takes over full screen directly (GBA-PK style)
 
-### Phase 3B: PvP Battle System (CURRENT)
-- [x] Battle module architecture (client/battle.lua — party read/write, AI interception, RNG sync)
+### Phase 3B: PvP Battle System — Link Battle Emulation (CURRENT)
+- [x] Battle module architecture (client/battle.lua — Link Battle Emulation: buffer relay, ROM patching, state machine)
 - [x] Memory scanner script (scripts/scan_battle_addresses.lua — scan gBattleTypeFlags, gEnemyParty, etc.)
 - [x] Config placeholder (config/run_and_bun.lua — battle section with nil addresses)
-- [x] Server protocol (duel_party, duel_choice, duel_rng_sync, duel_end messages)
-- [x] Main.lua integration (warp phases: waiting_party, in_battle, returning)
+- [x] Server protocol (duel_party, duel_buffer, duel_stage, duel_end messages)
+- [x] Main.lua integration (phases: waiting_party, preparing_battle, in_battle, waiting_master_outcome)
 - [x] Battle addresses scanned and filled in config/run_and_bun.lua
 - [x] Fix 5 PvP bugs (P3_10B): server coords, triggerMapLoad, battle trigger, isFinished transition tracking, getOutcome HP fallback
 - [x] HAL.readInBattle() + inBattle tracking in main.lua
 - [x] **Party addresses corrected** via cross-ref with pokemon-run-bun-exporter (gPlayerParty=0x02023A98, gEnemyParty=0x02023CF0)
 - [x] **Reference data repos cloned** (pokemon-run-bun-exporter, runandbundex, pokeemerald-expansion)
 - [x] **Config enriched** with Pokemon struct constants, battle flags, outcome codes from decomp
-- [ ] Verify gBattleBufferB address (was derived from wrong gPlayerParty base, needs re-scan)
-- [ ] Test party exchange and injection
-- [ ] Test battle trigger with BATTLE_TYPE_SECRET_BASE
-- [ ] Test AI choice interception
-- [ ] Test RNG synchronization
-- [ ] Test battle completion and return to origin
-- [ ] Test disconnect handling during battle
+- [x] **P3_11 Rewrite**: battle.lua rewritten for Link Battle Emulation (buffer relay, ROM patching, state machine)
+- [x] **Discovery scripts** created (scripts/discovery/: test_cart0_write, find_battle_functions, ewram_battle_diff, find_rom_functions)
+- [x] **Server updated** for duel_buffer/duel_stage (replaced duel_choice/duel_rng_sync)
+- [x] **Config restructured** with battle_link section for discovery targets
+- [x] Cart0 write confirmed working (mGBA ROM = RAM, no MMU)
+- [x] **All battle_link addresses found** via Python ROM scanners + runtime verification
+- [x] **gBattleTypeFlags CORRECTED** (0x020090E8→0x02023364 via CB2_InitBattle disassembly)
+- [x] **CB2_InitBattle found** (0x080363C1, 204 bytes, 8 literal pool refs)
+- [x] **Config fully populated** with CB2_InitBattle, SetMainCallback2, gBattleCommunication
+- [x] **battle.lua rewritten** for proper init chain (CB2_InitBattle, callback1 save/restore)
+- [x] **Battle screen WORKING** (2026-02-08): Full Pokemon sprites, health boxes, Fight/Bag/Pokemon/Run menu
+- [x] **Critical fix**: Clear BATTLE_TYPE_LINK + swap ctrl[1] to OpponentBufferRunCommand after BattleMainCB2
+- [x] **gBattlerControllerFuncs found** in IWRAM at 0x03005D70 (was misidentified as EWRAM)
+- [x] **MarkBattler exec local patches** (added then REMOVED — engine uses bits 28-31 for link exec natively)
+- [x] **Real PvP buffer relay** (2026-02-10): GBA-PK HOST/CLIENT protocol via duel_buffer_cmd/duel_buffer_resp TCP
+- [x] **Auto-fight** for automated testing (A button press every 15 frames during HTASS)
+- [x] **localPartyBackup** to counter Cases 4/6 gPlayerParty overwrite
+- [x] **Force-end** when opponent's battle ends (duel_end mirrored outcome: win↔lose)
+- [x] **2-player PvP end-to-end VERIFIED** (2026-02-08): both enter battle, exchange moves, both exit cleanly
+- [x] **DoBattleIntro fix** (2026-02-09→10): LINK stays active throughout. IS_MASTER only on HOST eliminates DMA corruption root cause.
+- [x] **NOP HandleLinkBattleSetup** (2 call sites) + NOP TryReceiveLinkBattleData in VBlank — prevents link buffer tasks and VBlank corruption
+- [x] **InitBtlControllersBeginIntro NOP** — slave gets BeginBattleIntro despite no IS_MASTER
+- [x] **Loadscript(37)** battle entry via GBA script engine (GBA-PK style) + direct write fallback
+- [x] **initLocalLinkPlayer** — reads SaveBlock2 for real player name on VS screen
+- [x] **killLinkTasks** — scans gTasks IWRAM, kills link-range tasks every 30 frames
+- [x] **gBattleStruct found** (0x02023A0C ptr, eventState.battleIntro at offset 0x2F9)
+- [x] **PvP battle REPRODUCIBLY WORKING** (2026-02-09): both players enter, intro completes, battle resolves, outcomes detected
+- [x] **Outcome detection FIXED** (2026-02-09): master-authoritative — slave waits for master's duel_end and mirrors outcome. gBattleOutcome cached at detection time.
+- [x] **Opponent name exchange** via `duel_player_info` TCP message (Battle.getLocalPlayerInfo/setOpponentInfo, cachedOpponentName in maintainLinkPlayers)
+- [x] **Battle.forceEnd()** injects CMD_GET_AWAY_EXIT (0x37) into bufferA + sets exec flags. main.lua calls forceEnd on duel_end/disconnect during in_battle.
+- [x] **Forward declarations** fix: initLocalLinkPlayer and triggerLoadscript37 declared before state machine, defined after startLinkBattle
+- [x] **duel_ready handshake** (2026-02-10): 3-phase waiting_party (EXCHANGE→READY→GO) fixes VS screen "RIVAL" name race condition
+- [x] **Context vars found** (2026-02-10): gBattlerAttacker=0x0202358C, gBattlerTarget=0x0202358D, gEffectBattler=0x0202358F, gAbsentBattlerFlags=0x02023591 (BSS layout analysis from battle_main.c anchors)
+- [x] **Stuck detection** (2026-02-10): relay timeout (600f/10s) + ping timeout (900f/15s) + forceEnd multi-frame 0x37 injection (GBA-PK approach)
+- [x] **forceEnd rewrite** (2026-02-10): forceEndPending flag + 30-frame 0x37 re-injection loop (was single-shot). Safety timeout 5min→1min.
+- [ ] Multi-turn PvP battles (current: 1-turn KO due to save state Pokemon levels)
+- [ ] BATTLE_FLAGS system (items, exp, heal, level cap, overwrite — GBA-PK feature parity)
 
 ### Phase 4: Multi-ROM Support
 - [ ] Profils additionnels (Radical Red, Unbound)
@@ -259,6 +281,17 @@ PokemonCoop/
 - [ ] Optimisation performance
 - [ ] Documentation complète
 - [ ] Interface configuration
+
+### Autonomous Test Framework (DONE)
+- [x] Test runner (`scripts/testing/runner.lua`) — save state + suites + JSON + screenshots
+- [x] Assertions library (`scripts/testing/assertions.lua`)
+- [x] 5 test suites: memory, rom_patches, battle, warp, network
+- [x] Async multi-frame test support (waitFrames + done)
+- [x] Auto-screenshot on failure
+
+**Run tests:** `mGBA.exe --script scripts/testing/run_all.lua "rom/Pokemon RunBun.gba"`
+**Results:** `test_results.json` + `test_screenshots/`
+**Kill after:** `powershell -Command "Stop-Process -Name mGBA -Force -ErrorAction SilentlyContinue"`
 
 ## 7. NOTES TECHNIQUES
 
@@ -291,15 +324,24 @@ Ces adresses sont celles d'Émeraude vanilla. Run & Bun modifiant énormément l
 - **gEnemyParty**: 0x02023CF0 (= gPlayerParty + 0x258)
 - **gPokemonStorage**: 0x02028848 (PC box storage)
 
-**Battle state (scanner mGBA, 2026-02-05):**
-- **gBattleTypeFlags**: 0x020090E8 (32-bit)
-- **gMainInBattle**: 0x020206AE (gMain+0x66)
+**Battle state (corrected 2026-02-07/10 via ROM disassembly):**
+- **gBattleTypeFlags**: 0x02023364 (32-bit)
+- **gMainInBattle**: 0x03002AF9 (gMain+0x439, IWRAM, bitfield bit 1)
+- **gBattleCommunication**: 0x0202370E (u8[8], MULTIUSE_STATE at [0])
 - **gRngValue**: IWRAM 0x03005D90 (32-bit)
-- **CB2_BattleMain**: 0x08094815 (ROM)
+- **CB2_InitBattle**: 0x080363C1 (ROM, 204 bytes) — proper battle init entry point
+- **CB2_InitBattleInternal**: 0x0803648D (ROM, ~4KB) — multi-frame init state machine
+- **CB2_BattleMain (BattleMainCB2)**: 0x0803816D (ROM) — CORRECTED (was 0x08094815)
+- **SetMainCallback2**: 0x08000544 (ROM)
+- **gBattlerAttacker**: 0x0202358C (u8, BSS layout from battle_main.c)
+- **gBattlerTarget**: 0x0202358D (u8)
+- **gEffectBattler**: 0x0202358F (u8)
+- **gAbsentBattlerFlags**: 0x02023591 (u8)
+- **gBattlescriptCurrInstr**: 0x02023594 (u32 ptr, anchor — 548 ROM refs)
 
-**Warp system (scanner mGBA, 2026-02-03):**
-- **gMain.callback2**: 0x0202064C (EWRAM)
-- **CB2_LoadMap**: 0x08007441 (ROM)
+**Warp system (corrected 2026-02-07):**
+- **gMain.callback2**: 0x030022C4 (IWRAM, gMain+0x04) — CORRECTED (was 0x0202064C EWRAM)
+- **CB2_LoadMap**: 0x080A3FDD (ROM) — CORRECTED (was 0x08007441 = SpriteCallbackDummy)
 - **CB2_Overworld**: 0x080A89A5 (ROM)
 
 **Mode**: STATIQUE (pas de pointeurs dynamiques)
@@ -357,22 +399,31 @@ Messages envoyés ligne par ligne (délimités par `\n`)
 ```
 Sent only when sprite changes (tile index, palette bank, or flip changes).
 
-**Duel warp protocol:**
+**Duel protocol (no physical warp — GBA-PK style, 3-phase handshake):**
 ```json
 {"type":"duel_request","targetId":"player_xxx"}
 {"type":"duel_accept","requesterId":"player_xxx"}
 {"type":"duel_decline","requesterId":"player_xxx"}
-{"type":"duel_warp","coords":{"mapGroup":28,"mapId":24,"x":3,"y":5},"isMaster":true}
+{"type":"duel_warp","isMaster":true}
 {"type":"duel_declined","playerId":"player_xxx"}
 {"type":"duel_cancelled","requesterId":"player_xxx"}
+{"type":"duel_ready"}
 ```
+After `duel_warp`, the `waiting_party` phase uses a 3-phase handshake: (1) EXCHANGE: both send `duel_party` + `duel_player_info`, (2) READY: when both received, send `duel_ready`, (3) GO: when opponent's `duel_ready` received, inject party and start battle. This prevents the race condition where `setOpponentInfo` was called before `duel_player_info` arrived.
 
-**PvP battle protocol:**
+**Player info exchange (VS screen name):**
+```json
+{"type":"duel_player_info","name":"ASH","gender":0,"trainerId":12345}
+```
+Sent during `waiting_party` phase. Server relays to duel opponent. Used by `Battle.setOpponentInfo()` for VS screen real player name.
+
+**PvP battle protocol (v8 — HOST/CLIENT Buffer Relay):**
 ```json
 {"type":"duel_party","data":[/* 600 bytes as array */]}
-{"type":"duel_choice","choice":{"action":"move","slot":2,"target":1},"rng":305419896}
-{"type":"duel_choice","choice":{"action":"switch","switchIndex":3}}
-{"type":"duel_rng_sync","rng":305419896}
+{"type":"duel_buffer_cmd","battler":0,"bufA":[/* 256 bytes */],"ctx":{"attacker":0,"target":1}}
+{"type":"duel_buffer_resp","battler":0,"bufB":[/* 256 bytes */]}
+{"type":"duel_stage","stage":3}
+{"type":"duel_stage","stage":"mainloop_ready"}
 {"type":"duel_end","outcome":"win"}
 {"type":"duel_opponent_disconnected","playerId":"player_xxx"}
 ```
@@ -427,6 +478,6 @@ Sent only when sprite changes (tile index, palette bank, or flip changes).
 
 ---
 
-**Dernière mise à jour**: 2026-02-05
-**Version**: 0.5.1-alpha
-**Status**: Phase 3B - PvP Battle System (party addresses corrected, reference data integrated)
+**Dernière mise à jour**: 2026-02-10
+**Version**: 0.7.1-alpha
+**Status**: Phase 3B - PvP Battle System (context vars found, stuck detection, multi-frame forceEnd)

@@ -211,6 +211,33 @@ function HAL.safeWrite(address, value, size)
 end
 
 --[[
+  Auto-detect memory domain and read/write (supports EWRAM + IWRAM)
+  Used for addresses that may be in either region (e.g., gMain is in IWRAM)
+]]
+local function autoRead(address, size)
+  if address >= 0x03000000 and address < 0x03008000 then
+    return safeReadIWRAM(address, size)
+  else
+    return safeRead(address, size)
+  end
+end
+
+local function autoWrite(address, value, size)
+  if address >= 0x03000000 and address < 0x03008000 then
+    local offset = toIWRAMOffset(address)
+    local ok = pcall(function()
+      if size == 1 then emu.memory.iwram:write8(offset, value)
+      elseif size == 2 then emu.memory.iwram:write16(offset, value)
+      elseif size == 4 then emu.memory.iwram:write32(offset, value)
+      end
+    end)
+    return ok
+  else
+    return HAL.safeWrite(address, value, size)
+  end
+end
+
+--[[
   Game-specific read functions
   These use the loaded configuration
 ]]
@@ -411,12 +438,15 @@ local prevTrackedCb2 = nil
 
 -- Warp function addresses
 local warpIntoMapAddr = nil   -- ROM address of WarpIntoMap (THUMB)
+local loadCurrentMapDataAddr = nil  -- ROM address of LoadCurrentMapData (fallback when WarpIntoMap is inlined)
 local warpFuncAddr = nil      -- Legacy: SetCB2WarpAndLoadMap (config override only)
 local trampolineAddr = nil    -- EWRAM trampoline address (with THUMB bit)
 local romScanned = false
 
 -- EWRAM location for trampoline (high address, unlikely game data collision)
 local TRAMPOLINE_EWRAM = 0x0203FF00
+-- ROM scratch area for trampoline (found at runtime — cart0 writes confirmed working)
+local romScratchOffset = nil  -- cart0 offset (not absolute)
 
 --[[
   Scan EWRAM to find sWarpData address.
@@ -658,7 +688,7 @@ function HAL.scanROMForWarpFunction()
   end
 
   -- ===== PHASE 3: Search nearby ROM for WarpIntoMap =====
-  -- WarpIntoMap: exactly 3 BL calls, one targets a swarpFunc, 12-60 bytes
+  -- WarpIntoMap: 2-5 BL calls (compiler may tail-call), one targets a swarpFunc, 12-128 bytes
   local targets = {}
   for _, f in ipairs(swarpFuncs) do
     targets[f.addr & 0xFFFFFFFE] = true
@@ -677,8 +707,17 @@ function HAL.scanROMForWarpFunction()
     if not scannedRanges[rangeKey] then
       scannedRanges[rangeKey] = true
       local readLen = rangeEnd - rangeStart
-      local ok, data = pcall(emu.memory.cart0.readRange, emu.memory.cart0, rangeStart, readLen)
-      if ok and data then
+      -- Read in 4096-byte chunks (mGBA readRange has undocumented size limit)
+      local chunks = {}
+      for chunkBase = rangeStart, rangeStart + readLen - 1, CHUNK do
+        local chunkLen = math.min(CHUNK, rangeStart + readLen - chunkBase)
+        local cOk, cData = pcall(emu.memory.cart0.readRange, emu.memory.cart0, chunkBase, chunkLen)
+        if cOk and cData then
+          table.insert(chunks, cData)
+        end
+      end
+      local data = table.concat(chunks)
+      if #data > 0 then
         local i = 1
         while i <= #data - 3 do
           local instr = strU16(data, i)
@@ -700,7 +739,7 @@ function HAL.scanROMForWarpFunction()
 
             if funcEnd then
               local funcSize = funcEnd - funcStart
-              if funcSize >= 12 and funcSize <= 60 then
+              if funcSize >= 12 and funcSize <= 128 then
                 local blCount = 0
                 local blTargets = {}
                 local callsSwarp = false
@@ -722,14 +761,22 @@ function HAL.scanROMForWarpFunction()
                   end
                 end
 
-                if blCount == 3 and callsSwarp then
+                if blCount >= 2 and blCount <= 5 and callsSwarp then
                   local funcAddr = 0x08000000 + (rangeStart + funcStart - 1) + 1
-                  local dup = false
-                  for _, c in ipairs(candidates) do
-                    if c.addr == funcAddr then dup = true; break end
+                  -- Exclude functions that ARE Phase 2 (they reference sWarpDestination directly,
+                  -- but WarpIntoMap does NOT — it only CALLS Phase 2 functions)
+                  local isPhase2 = false
+                  for _, f in ipairs(swarpFuncs) do
+                    if f.addr == funcAddr then isPhase2 = true; break end
                   end
-                  if not dup then
-                    table.insert(candidates, { addr = funcAddr, size = funcSize, blTargets = blTargets })
+                  if not isPhase2 then
+                    local dup = false
+                    for _, c in ipairs(candidates) do
+                      if c.addr == funcAddr then dup = true; break end
+                    end
+                    if not dup then
+                      table.insert(candidates, { addr = funcAddr, size = funcSize, blTargets = blTargets, blCount = blCount })
+                    end
                   end
                 end
               end
@@ -741,19 +788,154 @@ function HAL.scanROMForWarpFunction()
     end
   end
 
-  console:log(string.format("[HAL] Phase 3: %d WarpIntoMap candidates", #candidates))
+  console:log(string.format("[HAL] Phase 3: %d WarpIntoMap candidates (after Phase 2 exclusion)", #candidates))
 
   if #candidates > 0 then
-    table.sort(candidates, function(a, b) return a.size < b.size end)
-    warpIntoMapAddr = candidates[1].addr
-    console:log(string.format("[HAL] WarpIntoMap FOUND at 0x%08X (%d bytes)", warpIntoMapAddr, candidates[1].size))
-    for j, t in ipairs(candidates[1].blTargets) do
-      console:log(string.format("[HAL]   BL%d -> 0x%08X", j, t))
+    -- Log all candidates for debugging
+    for ci, c in ipairs(candidates) do
+      console:log(string.format("[HAL]   Candidate %d: 0x%08X (%d bytes, %d BLs)", ci, c.addr, c.size, c.blCount))
+      for j, t in ipairs(c.blTargets) do
+        console:log(string.format("[HAL]     BL%d -> 0x%08X", j, t))
+      end
     end
+    -- Prefer functions with exactly 3 BLs (vanilla WarpIntoMap has 3), then smallest
+    table.sort(candidates, function(a, b)
+      local aPrefer = (a.blCount == 3) and 0 or 1
+      local bPrefer = (b.blCount == 3) and 0 or 1
+      if aPrefer ~= bPrefer then return aPrefer < bPrefer end
+      return a.size < b.size
+    end)
+    warpIntoMapAddr = candidates[1].addr
+    console:log(string.format("[HAL] WarpIntoMap SELECTED: 0x%08X (%d bytes, %d BLs)", warpIntoMapAddr, candidates[1].size, candidates[1].blCount))
     return true
   end
 
-  console:log("[HAL] Phase 3 found no WarpIntoMap — trying CB2_LoadMap fallback...")
+  -- ===== PHASE 3b: Cross-reference CB2_LoadMap literal pool with Phase 2 functions =====
+  -- WarpIntoMap contains LDR R0,=CB2_LoadMap in its literal pool AND BL to a Phase 2 func.
+  -- Find functions that reference BOTH CB2_LoadMap and sWarpDestination (via BL to Phase 2).
+  console:log("[HAL] Phase 3 found no match — trying Phase 3b (CB2_LoadMap cross-ref)...")
+
+  local CB2_LM = config.warp.cb2LoadMap
+  if CB2_LM then
+    local CB2_B0, CB2_B1 = CB2_LM & 0xFF, (CB2_LM >> 8) & 0xFF
+    local CB2_B2, CB2_B3 = (CB2_LM >> 16) & 0xFF, (CB2_LM >> 24) & 0xFF
+    local cb2LitRefs = {}
+
+    -- Find CB2_LoadMap in ROM literal pools (4096-byte chunks)
+    for base = 0, SCAN_SIZE - CHUNK, CHUNK do
+      local ok, data = pcall(emu.memory.cart0.readRange, emu.memory.cart0, base, CHUNK)
+      if ok and data then
+        for i = 1, #data - 3, 4 do
+          local b0, b1, b2, b3 = string.byte(data, i, i + 3)
+          if b0 == CB2_B0 and b1 == CB2_B1 and b2 == CB2_B2 and b3 == CB2_B3 then
+            table.insert(cb2LitRefs, base + i - 1)
+          end
+        end
+      end
+    end
+
+    console:log(string.format("[HAL] Phase 3b: %d CB2_LoadMap literal pool refs", #cb2LitRefs))
+
+    -- For each CB2_LoadMap literal, find containing function and check if it calls a Phase 2 func
+    local p3bCandidates = {}
+    for _, litOff in ipairs(cb2LitRefs) do
+      -- Walk back up to 128 bytes to find PUSH prologue
+      local searchStart = math.max(0, litOff - 128)
+      local readLen = math.min(litOff - searchStart + 64, 256)  -- include function body past literal ref
+      local ok, data = pcall(emu.memory.cart0.readRange, emu.memory.cart0, searchStart, readLen)
+      if ok and data then
+        -- Find the last PUSH before litOff
+        local funcStartPos = nil
+        for pos = 1, (litOff - searchStart), 2 do
+          local instr = strU16(data, pos)
+          if instr and ((instr & 0xFF00) == 0xB400 or (instr & 0xFF00) == 0xB500) then
+            funcStartPos = pos  -- keep updating; last PUSH before literal = most likely prologue
+          end
+        end
+
+        if funcStartPos then
+          -- Find function end (POP {PC} or BX LR)
+          local funcEndPos = nil
+          for pos = funcStartPos + 2, math.min(funcStartPos + 128, #data - 1), 2 do
+            local instr = strU16(data, pos)
+            if instr and ((instr & 0xFF00) == 0xBD00 or instr == 0x4770) then
+              funcEndPos = pos + 2
+              break
+            end
+          end
+
+          if funcEndPos then
+            local funcSize = funcEndPos - funcStartPos
+            if funcSize >= 12 and funcSize <= 128 then
+              -- Count BLs and check if any targets a Phase 2 function
+              local blCount = 0
+              local blTargets = {}
+              local callsPhase2 = false
+              local k = funcStartPos
+              while k <= funcEndPos - 4 do
+                local h = strU16(data, k)
+                local l = strU16(data, k + 2)
+                if h and l and (h & 0xF800) == 0xF000 and (l & 0xF800) == 0xF800 then
+                  blCount = blCount + 1
+                  local blPC = 0x08000000 + (searchStart + k - 1) + 4
+                  local target = decodeBL(h, l, blPC)
+                  table.insert(blTargets, target)
+                  if targets[target] or targets[target & 0xFFFFFFFE] then
+                    callsPhase2 = true
+                  end
+                  k = k + 4
+                else
+                  k = k + 2
+                end
+              end
+
+              if blCount >= 2 and blCount <= 5 and callsPhase2 then
+                local funcAddr = 0x08000000 + (searchStart + funcStartPos - 1) + 1
+                -- Exclude Phase 2 functions (WarpIntoMap does NOT reference sWarpDestination directly)
+                local isPhase2 = false
+                for _, f in ipairs(swarpFuncs) do
+                  if f.addr == funcAddr then isPhase2 = true; break end
+                end
+                if not isPhase2 then
+                  local dup = false
+                  for _, c in ipairs(p3bCandidates) do
+                    if c.addr == funcAddr then dup = true; break end
+                  end
+                  if not dup then
+                    table.insert(p3bCandidates, { addr = funcAddr, size = funcSize, blTargets = blTargets, blCount = blCount })
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    console:log(string.format("[HAL] Phase 3b: %d WarpIntoMap candidates (after Phase 2 exclusion)", #p3bCandidates))
+
+    if #p3bCandidates > 0 then
+      -- Log all candidates for debugging
+      for ci, c in ipairs(p3bCandidates) do
+        console:log(string.format("[HAL]   P3b Candidate %d: 0x%08X (%d bytes, %d BLs)", ci, c.addr, c.size, c.blCount))
+        for j, t in ipairs(c.blTargets) do
+          console:log(string.format("[HAL]     BL%d -> 0x%08X", j, t))
+        end
+      end
+      table.sort(p3bCandidates, function(a, b)
+        local aPrefer = (a.blCount == 3) and 0 or 1
+        local bPrefer = (b.blCount == 3) and 0 or 1
+        if aPrefer ~= bPrefer then return aPrefer < bPrefer end
+        return a.size < b.size
+      end)
+      warpIntoMapAddr = p3bCandidates[1].addr
+      console:log(string.format("[HAL] WarpIntoMap SELECTED via Phase 3b: 0x%08X (%d bytes, %d BLs)",
+        warpIntoMapAddr, p3bCandidates[1].size, p3bCandidates[1].blCount))
+      return true
+    end
+  end
+
+  console:log("[HAL] Phase 3b found no match — trying CB2_LoadMap fallback...")
   return HAL.findWarpViaCallback()
 end
 
@@ -866,7 +1048,7 @@ function HAL.findWarpViaCallback()
 
           if funcEnd then
             local funcSize = funcEnd - 1
-            if blCount == 3 and funcSize >= 12 and funcSize <= 60 then
+            if blCount >= 2 and blCount <= 5 and funcSize >= 12 and funcSize <= 128 then
               warpIntoMapAddr = st.addr | 1
               console:log(string.format("[HAL] WarpIntoMap FOUND via fallback at 0x%08X (%d bytes, 3 BL, x%d refs)",
                 warpIntoMapAddr, funcSize, st.count))
@@ -878,7 +1060,18 @@ function HAL.findWarpViaCallback()
     end
   end
 
-  console:log("[HAL] WARNING: WarpIntoMap not found — forced warp will use direct CB2_LoadMap (may hang)")
+  -- WarpIntoMap not found as standalone function — likely inlined by compiler.
+  -- Save the most frequent BL target before LDR =CB2_LoadMap as LoadCurrentMapData.
+  -- This is the key subroutine that WarpIntoMap calls to load gMapHeader.
+  -- We can build a simpler trampoline: call LoadCurrentMapData, then write callback2 = CB2_LoadMap.
+  if #sorted > 0 then
+    loadCurrentMapDataAddr = sorted[1].addr | 1  -- THUMB bit
+    console:log(string.format("[HAL] WarpIntoMap inlined — using LoadCurrentMapData=0x%08X (x%d refs) for simple trampoline",
+      loadCurrentMapDataAddr, sorted[1].count))
+    return true  -- signal success — triggerMapLoad will use the simple trampoline path
+  end
+
+  console:log("[HAL] WARNING: WarpIntoMap AND LoadCurrentMapData not found — forced warp will use direct CB2_LoadMap (may hang)")
   console:log("[HAL] Set config.warp.warpIntoMapAddr = <address> in run_and_bun.lua for manual override")
   return false
 end
@@ -936,6 +1129,157 @@ function HAL.injectTrampoline()
 end
 
 --[[
+  Inject SIMPLE trampoline: THUMB code that calls LoadCurrentMapData
+  then writes callback2 = CB2_LoadMap via direct memory store.
+
+  Used when WarpIntoMap is inlined by the compiler and doesn't exist as a standalone function.
+  LoadCurrentMapData loads gMapHeader from SaveBlock1->location (which writeWarpData already writes).
+  After it returns, we set callback2 = CB2_LoadMap so the main loop calls it next frame.
+
+  THUMB layout (28 bytes):
+    +0x00: B510  PUSH {R4, LR}
+    +0x02: 4C03  LDR R4, [PC, #12]  ; load LoadCurrentMapData+1 from +0x10
+    +0x04: 46FE  MOV LR, PC         ; set return addr = +0x08
+    +0x06: 4720  BX R4              ; call LoadCurrentMapData()
+    +0x08: 4C02  LDR R4, [PC, #8]   ; load CB2_LoadMap from +0x14
+    +0x0A: 4903  LDR R1, [PC, #12]  ; load &callback2 from +0x18
+    +0x0C: 600C  STR R4, [R1]       ; callback2 = CB2_LoadMap
+    +0x0E: BD10  POP {R4, PC}       ; return to main loop
+    +0x10: .word LoadCurrentMapData+1  (THUMB bit set)
+    +0x14: .word CB2_LoadMap
+    +0x18: .word callback2Addr
+
+  Tries ROM (cart0) first — guaranteed executable. Falls back to EWRAM.
+
+  @return number|nil  Trampoline address with THUMB bit, or nil
+]]
+function HAL.injectSimpleTrampoline()
+  if trampolineAddr then return trampolineAddr end
+  if not loadCurrentMapDataAddr then return nil end
+
+  -- Try ROM space first (cart0 writes confirmed working, ROM is always executable)
+  local romAddr = HAL.injectROMTrampoline()
+  if romAddr then return romAddr end
+
+  -- Fallback: EWRAM (may not execute on all mGBA builds)
+  local off = toWRAMOffset(TRAMPOLINE_EWRAM)
+
+  local ok, existing = pcall(emu.memory.wram.read32, emu.memory.wram, off)
+  if ok and existing ~= 0 then
+    console:log(string.format("[HAL] WARNING: EWRAM at 0x%08X not zero (0x%08X) — overwriting",
+      TRAMPOLINE_EWRAM, existing))
+  end
+
+  -- Write trampoline code to EWRAM
+  HAL.writeTrampolineCode(function(offset, value, size)
+    if size == 2 then
+      pcall(emu.memory.wram.write16, emu.memory.wram, off + offset, value)
+    else
+      pcall(emu.memory.wram.write32, emu.memory.wram, off + offset, value)
+    end
+  end)
+
+  -- Verify write by reading back first instruction
+  local ok2, verify = pcall(emu.memory.wram.read16, emu.memory.wram, off)
+  if ok2 and verify == 0xB510 then
+    trampolineAddr = TRAMPOLINE_EWRAM + 1  -- +1 for THUMB bit
+    console:log(string.format("[HAL] EWRAM trampoline injected at 0x%08X (verified OK)", TRAMPOLINE_EWRAM))
+    return trampolineAddr
+  else
+    console:log(string.format("[HAL] EWRAM trampoline FAILED verification: expected 0xB510 got 0x%04X",
+      verify or 0))
+    return nil
+  end
+end
+
+--[[
+  Write the shared trampoline instruction sequence via a writer callback.
+  @param writer function(offset, value, size) — writes 'size' bytes of 'value' at 'offset'
+]]
+function HAL.writeTrampolineCode(writer)
+  writer(0x00, 0xB510, 2) -- PUSH {R4, LR}
+  writer(0x02, 0x4C03, 2) -- LDR R4, [PC, #12] → LoadCurrentMapData from +0x10
+  writer(0x04, 0x46FE, 2) -- MOV LR, PC (return to +0x08)
+  writer(0x06, 0x4720, 2) -- BX R4 → call LoadCurrentMapData
+  writer(0x08, 0x4C02, 2) -- LDR R4, [PC, #8] → CB2_LoadMap from +0x14
+  writer(0x0A, 0x4903, 2) -- LDR R1, [PC, #12] → &callback2 from +0x18
+  writer(0x0C, 0x600C, 2) -- STR R4, [R1] → callback2 = CB2_LoadMap
+  writer(0x0E, 0xBD10, 2) -- POP {R4, PC}
+  -- Literal pool
+  writer(0x10, loadCurrentMapDataAddr, 4) -- LoadCurrentMapData+1 (THUMB)
+  writer(0x14, config.warp.cb2LoadMap, 4) -- CB2_LoadMap
+  writer(0x18, config.warp.callback2Addr, 4) -- &gMain.callback2
+end
+
+--[[
+  Find unused ROM space and inject trampoline there.
+  ROM (cart0) is always executable — unlike EWRAM which might have issues on some mGBA builds.
+  Scans for 32+ bytes of 0xFF padding in upper ROM area.
+
+  @return number|nil  ROM address with THUMB bit, or nil
+]]
+function HAL.injectROMTrampoline()
+  local NEEDED = 32  -- 28 bytes + 4 padding for alignment safety
+  -- Candidate offsets: try end of common ROM sizes, then scan
+  local candidates = {
+    0x00FFFF00,  -- 16MB - 256 bytes
+    0x00FFFE00,  -- 16MB - 512 bytes
+    0x007FFF00,  -- 8MB - 256 bytes
+    0x007FFE00,  -- 8MB - 512 bytes
+    0x01FFFF00,  -- 32MB - 256 bytes
+  }
+
+  for _, offset in ipairs(candidates) do
+    local ok, data = pcall(emu.memory.cart0.readRange, emu.memory.cart0, offset, NEEDED)
+    if ok and data and #data == NEEDED then
+      -- Check if all bytes are 0xFF (unused ROM padding) or 0x00
+      local isFree = true
+      local firstByte = string.byte(data, 1)
+      if firstByte ~= 0xFF and firstByte ~= 0x00 then
+        isFree = false
+      else
+        for i = 2, NEEDED do
+          if string.byte(data, i) ~= firstByte then
+            isFree = false
+            break
+          end
+        end
+      end
+
+      if isFree then
+        romScratchOffset = offset
+        console:log(string.format("[HAL] Found ROM scratch area at cart0:0x%06X (%d bytes of 0x%02X)",
+          offset, NEEDED, firstByte))
+
+        -- Write trampoline code to ROM
+        HAL.writeTrampolineCode(function(off, value, size)
+          if size == 2 then
+            pcall(emu.memory.cart0.write16, emu.memory.cart0, offset + off, value)
+          else
+            pcall(emu.memory.cart0.write32, emu.memory.cart0, offset + off, value)
+          end
+        end)
+
+        -- Verify by reading back first instruction
+        local okV, verify = pcall(emu.memory.cart0.read16, emu.memory.cart0, offset)
+        if okV and verify == 0xB510 then
+          trampolineAddr = 0x08000000 + offset + 1  -- ROM base + offset + THUMB bit
+          console:log(string.format("[HAL] ROM trampoline injected at 0x%08X (verified OK, LoadCurrentMapData=0x%08X)",
+            trampolineAddr - 1, loadCurrentMapDataAddr))
+          return trampolineAddr
+        else
+          console:log(string.format("[HAL] ROM trampoline FAILED verification at 0x%06X: expected 0xB510 got 0x%04X",
+            offset, verify or 0))
+        end
+      end
+    end
+  end
+
+  console:log("[HAL] No free ROM scratch area found — falling back to EWRAM trampoline")
+  return nil
+end
+
+--[[
   Phase 1: Write warp destination to sWarpData + SaveBlock1.
   Does NOT trigger the map load yet — call triggerMapLoad() after a few frames.
 
@@ -951,7 +1295,7 @@ function HAL.writeWarpData(mapGroup, mapId, x, y)
     return false
   end
 
-  -- Write to sWarpData (CB2_LoadMap reads destination from here)
+  -- Write to sWarpData / sWarpDestination (CB2_LoadMap reads destination from here)
   if sWarpDataOffset then
     pcall(emu.memory.wram.write8, emu.memory.wram, sWarpDataOffset, mapGroup)
     pcall(emu.memory.wram.write8, emu.memory.wram, sWarpDataOffset + 1, mapId)
@@ -959,6 +1303,18 @@ function HAL.writeWarpData(mapGroup, mapId, x, y)
     pcall(emu.memory.wram.write8, emu.memory.wram, sWarpDataOffset + 3, 0)    -- padding
     pcall(emu.memory.wram.write16, emu.memory.wram, sWarpDataOffset + 4, x)
     pcall(emu.memory.wram.write16, emu.memory.wram, sWarpDataOffset + 6, y)
+
+    -- Also write gLastUsedWarp (8 bytes before sWarpDestination = 0x020318A0)
+    -- LoadCurrentMapData/ApplyCurrentWarp may read this during map transition
+    local lastWarpOff = sWarpDataOffset - 8
+    if lastWarpOff >= 0 then
+      pcall(emu.memory.wram.write8, emu.memory.wram, lastWarpOff, mapGroup)
+      pcall(emu.memory.wram.write8, emu.memory.wram, lastWarpOff + 1, mapId)
+      pcall(emu.memory.wram.write8, emu.memory.wram, lastWarpOff + 2, 0xFF)
+      pcall(emu.memory.wram.write8, emu.memory.wram, lastWarpOff + 3, 0)
+      pcall(emu.memory.wram.write16, emu.memory.wram, lastWarpOff + 4, x)
+      pcall(emu.memory.wram.write16, emu.memory.wram, lastWarpOff + 6, y)
+    end
   else
     console:log("[HAL] WARNING: sWarpData not found — warp may load wrong map")
   end
@@ -985,6 +1341,8 @@ end
   Phase 2: Trigger the map load.
 
   Priority 1: EWRAM trampoline (calls WarpIntoMap + CB2_LoadMap via injected THUMB code)
+  Priority 1b: Simple trampoline (calls LoadCurrentMapData + writes callback2 = CB2_LoadMap)
+               Used when WarpIntoMap is inlined and only LoadCurrentMapData was found
   Priority 2: Legacy SetCB2WarpAndLoadMap (from config override only)
   Priority 3: Direct CB2_LoadMap (will hang — WarpIntoMap not called)
 
@@ -993,9 +1351,8 @@ end
 function HAL.triggerMapLoad()
   if not config or not config.warp then return false end
 
-  local gMainBase = config.warp.callback2Addr - 4
-  local base = toWRAMOffset(gMainBase)
-  local stateOffset = (config.warp.gMainStateOffset) or 0x65
+  local gMainBase = config.warp.callback2Addr - 4  -- gMain base (callback1 at +0x00)
+  local stateOffset = (config.warp.gMainStateOffset) or 0x438
 
   -- Ensure ROM scan is done
   if not romScanned then
@@ -1006,26 +1363,39 @@ function HAL.triggerMapLoad()
   if warpIntoMapAddr then
     local tAddr = HAL.injectTrampoline()
     if tAddr then
-      pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x00, 0)           -- NULL callback1
-      pcall(emu.memory.wram.write8, emu.memory.wram, base + stateOffset, 0)     -- zero state
-      pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x04, tAddr)       -- callback2 = trampoline
+      autoWrite(gMainBase + 0x00, 0, 4)                -- NULL callback1
+      autoWrite(gMainBase + stateOffset, 0, 1)          -- zero state
+      autoWrite(gMainBase + 0x04, tAddr, 4)             -- callback2 = trampoline
       console:log(string.format("[HAL] triggerMapLoad via EWRAM trampoline (0x%08X)", tAddr))
+      return true
+    end
+  end
+
+  -- Priority 1b: Simple trampoline (LoadCurrentMapData + set callback2 = CB2_LoadMap)
+  -- Used when WarpIntoMap is inlined by the compiler (common in R&B / pokeemerald-expansion)
+  if loadCurrentMapDataAddr then
+    local tAddr = HAL.injectSimpleTrampoline()
+    if tAddr then
+      autoWrite(gMainBase + 0x00, 0, 4)                -- NULL callback1
+      autoWrite(gMainBase + stateOffset, 0, 1)          -- zero state
+      autoWrite(gMainBase + 0x04, tAddr, 4)             -- callback2 = trampoline
+      console:log(string.format("[HAL] triggerMapLoad via SIMPLE trampoline (LoadCurrentMapData=0x%08X)", loadCurrentMapDataAddr))
       return true
     end
   end
 
   -- Priority 2: Legacy SetCB2WarpAndLoadMap (config override)
   if warpFuncAddr then
-    pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x00, 0)
-    pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x04, warpFuncAddr)
+    autoWrite(gMainBase + 0x00, 0, 4)
+    autoWrite(gMainBase + 0x04, warpFuncAddr, 4)
     console:log(string.format("[HAL] triggerMapLoad via SetCB2WarpAndLoadMap (0x%08X)", warpFuncAddr))
     return true
   end
 
   -- Priority 3: Direct CB2_LoadMap (may hang — WarpIntoMap not called)
-  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x00, 0)
-  pcall(emu.memory.wram.write8, emu.memory.wram, base + stateOffset, 0)
-  pcall(emu.memory.wram.write32, emu.memory.wram, base + 0x04, config.warp.cb2LoadMap)
+  autoWrite(gMainBase + 0x00, 0, 4)
+  autoWrite(gMainBase + stateOffset, 0, 1)
+  autoWrite(gMainBase + 0x04, config.warp.cb2LoadMap, 4)
   console:log(string.format("[HAL] triggerMapLoad via direct CB2_LoadMap FALLBACK (0x%08X) — may hang!",
     config.warp.cb2LoadMap))
   return true
@@ -1039,9 +1409,17 @@ function HAL.readInBattle()
   if not config or not config.battle or not config.battle.gMainInBattle then
     return nil
   end
-  local ok, val = pcall(emu.memory.wram.read8, emu.memory.wram,
-    toWRAMOffset(config.battle.gMainInBattle))
-  if ok then return val end
+  local addr = config.battle.gMainInBattle
+  local val
+  if addr >= 0x03000000 and addr < 0x03008000 then
+    val = safeReadIWRAM(addr, 1)
+  else
+    val = safeRead(addr, 1)
+  end
+  if val then
+    -- inBattle is bitfield bit 1 at gMain+0x439 (bit 0 = oamLoadDisabled)
+    return ((val & 0x02) ~= 0) and 1 or 0
+  end
   return nil
 end
 
@@ -1051,10 +1429,12 @@ end
 ]]
 function HAL.readCallback2()
   if not config or not config.warp then return nil end
-  local ok, val = pcall(emu.memory.wram.read32, emu.memory.wram,
-    toWRAMOffset(config.warp.callback2Addr))
-  if ok then return val end
-  return nil
+  local addr = config.warp.callback2Addr
+  if addr >= 0x03000000 and addr < 0x03008000 then
+    return safeReadIWRAM(addr, 4)
+  else
+    return safeRead(addr, 4)
+  end
 end
 
 --[[
@@ -1179,7 +1559,13 @@ function HAL.performDirectWarp(mapGroup, mapId, x, y)
 
   local method = "CB2_LoadMap (fallback)"
   if warpIntoMapAddr and trampolineAddr then
-    method = "EWRAM trampoline"
+    method = "trampoline (WarpIntoMap)"
+  elseif loadCurrentMapDataAddr and trampolineAddr then
+    if romScratchOffset then
+      method = "ROM trampoline (LoadCurrentMapData)"
+    else
+      method = "EWRAM trampoline (LoadCurrentMapData)"
+    end
   elseif warpFuncAddr then
     method = "SetCB2WarpAndLoadMap"
   end

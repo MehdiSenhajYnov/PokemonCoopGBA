@@ -166,7 +166,7 @@ print("Value:", value1)
 
 Dans Pokémon Émeraude vanilla, les pointeurs SaveBlock sont dans IWRAM (0x03000000+):
 - SaveBlock1Ptr: `0x03005D8C`
-- SaveBlock2Ptr: `0x03005D90`
+- SaveBlock2Ptr: `0x03005DA0` (R&B shifted from vanilla 0x03005D90)
 
 ```lua
 -- Chercher SaveBlock1 pointer

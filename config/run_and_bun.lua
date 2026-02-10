@@ -33,16 +33,17 @@ return {
     cameraY = 0x03005DF8,     -- s16, IWRAM (gSpriteCoordOffsetY)
   },
 
-  -- Warp system addresses (found via scan_warp_addresses.lua on 2026-02-03)
+  -- Warp system addresses
+  -- CORRECTED 2026-02-07: gMain is in IWRAM at 0x030022C0 (found via SetMainCallback2 disassembly)
+  -- The old EWRAM address 0x0202064C was a DIFFERENT variable, NOT gMain.callback2
   warp = {
-    callback2Addr = 0x0202064C,  -- gMain.callback2 (EWRAM, offset +4 in gMain)
-    cb2LoadMap    = 0x08007441,  -- CB2_LoadMap ROM function pointer
+    callback2Addr = 0x030022C4,  -- gMain.callback2 (IWRAM, gMain+0x04) — CORRECTED from 0x0202064C
+    cb2LoadMap    = 0x080A3FDD,  -- CB2_LoadMap ROM (CORRECTED: 0x08007441 was SpriteCallbackDummy!)
     cb2Overworld  = 0x080A89A5,  -- CB2_Overworld ROM function pointer (for completion detect)
 
-    -- gMain.state offset from gMain base (for CB2_LoadMap switch statement)
-    -- Confirmed from pokeemerald-expansion main.h: state is always 1 byte before inBattle bitfield
-    -- R&B has inBattle at gMain+0x66 → state = gMain+0x65
-    gMainStateOffset = 0x65,     -- CONFIRMED (main.h: state is 1 byte before inBattle)
+    -- gMain.state offset from gMain base (vanilla expansion layout: +0x438)
+    -- Previously thought R&B had custom offsets, but gMain is actually vanilla layout in IWRAM
+    gMainStateOffset = 0x438,    -- CORRECTED: vanilla expansion layout (was 0x65 — WRONG)
 
     -- sWarpData address: auto-detected at runtime by HAL.trackCallback2()
     -- After initial game load (CB2_LoadMap → CB2_Overworld), sWarpDestination matches
@@ -107,30 +108,202 @@ return {
     gPlayerParty      = 0x02023A98,  -- VERIFIED: from run-bun-exporter (was 0x020233D0 from scanner)
     gPlayerPartyCount = 0x02023A95,  -- VERIFIED: from run-bun-exporter (3 bytes before gPlayerParty)
     gEnemyParty       = 0x02023CF0,  -- DERIVED: gPlayerParty + 0x258 (600 bytes = 6 * 100)
+    gEnemyPartyCount  = 0x02023A96,  -- CORRECTED: gPlayerPartyCount+1 (contiguous EWRAM_DATA in pokemon.c), NOT gEnemyParty-3
     gPokemonStorage   = 0x02028848,  -- VERIFIED: from run-bun-exporter (PC box storage)
 
-    -- Battle state (found via scanner — need re-verification with corrected base)
-    gBattleTypeFlags = 0x020090E8,  -- FOUND via scanner (independent, likely correct)
-    gTrainerBattleOpponent_A = nil, -- TODO: scan
-    gBattleControllerExecFlags = 0x020239FC, -- FOUND via scanner — WARNING: very close to gPlayerParty, verify
-    gBattleBufferB = nil,           -- INVALIDATED: was 0x02022748 (derived from wrong gPlayerParty), re-scan needed
-    gBattleOutcome = nil,           -- Not found — using gMainInBattle as fallback
+    -- Battle state
+    gBattleTypeFlags = 0x02023364,  -- CORRECTED: found via CB2_InitBattle disassembly (was 0x020090E8 — WRONG)
+    gBattleOutcome = 0x02023716,    -- FOUND: u8, 0=ongoing, 1=won, 2=lost (after gBattleCommunication[8])
 
-    -- gMain struct fields
-    gMainAddr = 0x02020648,         -- gMain base address (callback2Addr - 4)
-    gMainInBattle = 0x020206AE,     -- FOUND via find_inbattle_offset.lua (gMain+0x66, pattern 0→1→0)
+    -- gMain struct fields (IWRAM! CORRECTED 2026-02-07 via SetMainCallback2 disasm)
+    gMainAddr = 0x030022C0,         -- gMain base address (IWRAM) — was 0x02020648 (WRONG, EWRAM)
+    gMainInBattle = 0x03002AF9,     -- gMain+0x439 (IWRAM), bitfield bit 1 — was 0x020206AE (WRONG)
 
     -- RNG (IWRAM)
     gRngValue = 0x03005D90,         -- FOUND (changes every frame)
 
-    -- ROM function pointers (found via scan_battle_callbacks.lua)
-    CB2_BattleMain = 0x08094815,    -- FOUND: active during entire battle
-    CB2_InitBattle = nil,           -- Not separate in R&B (CB2_LoadMap handles init)
-    CB2_ReturnToField = nil,        -- Not separate in R&B (CB2_LoadMap handles return)
-    CB2_WhiteOut = nil,             -- TODO: lose a battle to find
+    -- ROM function pointers
+    CB2_BattleMain = 0x0803816D,    -- CORRECTED: was 0x08094815 (sprite anim, NOT BattleMainCB2). Real BattleMainCB2 found via state 18 jump table.
+    gBattlersCount = 0x020233E4,    -- u8, number of active battlers (2 for singles, 4 for doubles)
 
     -- ROM data tables (read-only, for display/validation)
     speciesNameTable = 0x003185C8,  -- From run-bun-exporter (ROM address, not WRAM)
+  },
+
+  -- Link Battle Emulation addresses
+  -- Found via find_getmultiplayerid.py, find_rom_patch_targets.py, ROM literal pool scan
+  battle_link = {
+    -- ROM functions — battle initialization chain (found via Python ROM scanner 2026-02-07)
+    CB2_InitBattle = 0x080363C1,                      -- FOUND: 204 bytes, 8 literal pool refs (callers use SetMainCallback2)
+    CB2_InitBattleInternal = 0x0803648D,              -- FOUND: big function (~4KB, 143 BLs), called by CB2_InitBattle
+    CB2_ReturnToField = 0x080A40D9,                    -- FOUND: return-to-overworld callback (52 LP refs as savedCallback)
+    SetMainCallback2 = 0x08000544,                    -- FOUND: sets gMain.callback2 + gMain.state=0
+    savedCallbackOffset = 0x08,                       -- gMain.savedCallback at gMain+0x08 (confirmed in expansion struct)
+
+    -- ROM functions — patching targets
+    GetMultiplayerId = 0x0800A4B1,                  -- CONFIRMED: 40 bytes, refs gWirelessCommType+REG_SIOCNT, cart0 offset 0x00A4B0
+    IsLinkTaskFinished = 0x0800A569,                -- FOUND: called 4x in CB2_HandleStartBattle, gates link sync progression
+    GetBlockReceivedStatus = 0x0800A599,            -- FOUND: called 4x, returns bitmask of received blocks (needs 0x0F)
+    CB2_HandleStartBattle = 0x08037B45,             -- FOUND: switch on gBattleCommunication[0], 11 cases (0-10)
+    SetUpBattleVars = 0x0806F1D9,                   -- FOUND: 674 bytes, 24 BLs, refs gBattleResources, CreateTask at +0x7C
+    PlayerBufferExecCompleted = 0x0806F0D5,         -- FOUND: 114 bytes, 2 BLs (GetMultiplayerId + link fn), paired with LinkOpponent
+    LinkOpponentBufferExecCompleted = 0x0807E911,   -- CORRECTED: real LinkOpponent ExecCompleted (was 0x08078789 = LinkPartner!)
+    LinkPartnerBufferExecCompleted = 0x08078789,    -- Was misidentified as LinkOpponent
+    PrepareBufferDataTransfer = 0x08032FA9,          -- CORRECTED: THIS is PrepareBufferDataTransfer (not Link!). 142 bytes, checks LINK flag, calls Link or memcpy
+    PrepareBufferDataTransferLink = 0x080330F5,     -- FOUND: actual link transfer function called by PrepareBufferDataTransfer at +0x20
+    InitBtlControllersInternal_BEQ = 0x08032ACE,    -- BEQ that skips BeginBattleIntro for non-master (patch to NOP for slave)
+    SetControllerToPlayer = 0x0806F0A5,             -- Sets battler controller to Player
+    SetControllerToLinkOpponent = 0x0807DC29,       -- Sets battler controller to LinkOpponent
+
+    -- EWRAM variables (found via ROM literal pool scan)
+    gBattleStruct = 0x02023A0C,           -- EWRAM pointer to heap-allocated BattleStruct (found via DoBattleIntro LDR)
+    gBattleStructEventStateBattleIntroOffset = 0x2F9, -- offset within *gBattleStruct for eventState.battleIntro (u8)
+    gBattleResources = 0x02023A18,        -- EWRAM pointer to heap-allocated battle data (650 ROM refs, confirmed)
+
+    -- BattleResources struct offsets (R&B has 9 ptr fields vs vanilla's 4)
+    bufferA_offset = 0x024,               -- bufferA[0] at *gBattleResources + 0x024 (vanilla: +0x010)
+    bufferB_offset = 0x824,               -- bufferB[0] at *gBattleResources + 0x824 (vanilla: +0x810)
+    battlerBufferSize = 0x200,            -- 512 bytes per battler slot
+
+    -- IWRAM variables (confirmed same as vanilla Emerald via ROM literal pool scan)
+    gWirelessCommType = 0x030030FC,       -- IWRAM: u8, 0=wired, 1=wireless — 132 ROM refs, same as vanilla
+    gReceivedRemoteLinkPlayers = 0x03003124, -- IWRAM: u8, set to 1 to skip link handshake — same as vanilla
+    gBlockReceivedStatus = 0x0300307C,    -- IWRAM: u8[4], set to 1 for data available — same as vanilla
+
+    -- Link status byte: BattleMainCB2 checks *(u8*)0x0203C300 == 0 before allowing fade transition
+    linkStatusByte = 0x0203C300,
+
+    -- gBlockRecvBuffer: 4 slots × 0x100 bytes each — link party exchange copies from here to gEnemyParty
+    -- CB2_HandleStartBattle Cases 4/8/12 do: memcpy(gEnemyParty+offset, gBlockRecvBuffer[enemy], 200)
+    -- We must write opponent party data HERE so the engine's own memcpy populates gEnemyParty correctly
+    gBlockRecvBuffer = 0x020226C4,        -- FOUND: 4 slots, each 0x100 (256) bytes apart
+    gBlockRecvBufferStride = 0x100,       -- Stride between slots
+
+    -- EWRAM battle variables (CORRECTED 2026-02-07: gActiveBattler and gBattleControllerExecFlags SWAPPED)
+    -- ROM disassembly shows 0x020233DC is accessed via STRB/LDRB (byte) = gActiveBattler
+    -- and 0x020233E0 is accessed via LDR (32-bit) and checked == 0 = gBattleControllerExecFlags
+    gActiveBattler = 0x020233DC,             -- CORRECTED: u8 (byte access pattern in ROM), was 0x020233E0
+    gBattleControllerExecFlags = 0x020233E0, -- CORRECTED: u32 (32-bit polling in state machine), was 0x020233DC
+    gBattleCommunication = 0x0202370E,       -- FOUND: u8[8], gBattleCommunication[MULTIUSE_STATE] at 0x0202370E (written to 0 in CB2_InitBattle)
+    gLinkPlayers = 0x02022CE8,               -- CORRECTED: vanilla+0x300 shift (was 0x020229E8), 132 LP refs, confirmed in 59 GetMultiplayerId callers
+    gBattlersCount = 0x020233E4,             -- FOUND: u8, number of active battlers (2 for singles, 4 for doubles)
+    gBattlerPositions = 0x020233EE,          -- FOUND: u8[], battler position array
+    gBattleMons = 0x020233FC,                -- FOUND: struct array, 0x5C (92) bytes per battler
+    gBattleMainFunc = 0x03005D04,            -- FOUND: IWRAM function pointer driving battle logic each tick
+    gBattlerControllerFuncs = 0x03005D70,    -- FOUND: IWRAM u32[4], per-battler controller function pointers
+    gBattlerControllerEndFuncs = 0x03005D80, -- FOUND: IWRAM u32[4], per-battler end callback pointers
+    gPreBattleCallback1 = 0x03005D00,        -- FOUND: IWRAM, saved CB1 before battle
+
+    -- Controller function ROM addresses (for swapping link opponent → regular opponent)
+    BattleControllerDummy = 0x0806F0A1,        -- Idle/dummy controller
+    PlayerBufferRunCommand = 0x0806F151,       -- Player controller (handles input, animations locally)
+    PlayerBufferExecCompleted = 0x0806F0D5,    -- Player exec completed callback
+    LinkOpponentRunCommand = 0x0807DC45,       -- CORRECTED: real LinkOpponentBufferRunCommand (0x0807793D was LinkPartner!)
+    LinkPartnerRunCommand = 0x0807793D,        -- Was misidentified as LinkOpponent
+    OpponentBufferRunCommand = 0x081BAD85,     -- Regular AI opponent controller (handles all anims locally)
+    OpponentBufferExecCompleted = 0x081BB945,  -- FOUND: AI opponent exec completed callback (clears exec flags locally)
+
+    -- Battle variables synced by GBA-PK protocol
+    -- NOTE: These MUST be found via ROM scanner for R&B (vanilla offsets DON'T apply
+    -- due to expansion adding vars in same TU). Set to nil until verified.
+    gBattlerAttacker = 0x0202358C,      -- u8, layout: gBattlescriptCurrInstr(0x02023594) - 8
+    gBattlerTarget = 0x0202358D,        -- u8, gBattlerAttacker + 1
+    gEffectBattler = 0x0202358F,        -- u8, gBattlerAttacker + 3 (gBattlerFainted at +2)
+    gAbsentBattlerFlags = 0x02023591,   -- u8, gBattlerAttacker + 5 (gPotentialItemEffectBattler at +4)
+
+    -- Turn order and action tracking (found via Python ROM scanner find_turn_vars.py + find_turn_counter_v12.py)
+    gBattlerByTurnOrder = 0x020233F6,        -- FOUND: u8[4], 39 ROM refs — order battlers act each turn
+    gChosenActionByBattler = 0x02023598,     -- FOUND: u8[MAX_BATTLERS_COUNT], 31 ROM refs — selected action per battler
+    gChosenMoveByBattler = 0x020235FA,       -- FOUND: u16[MAX_BATTLERS_COUNT], 22 ROM refs — selected move per battler
+    gActionsByTurnOrder = 0x020233F2,        -- FOUND: u8[4], 18 ROM refs — maps turn order slot to action function ID
+    gBattleTurnCounter = 0x02023708,         -- FOUND: u16, 3 ROM refs — incremented each turn, reset to 0 at battle start
+    gBattleOutcome = 0x02023716,            -- FOUND: u8, 0=ongoing, 1=won, 2=lost (after gBattleCommunication[8])
+
+    -- Battle phase function pointers (for context-aware exec safety)
+    DoBattleIntro = 0x0803ACB1,                    -- Intro animation (send-out Pokemon sprites, health boxes)
+    HandleTurnActionSelectionState = 0x0803BE39,   -- Action selection (Fight/Bag/Pokemon/Run menu)
+    RunTurnActionsFunctions = 0x0803E371,          -- Turn execution (animations, damage)
+    SetActionsAndBattlersTurnOrder = 0x0803D8F1,   -- Turn setup after action selection
+
+    -- Post-battle cleanup addresses (found via Python ROM scanner 2026-02-10)
+    gSendBuffer = 0x02022BC4,                -- EWRAM: link send buffer (vanilla+0x300, 32 LP refs)
+    sBlockSend = 0x03000D10,                 -- IWRAM: block send struct (vanilla match, 5 LP refs)
+    gLinkCallback = 0x03003140,              -- IWRAM: link callback fn ptr (vanilla match, 25 LP refs)
+    gSaveBlock2Ptr = 0x03005DA0,             -- IWRAM: pointer to SaveBlock2 in EWRAM (confirmed via scan: name/gender/trainerId valid)
+
+    -- Script system addresses (Loadscript 37 — found via Python ROM scanner 2026-02-10)
+    CreateTask = 0x080C1544,                 -- ROM: task creation function (896 callers)
+    DestroyTask = 0x080C1AA5,               -- ROM: task destruction function (271 callers)
+    Task_StartWiredCableClubBattle = 0x080D1655, -- ROM: task callback for cable club battle (BL→IsLinkTaskFinished + CB2_InitBattle LP)
+    gLocalLinkPlayer = 0x02022D74,           -- EWRAM: local link player struct (28 bytes), copied to gLinkPlayers by 0x0800AA4C
+    gSpecialVar_8000 = 0x02036BB0,           -- EWRAM: script special variables base (from CB2_HandleStartBattle LP)
+    gScriptLoad = 0x03000E38,               -- IWRAM: script trigger struct (vanilla match, 6 LP refs)
+    gScriptData = 0x096E0000,               -- cart0: safe area for script bytecode (past ROM data at 0x16D2983)
+    gNativeData = 0x096F0000,               -- cart0: safe area for ASM code (64KB after gScriptData)
+    -- NOTE: InitLocalLinkPlayer does NOT exist as a standalone function in R&B (inlined by compiler).
+    -- Our Lua initLocalLinkPlayer() in battle.lua reads SaveBlock2 directly and writes gLinkPlayers[0].
+
+    -- ROM patches for link battle emulation
+    -- Each patch: { romOffset = cart0_offset, value = new_instruction, size = bytes }
+    -- PK-GBA reference: 8 patches to skip link hardware and force battle progression
+    patches = {
+      -- GetMultiplayerId is patched separately in battle.lua applyPatches() (MOV R0,#n; BX LR)
+
+      -- IsLinkTaskFinished: MOV R0, #1; BX LR (always returns TRUE)
+      -- CB2_HandleStartBattle checks this 4x — blocks Cases 1,3,5,7 if FALSE
+      -- Without this patch, link sync cases never advance
+      isLinkTaskFinished = { romOffset = 0x0A568, value = 0x47702001, size = 4 },
+
+      -- GetBlockReceivedStatus: MOV R0, #15; BX LR (always returns 0x0F = all received)
+      -- CB2_HandleStartBattle checks (result & 0x0F) == 0x0F — blocks Cases 2,4,6,8
+      getBlockReceivedStatus = { romOffset = 0x0A598, value = 0x4770200F, size = 4 },
+
+      -- PlayerBufferExecCompleted +0x1C: BEQ → B (skip link check)
+      -- Original: 0xD01C (BEQ +0x1C), Patch: 0xE01C (B +0x1C — unconditional skip)
+      playerBufExecSkip = { romOffset = 0x06F0D4 + 0x1C, value = 0xE01C, size = 2 },
+
+      -- LinkOpponentBufferExecCompleted +0x1C: BEQ → B (skip link check)
+      -- CORRECTED: was 0x078788 (LinkPartner!). Real LinkOpponent ExecCompleted = 0x07E910
+      linkOpponentBufExecSkip = { romOffset = 0x07E910 + 0x1C, value = 0xE01C, size = 2 },
+
+      -- PrepareBufferDataTransfer: BEQ→B at +0x18 to ALWAYS use local memcpy path
+      -- GBA-PK: patches at +0x16 with 0xE009 (vanilla Emerald offsets differ)
+      -- R&B: the LINK check is at +0x18 (BEQ 0xD008). Patch to B 0xE008 = always local.
+      -- Without this patch, LINK active → calls PrepareBufferDataTransferLink instead of
+      -- memcpy to gBattleBufferA → commands never written → exec flags never cleared!
+      prepBufDataTransferLocal = { romOffset = 0x032FC0, value = 0xE008, size = 2 },
+
+      -- InitBtlControllersInternal: BEQ→NOP so slave gets BeginBattleIntro
+      -- Original: 0xD01D (BEQ +0x3A → skip to slave path), Patch: 0x46C0 (NOP = MOV R8,R8)
+      -- Without this, slave (no IS_MASTER) gets gBattleMainFunc = BeginBattleIntroDummy (empty) → stuck on VS screen
+      -- With NOP, slave falls through to BeginBattleIntro write BUT continues to slave controller setup (reversed positions)
+      initBtlControllersBeginIntro = { romOffset = 0x032ACE, value = 0x46C0, size = 2 },
+
+      -- NOP the BL to HandleLinkBattleSetup (GBA-PK critical patch!)
+      -- HandleLinkBattleSetup() at 0x0803240C creates link buffer tasks:
+      --   Task_WaitForLinkPlayerConnection, Task_HandleSendLinkBuffersData,
+      --   Task_HandleCopyReceivedLinkBuffersData.
+      -- These tasks call SendBlock(), GetLinkPlayerCount_2(), CheckShouldAdvanceLinkState() etc.
+      -- Without real link hardware, these tasks corrupt gBattleTypeFlags and other memory.
+      -- GBA-PK NOPs this at SetUpBattleVars+0x42 (vanilla Emerald).
+      -- R&B: SetUpBattleVars at 0x08032454, BL HandleLinkBattleSetup at +0x040 (ROM 0x032494).
+      -- Also: CB2_InitBattleInternal calls HandleLinkBattleSetup at ROM 0x036456.
+      -- NOP = 0x46C0 (MOV R8,R8) for each halfword of the BL pair.
+      nopHandleLinkSetup_SetUpBV_hi = { romOffset = 0x032494, value = 0x46C0, size = 2 },
+      nopHandleLinkSetup_SetUpBV_lo = { romOffset = 0x032496, value = 0x46C0, size = 2 },
+      nopHandleLinkSetup_CB2Init_hi = { romOffset = 0x036456, value = 0x46C0, size = 2 },
+      nopHandleLinkSetup_CB2Init_lo = { romOffset = 0x036458, value = 0x46C0, size = 2 },
+
+      -- NOP the BL to TryReceiveLinkBattleData in VBlankIntrHandler.
+      -- TryReceiveLinkBattleData (0x08033448) is called every VBlank from 0x080007BC.
+      -- When LINK_IN_BATTLE is set and gReceivedRemoteLinkPlayers=1, it processes
+      -- gBlockRecvBuffer using GetBlockReceivedStatus() — our patch makes that return 0x0F,
+      -- so it reads garbage dataSize from gBlockRecvBuffer[i][2] and copies huge amounts of
+      -- data to gLinkBattleRecvBuffer, corrupting gBattleTypeFlags and other memory.
+      -- We use TCP relay, not link hardware, so this function is never needed.
+      nopTryRecvLinkBattleData_hi = { romOffset = 0x0007BC, value = 0x46C0, size = 2 },
+      nopTryRecvLinkBattleData_lo = { romOffset = 0x0007BE, value = 0x46C0, size = 2 },
+    },
   },
 
   -- Battle type flag constants (from pokeemerald-expansion include/constants/battle.h)
@@ -142,7 +315,8 @@ return {
     FIRST_BATTLE = 0x00000010,  -- 1 << 4
     SAFARI       = 0x00000080,  -- 1 << 7
     BATTLE_TOWER = 0x00000100,  -- 1 << 8
-    RECORDED     = 0x01000000,  -- 1 << 24
+    RECORDED     = 0x01000000,  -- 1 << 24 (also used as RECORDED_LINK gate in BattleMainCB2)
+    LINK_IN_BATTLE = 0x00000020, -- 1 << 5 (auto-set by engine when LINK battle starts)
     SECRET_BASE  = 0x08000000,  -- 1 << 27
   },
 
