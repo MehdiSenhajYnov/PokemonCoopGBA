@@ -90,7 +90,7 @@ local State = {
   lastSentPosition = nil,
   -- Duel warp state machine
   inputsLocked = false,
-  unlockFrame = 0,
+  unlockClock = 0,       -- os.clock() deadline for waiting_party timeout (real-time, speedhack-safe)
   warpPhase = nil,       -- nil / "waiting_party" / "preparing_battle" / "in_battle" / "waiting_master_outcome"
   duelPending = nil,     -- {isMaster} when duel is pending
   opponentParty = nil,   -- 600-byte party data from opponent
@@ -101,8 +101,8 @@ local State = {
   opponentReady = false, -- Opponent sent duel_ready
   prevInBattle = 0,      -- Previous inBattle value for transition logging
   slaveLocalOutcome = nil, -- Slave's locally detected outcome (used as fallback if master timeout)
-  slaveOutcomeFrame = nil, -- Frame when slave detected battle end (for timeout)
-  lastServerMessageFrame = 0, -- Last frame we received any server message during in_battle (for ping timeout)
+  slaveOutcomeClock = nil, -- os.clock() when slave detected battle end (real-time, speedhack-safe)
+  lastServerMessageClock = 0, -- os.clock() of last server message during in_battle (real-time ping timeout)
   -- Early movement detection
   earlyDetect = {
     inputDir = nil,         -- KEYINPUT direction ("up"/"down"/"left"/"right")
@@ -497,8 +497,8 @@ local function update()
 
     -- Phase "waiting_party": waiting for opponent's party data
     if State.warpPhase == "waiting_party" then
-      -- Timeout check
-      if State.frameCounter >= State.unlockFrame then
+      -- Timeout check (real-time via os.clock, speedhack-safe)
+      if os.clock() >= State.unlockClock then
         log("WARNING: waiting_party timeout — aborting duel")
         Battle.reset()
         State.inputsLocked = false
@@ -510,7 +510,7 @@ local function update()
         State.opponentTrainerId = 0
         State.localReady = false
         State.opponentReady = false
-        State.lastServerMessageFrame = 0
+        State.lastServerMessageClock = 0
       end
 
       -- Process network messages
@@ -536,7 +536,7 @@ local function update()
             State.warpPhase = nil
             State.localReady = false
             State.opponentReady = false
-            State.lastServerMessageFrame = 0
+            State.lastServerMessageClock = 0
             log("Duel cancelled")
           elseif message.type == "duel_opponent_disconnected" then
             log("Opponent disconnected — aborting duel")
@@ -546,7 +546,7 @@ local function update()
             State.warpPhase = nil
             State.localReady = false
             State.opponentReady = false
-            State.lastServerMessageFrame = 0
+            State.lastServerMessageClock = 0
           elseif message.type == "duel_stage" then
             Battle.onRemoteStage(message.stage)
           elseif message.type == "ping" then
@@ -596,7 +596,7 @@ local function update()
         State.localReady = false
         State.opponentReady = false
         State.inputsLocked = false
-        State.lastServerMessageFrame = 0
+        State.lastServerMessageClock = 0
       end
 
     -- Phase "in_battle": battle in progress
@@ -618,7 +618,7 @@ local function update()
         for i = 1, MAX_MESSAGES_PER_FRAME do
           local message = Network.receive()
           if not message then break end
-          State.lastServerMessageFrame = State.frameCounter
+          State.lastServerMessageClock = os.clock()
           if message.type == "duel_buffer" then
             if Battle.isActive() then Battle.onRemoteBuffer(message) end
           elseif message.type == "duel_buffer_cmd" then
@@ -641,9 +641,13 @@ local function update()
           elseif message.type == "duel_end" then
             -- Opponent's battle ended — force-end ours too.
             -- In PvP, the opponent's outcome is authoritative.
-            -- Opponent "win" = we "lose", opponent "lose" = we "win".
+            -- Opponent "win" = we "lose", opponent "lose"/"flee"/"forfeit" = we "win".
             local theirOutcome = message.outcome or "completed"
-            local ourOutcome = theirOutcome == "win" and "lose" or (theirOutcome == "lose" and "win" or "completed")
+            local ourOutcome
+            if theirOutcome == "win" then ourOutcome = "lose"
+            elseif theirOutcome == "lose" or theirOutcome == "flee" or theirOutcome == "forfeit" then ourOutcome = "win"
+            elseif theirOutcome == "draw" then ourOutcome = "draw"
+            else ourOutcome = "completed" end
             log(string.format("Opponent battle ended: %s → our outcome: %s", theirOutcome, ourOutcome))
             if State.connected then
               Network.send({ type = "duel_end", outcome = ourOutcome })
@@ -661,12 +665,12 @@ local function update()
         Network.flush()
       end
 
-      -- Ping timeout: no server messages for 15 seconds during battle
-      if State.lastServerMessageFrame > 0 and
-         State.frameCounter - State.lastServerMessageFrame > 900 then
+      -- Ping timeout: no server messages for 15 seconds during battle (real-time, speedhack-safe)
+      if State.lastServerMessageClock > 0 and
+         os.clock() - State.lastServerMessageClock > 15.0 then
         log("No server messages for 15s — forcing battle end")
         Battle.forceEnd("completed")
-        State.lastServerMessageFrame = State.frameCounter  -- prevent re-trigger
+        State.lastServerMessageClock = os.clock()  -- prevent re-trigger
       end
 
       -- Check if battle finished (naturally via savedCallback → overworld, or via detection)
@@ -688,13 +692,13 @@ local function update()
           State.localReady = false
           State.opponentReady = false
           State.inputsLocked = false
-          State.lastServerMessageFrame = 0
+          State.lastServerMessageClock = 0
         else
           -- Slave: wait for master's duel_end (up to 180 frames)
           -- The master's mirrored outcome is more reliable than local detection
           State.warpPhase = "waiting_master_outcome"
           State.slaveLocalOutcome = outcome
-          State.slaveOutcomeFrame = State.frameCounter
+          State.slaveOutcomeClock = os.clock()
           log(string.format("Battle finished (slave): local=%s, waiting for master outcome", outcome or "unknown"))
         end
       end
@@ -712,7 +716,11 @@ local function update()
           if message.type == "duel_end" then
             -- Master's outcome received — mirror it
             local theirOutcome = message.outcome or "completed"
-            local ourOutcome = theirOutcome == "win" and "lose" or (theirOutcome == "lose" and "win" or "completed")
+            local ourOutcome
+            if theirOutcome == "win" then ourOutcome = "lose"
+            elseif theirOutcome == "lose" or theirOutcome == "flee" or theirOutcome == "forfeit" then ourOutcome = "win"
+            elseif theirOutcome == "draw" then ourOutcome = "draw"
+            else ourOutcome = "completed" end
             log(string.format("Master outcome received: %s → our outcome: %s", theirOutcome, ourOutcome))
             if State.connected then
               Network.send({ type = "duel_end", outcome = ourOutcome })
@@ -727,7 +735,7 @@ local function update()
             State.localReady = false
             State.opponentReady = false
             State.inputsLocked = false
-            State.lastServerMessageFrame = 0
+            State.lastServerMessageClock = 0
           elseif message.type == "duel_opponent_disconnected" then
             log("Master disconnected — using local outcome: " .. (State.slaveLocalOutcome or "completed"))
             if State.connected then
@@ -743,7 +751,7 @@ local function update()
             State.localReady = false
             State.opponentReady = false
             State.inputsLocked = false
-            State.lastServerMessageFrame = 0
+            State.lastServerMessageClock = 0
           elseif message.type == "ping" then
             Network.send({ type = "pong" })
           end
@@ -751,8 +759,8 @@ local function update()
         Network.flush()
       end
 
-      -- Timeout: if master hasn't sent outcome in 180 frames (~3 sec), use local outcome
-      if State.slaveOutcomeFrame and State.frameCounter - State.slaveOutcomeFrame > 180 then
+      -- Timeout: if master hasn't sent outcome in 3 seconds (real-time, speedhack-safe)
+      if State.slaveOutcomeClock and os.clock() - State.slaveOutcomeClock > 3.0 then
         log(string.format("Master outcome timeout — using local outcome: %s", State.slaveLocalOutcome or "completed"))
         if State.connected then
           Network.send({ type = "duel_end", outcome = State.slaveLocalOutcome or "completed" })
@@ -767,14 +775,14 @@ local function update()
         State.localReady = false
         State.opponentReady = false
         State.inputsLocked = false
-        State.lastServerMessageFrame = 0
+        State.lastServerMessageClock = 0
       end
 
       return
 
     -- Legacy fallback (non-warp input lock)
     else
-      if State.frameCounter >= State.unlockFrame then
+      if os.clock() >= State.unlockClock then
         State.inputsLocked = false
         State.warpPhase = nil
         log("Inputs unlocked")
@@ -800,7 +808,7 @@ local function update()
       State.opponentReady = false
       State.inputsLocked = false
       State.warpPhase = nil
-      State.lastServerMessageFrame = 0
+      State.lastServerMessageClock = 0
       log("Duel pending cancelled (disconnected)")
     end
     log("Connection lost — will attempt reconnection")
@@ -895,7 +903,7 @@ local function update()
           -- No map warp needed — CB2_InitBattle takes over the full screen
           State.inputsLocked = true
           State.warpPhase = "waiting_party"
-          State.unlockFrame = State.frameCounter + 600  -- 10 second timeout
+          State.unlockClock = os.clock() + 10.0  -- 10 second real-time timeout (speedhack-safe)
 
           -- Reset early detection + occlusion cache
           State.earlyDetect.inputDir = nil
@@ -911,7 +919,7 @@ local function update()
           State.localReady = false
           State.opponentReady = false
           State.inputsLocked = false
-          State.lastServerMessageFrame = 0
+          State.lastServerMessageClock = 0
           State.warpPhase = nil
         end
         log("Duel cancelled (requester disconnected)")
@@ -979,7 +987,7 @@ local function update()
         State.localReady = false
         State.opponentReady = false
         State.inputsLocked = false
-        State.lastServerMessageFrame = 0
+        State.lastServerMessageClock = 0
 
       elseif message.type == "ping" then
         -- Respond to heartbeat

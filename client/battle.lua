@@ -72,6 +72,9 @@ local PLAYERS2 = { [1]=0x10, [2]=0x20, [3]=0x40, [4]=0x80 } -- bits 4-7: network
 -- Battle end command ID
 local CMD_GET_AWAY_EXIT = 0x37
 
+-- Battle outcome flags
+local B_OUTCOME_LINK_BATTLE_RAN = 0x80  -- OR'd into gBattleOutcome when Run is used in link battle
+
 -- Helper: convert absolute EWRAM address to WRAM offset
 local function toWRAMOffset(address)
   return address - 0x02000000
@@ -161,6 +164,7 @@ local state = {
   battleDetected = false,
   battleCallbackSeen = false,
   stageTimer = 0,
+  stageClock = 0,           -- os.clock() at stage entry (real-time, speedhack-safe)
   remoteBuffers = {},
   romPatches = {},
   ewramPatches = {},
@@ -791,6 +795,7 @@ function Battle.startLinkBattle(isMaster)
   -- Transition to STARTING stage
   state.stage = STAGE.STARTING
   state.stageTimer = 0
+  state.stageClock = os.clock()
 
   if state.sendFn then
     state.sendFn({ type = "duel_stage", stage = STAGE.STARTING })
@@ -1322,8 +1327,9 @@ function Battle.tick()
   -- === STAGE: STARTING ===
   -- GBA-PK stages 3-6: ROM patches, party exchange, comm advancement, VS screen
   if state.stage == STAGE.STARTING then
-    -- Loadscript(37) fallback: if callback2 hasn't changed after 30 frames, direct write
-    if state.battleEntryMethod == "loadscript37" and state.stageTimer == 30 then
+    -- Loadscript(37) fallback: if callback2 hasn't changed after 15 frames, direct write
+    -- (Reduced from 30: loadscript37 rarely works in R&B, causing unnecessary black screen delay)
+    if state.battleEntryMethod == "loadscript37" and state.stageTimer == 15 then
       local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
       if okCb then
         local isBattle = (cb2 == LINK.CB2_InitBattle or cb2 == LINK.CB2_InitBattleInternal
@@ -1555,6 +1561,7 @@ function Battle.tick()
       console:log("[Battle] Both players ready → MAIN_LOOP (GBA-PK Stage 7: LINK active, buffer relay)")
       state.stage = STAGE.MAIN_LOOP
       state.stageTimer = 0
+      state.stageClock = os.clock()
       if state.sendFn then
         state.sendFn({ type = "duel_stage", stage = STAGE.MAIN_LOOP, reason = state.battleReadyReason or "sync" })
       end
@@ -1607,8 +1614,8 @@ function Battle.tick()
       pcall(function() emu:screenshot(string.format("starting_f%04d.png", state.stageTimer)) end)
     end
 
-    -- Timeout: 45 seconds
-    if state.stageTimer > 2700 then
+    -- Timeout: 45 seconds (real-time via os.clock, speedhack-safe)
+    if os.clock() - state.stageClock > 45.0 then
       console:log("[Battle] WARNING: Battle start timeout (45s)")
       Battle.restorePatches()
       state.stage = STAGE.DONE
@@ -1623,6 +1630,26 @@ function Battle.tick()
   -- Exec flags bytes 0-3 (bits 0-3 = active, bits 4-7 = network wait).
   -- No GBRS dynamic patching, no HTASS action sync, no iState restoration.
   if state.stage == STAGE.MAIN_LOOP then
+
+    -- EARLY BAIL-OUT: if callback2 is already overworld/CB2_ReturnToField, enter ENDING immediately.
+    -- This prevents maintainLinkState/enforceFlags from corrupting the overworld reload
+    -- (CB2_ReturnToField reloads map data into EWRAM — our link state writes would overwrite it).
+    if not state.forceEndPending and state.stageTimer > 10 and config and config.warp then
+      local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
+      if okCb then
+        local isOverworld = (cb2 == config.warp.cb2Overworld)
+        local isReturnToField = (LINK and LINK.CB2_ReturnToField and cb2 == LINK.CB2_ReturnToField)
+        if isOverworld or isReturnToField then
+          state.cachedOutcome = Battle.readOutcomeRaw()
+          state.stage = STAGE.ENDING
+          state.stageTimer = 0
+          state.stageClock = os.clock()
+          console:log(string.format("[Battle] Quick exit: cb2=0x%08X (overworld/returnToField) at tick=%d",
+            cb2, state.stageTimer))
+          return
+        end
+      end
+    end
 
     -- Force-end: re-inject 0x37 every frame for 30 frames (GBA-PK approach)
     if state.forceEndPending then
@@ -1643,6 +1670,7 @@ function Battle.tick()
         state.forceEndPending = false
         state.stage = STAGE.ENDING
         state.stageTimer = 0
+        state.stageClock = os.clock()
         console:log("[Battle] Force-exit: 30f injection done → ENDING")
       end
       return  -- skip normal relay during force-end
@@ -1714,6 +1742,15 @@ function Battle.tick()
 
     -- D2 fix: use 0x03 (GBA-PK leaves gBlockReceivedStatus at 0x03 during battle, never 0x00)
     maintainLinkState(0x03)
+    -- CRITICAL: Override gReceivedRemoteLinkPlayers = 0 during active battle.
+    -- ReturnFromBattleToOverworld (battle_main.c:5767) checks:
+    --   if (BATTLE_TYPE_LINK && gReceivedRemoteLinkPlayers) return;
+    -- With gReceivedRemoteLinkPlayers=1, the function returns early EVERY frame = deadlock.
+    -- Setting to 0 lets the engine exit naturally when the battle ends.
+    -- Safe: gReceivedRemoteLinkPlayers is NOT read anywhere during active battle.
+    if LINK and LINK.gReceivedRemoteLinkPlayers then
+      pcall(writeMem8, LINK.gReceivedRemoteLinkPlayers, 0)
+    end
 
     -- Enforce gBattleTypeFlags (OR merge: preserve engine-set bits like LINK_IN_BATTLE)
     if ADDRESSES and ADDRESSES.gBattleTypeFlags and state.relay.localBtf then
@@ -1974,7 +2011,7 @@ function Battle.tick()
             -- NOTE: No Priority 2 / local byte3 handling. CLIENT is 100% HOST-driven.
             -- Engine sets byte3 → stays blocked (exec flags ≠ 0) → HOST detects on its side
             -- → sends duel_buffer_cmd via TCP → Priority 1 fires → command processed.
-            -- Stuck detection (600f timeout) handles HOST never responding.
+            -- HOST will eventually relay the command via TCP (Priority 1).
 
             -- Per-frame re-write: persist bufferA while controller processes
             if state.relay.processingCmd[battler] and state.relay.activeCmd[battler] then
@@ -2050,10 +2087,13 @@ function Battle.tick()
     -- ================================================================
     -- BATTLE END DETECTION
     -- ================================================================
-    if state.relay.introComplete and state.stageTimer > 120 and Battle.detectBattleEnd(inBattle) then
+    -- Gate reduced from 120→30 frames: callback2 detection is reliable (no false positives),
+    -- and shorter gate means less time where maintainLinkState runs after engine exited.
+    if state.relay.introComplete and state.stageTimer > 30 and Battle.detectBattleEnd(inBattle) then
       state.cachedOutcome = Battle.readOutcomeRaw()
       state.stage = STAGE.ENDING
       state.stageTimer = 0
+      state.stageClock = os.clock()
       console:log(string.format("[Battle] Battle end detected, cached outcome: %s", state.cachedOutcome or "nil"))
       return
     end
@@ -2105,31 +2145,18 @@ function Battle.tick()
       end
     end
 
-    -- Local stuck detection: no relay activity for 10 seconds
-    local RELAY_TIMEOUT_FRAMES = 600  -- 10s at 60fps
-    if state.relay.introComplete and state.stageTimer > 300 then
-      if state.relay.lastRelayActivityFrame > 0 then
-        local sinceLastActivity = state.stageTimer - state.relay.lastRelayActivityFrame
-        if sinceLastActivity > RELAY_TIMEOUT_FRAMES then
-          console:log(string.format("[Battle] STUCK: No relay activity for %d frames — forcing exit", sinceLastActivity))
-          Battle.forceEnd("completed")
-        end
-      elseif state.stageTimer > RELAY_TIMEOUT_FRAMES * 2 then
-        console:log("[Battle] STUCK: Never received any relay — forcing exit")
-        Battle.forceEnd("completed")
-      end
-    end
-
-    -- Safety timeout (1 minute)
-    if state.stageTimer > 3600 then
-      console:log("[Battle] WARNING: Battle timeout (1 min)")
-      state.stage = STAGE.ENDING
-      state.stageTimer = 0
-    end
+    -- NOTE: Relay timeout (10s) and safety timeout (1min) REMOVED.
+    -- These caused premature battle exits during normal multi-turn PvP
+    -- (player thinking >10s or battle lasting >1min).
+    -- Battle exit is now handled by: natural engine outcome, FF/forfeit, disconnect detection, or ping timeout.
     return
   end
 
   -- === STAGE: ENDING ===
+  -- 3 phases:
+  --   Phase 1 (frames 1-30):  Inject 0x37 exit cmd + KEEP LINK active for clean engine exit
+  --   Phase 2 (frames 31-90): Clear link flags + exec flags, let engine transition to overworld
+  --   Phase 3 (frame 90 or gameCleanupDone): Restore patches, force callback2 if needed
   if state.stage == STAGE.ENDING then
     local gameCleanupDone = false
     if config and config.warp then
@@ -2143,38 +2170,54 @@ function Battle.tick()
       end
     end
 
-    -- Clear link-related state during ending
-    if LINK and LINK.gReceivedRemoteLinkPlayers then
-      pcall(writeMem8, LINK.gReceivedRemoteLinkPlayers, 0)
-    end
-    -- Clear LINK flags so engine doesn't try link operations during cleanup
-    if ADDRESSES and ADDRESSES.gBattleTypeFlags then
-      local okF, flags = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
-      if okF and flags then
-        local clearMask = BATTLE_TYPE_LINK | BATTLE_TYPE_LINK_IN_BATTLE | BATTLE_TYPE_IS_MASTER | BATTLE_TYPE_RECORDED
-        local newFlags = flags & ~clearMask
-        if newFlags ~= flags then
-          pcall(writeMem32, ADDRESSES.gBattleTypeFlags, newFlags)
-        end
-      end
-    end
-
-    -- Ensure exec flags allow exit
-    if LINK and LINK.gBattleControllerExecFlags then
-      local ef_wram = toWRAMOffset(LINK.gBattleControllerExecFlags)
-      local okEf, ef1 = pcall(emu.memory.wram.read8, emu.memory.wram, ef_wram)
-      if okEf and (ef1 & PLAYERS[1]) == 0 then
-        pcall(emu.memory.wram.write8, emu.memory.wram, ef_wram, ef1 | PLAYERS[1])
-      end
-    end
-
+    -- Phase 1 (first 30 frames): inject 0x37 exit cmd, do NOT maintain link state
+    -- (gReceivedRemoteLinkPlayers must stay 0 so ReturnFromBattleToOverworld can proceed)
     if state.stageTimer <= 30 then
+      -- Inject 0x37 into bufferA
       local bufABase, _ = getBufferAddresses()
       if bufABase then pcall(writeMem8, bufABase, CMD_GET_AWAY_EXIT) end
+
+      -- Set exec flag for battler 0 ONCE (first frame) to trigger controller processing 0x37
+      if state.stageTimer == 1 and LINK and LINK.gBattleControllerExecFlags then
+        pcall(writeMem8, LINK.gBattleControllerExecFlags, PLAYERS[1])
+      end
     end
 
-    if gameCleanupDone or state.stageTimer > 60 then
+    -- Phase 2 (frame 31): clear link flags + exec flags so engine can advance to exit sequence
+    if state.stageTimer == 31 then
+      -- Clear exec flags — BattleMainCB2 needs exec==0 to proceed to battle exit
+      if LINK and LINK.gBattleControllerExecFlags then
+        pcall(writeMem32, LINK.gBattleControllerExecFlags, 0)
+      end
+      -- Clear LINK flags — engine had 30 frames to process exit via link path
+      if ADDRESSES and ADDRESSES.gBattleTypeFlags then
+        local okF, flags = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
+        if okF and flags then
+          local clearMask = BATTLE_TYPE_LINK | BATTLE_TYPE_LINK_IN_BATTLE | BATTLE_TYPE_IS_MASTER | BATTLE_TYPE_RECORDED
+          pcall(writeMem32, ADDRESSES.gBattleTypeFlags, flags & ~clearMask)
+        end
+      end
+      if LINK and LINK.gReceivedRemoteLinkPlayers then
+        pcall(writeMem8, LINK.gReceivedRemoteLinkPlayers, 0)
+      end
+      console:log("[Battle] ENDING phase 2: link flags + exec flags cleared")
+    end
+
+    -- Phase 3: cleanup when engine returned to overworld OR timeout (90 frames = 1.5s)
+    if gameCleanupDone or state.stageTimer > 90 then
       Battle.restorePatches()
+
+      -- CRITICAL: Force callback2 to overworld if engine didn't do it naturally
+      -- Without this, callback2 stays at BattleMainCB2 with restored ROM patches = black screen
+      if not gameCleanupDone and config and config.warp then
+        local returnCb = (LINK and LINK.CB2_ReturnToField) or config.warp.cb2Overworld
+        if returnCb then
+          pcall(writeMem32, config.warp.callback2Addr, returnCb)
+          local okCb2, stuckCb2 = pcall(readMem32, config.warp.callback2Addr)
+          console:log(string.format("[Battle] FORCED callback2 = 0x%08X (was stuck, timeout at %d frames)",
+            returnCb, state.stageTimer))
+        end
+      end
 
       -- Restore callback1 if we saved it
       if state.savedCallback1 and config and config.warp then
@@ -2204,6 +2247,18 @@ function Battle.tick()
         end
       end
 
+      -- Ensure BATTLE_TYPE_LINK is cleared (belt-and-suspenders for phase 2)
+      if ADDRESSES and ADDRESSES.gBattleTypeFlags then
+        local okF, flags = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
+        if okF and flags then
+          local clearMask = BATTLE_TYPE_LINK | BATTLE_TYPE_LINK_IN_BATTLE | BATTLE_TYPE_IS_MASTER | BATTLE_TYPE_RECORDED
+          local newFlags = flags & ~clearMask
+          if newFlags ~= flags then
+            pcall(writeMem32, ADDRESSES.gBattleTypeFlags, newFlags)
+          end
+        end
+      end
+
       -- Clear cached link player data
       cachedLocalName = nil
       cachedLocalGender = 0
@@ -2214,7 +2269,7 @@ function Battle.tick()
 
       state.stage = STAGE.DONE
       state.stageTimer = 0
-      console:log(string.format("[Battle] Patches restored + link cleanup, stage=DONE (cleanup=%s, frames=%d)",
+      console:log(string.format("[Battle] ENDING → DONE (natural=%s, frames=%d)",
         tostring(gameCleanupDone), state.stageTimer))
     end
     return
@@ -2276,9 +2331,12 @@ function Battle.readOutcomeRaw()
   if ADDRESSES and ADDRESSES.gBattleOutcome then
     local ok, outcome = pcall(readMem8, ADDRESSES.gBattleOutcome)
     if ok and outcome ~= 0 then
-      if outcome == 1 then return "win"
-      elseif outcome == 2 then return "lose"
-      elseif outcome == 7 then return "flee"
+      local base = outcome & 0x7F  -- mask B_OUTCOME_LINK_BATTLE_RAN (0x80)
+      if base == 1 then return "win"
+      elseif base == 2 then return "lose"
+      elseif base == 3 then return "draw"
+      elseif base == 4 or base == 7 then return "flee"
+      elseif base == 9 then return "forfeit"
       end
     end
   end
@@ -2366,6 +2424,7 @@ function Battle.reset()
   state.forceEndPending = false
   state.forceEndFrame = 0
   state.stageTimer = 0
+  state.stageClock = 0
   state.remoteBuffers = {}
   state.romPatches = {}
   state.ewramPatches = {}
