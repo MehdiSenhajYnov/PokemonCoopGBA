@@ -10,7 +10,7 @@
 const net = require('net');
 
 // Configuration
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3333;
 const HEARTBEAT_INTERVAL = 30000; // 30s
 
 // Duel: no physical warp — battle starts from overworld (GBA-PK style)
@@ -100,6 +100,28 @@ function leaveRoom(clientId) {
 }
 
 /**
+ * Resolve a requested player ID to a unique ID.
+ * If requested ID is already used by another live client, append a short suffix.
+ */
+function resolveUniqueClientId(requestedId, client) {
+  const baseId = requestedId || generateId();
+  let resolvedId = baseId;
+  let suffix = 1;
+
+  while (clients.has(resolvedId) && clients.get(resolvedId) !== client) {
+    const existing = clients.get(resolvedId);
+    if (existing && existing.socket && existing.socket.destroyed) {
+      clients.delete(resolvedId);
+      break;
+    }
+    resolvedId = `${baseId}_${suffix.toString(36)}`;
+    suffix += 1;
+  }
+
+  return { baseId, resolvedId };
+}
+
+/**
  * Handle incoming messages
  */
 function handleMessage(client, messageStr) {
@@ -109,7 +131,16 @@ function handleMessage(client, messageStr) {
     switch (message.type) {
       case 'register':
         // Client registration
-        client.id = message.playerId || generateId();
+        const previousId = client.id;
+        const { baseId, resolvedId } = resolveUniqueClientId(message.playerId, client);
+        client.id = resolvedId;
+        client.characterName = message.characterName || null;
+
+        // If this socket re-registers with a different ID, clean old mapping.
+        if (previousId && previousId !== client.id && clients.get(previousId) === client) {
+          clients.delete(previousId);
+        }
+
         clients.set(client.id, client);
 
         sendToClient(client, {
@@ -117,7 +148,10 @@ function handleMessage(client, messageStr) {
           playerId: client.id
         });
 
-        console.log(`[Register] Client registered: ${client.id}`);
+        if (baseId !== resolvedId) {
+          console.warn(`[Register] Requested ID '${baseId}' already in use, reassigned to '${resolvedId}'`);
+        }
+        console.log(`[Register] Client registered: ${client.id}${client.characterName ? ` (${client.characterName})` : ''}`);
         break;
 
       case 'join':
@@ -138,11 +172,13 @@ function handleMessage(client, messageStr) {
               const existing = clients.get(existingId);
               if (existing) {
                 if (existing.lastPosition) {
-                  sendToClient(client, {
+                  const joinPosMsg = {
                     type: 'position',
                     playerId: existingId,
                     data: existing.lastPosition
-                  });
+                  };
+                  if (existing.characterName) joinPosMsg.characterName = existing.characterName;
+                  sendToClient(client, joinPosMsg);
                 }
                 if (existing.lastSprite) {
                   sendToClient(client, {
@@ -167,13 +203,15 @@ function handleMessage(client, messageStr) {
         client.lastPosition = message.data;
 
         // Relay to other clients in room (include timestamp + duration hint for interpolation)
-        broadcastToRoom(client.roomId, client.id, {
+        const posMsg = {
           type: 'position',
           playerId: client.id,
           data: message.data,
           t: message.t,
           dur: message.dur
-        });
+        };
+        if (client.characterName) posMsg.characterName = client.characterName;
+        broadcastToRoom(client.roomId, client.id, posMsg);
         break;
 
       case 'sprite_update':
@@ -192,20 +230,28 @@ function handleMessage(client, messageStr) {
 
       case 'duel_request':
         // Duel warp request — forward to target player only
-        if (!client.roomId) return;
+        if (!client.roomId) {
+          console.log(`[Duel] DROPPED: ${client.id} not in a room`);
+          return;
+        }
 
+        console.log(`[Duel] Request from ${client.id} to ${message.targetId} (registered clients: ${[...clients.keys()].join(', ')})`);
         const targetClient = clients.get(message.targetId);
-        if (targetClient && targetClient.roomId === client.roomId) {
+        if (!targetClient) {
+          console.log(`[Duel] DROPPED: target ${message.targetId} not found in clients map`);
+        } else if (targetClient.roomId !== client.roomId) {
+          console.log(`[Duel] DROPPED: target in room ${targetClient.roomId}, requester in room ${client.roomId}`);
+        } else {
           // Store pending duel on the requester
           client.pendingDuel = { targetId: message.targetId };
 
           sendToClient(targetClient, {
             type: 'duel_request',
             requesterId: client.id,
-            requesterName: client.id
+            requesterName: client.characterName || client.id
           });
 
-          console.log(`[Duel] Request from ${client.id} to ${message.targetId}`);
+          console.log(`[Duel] Forwarded to ${message.targetId}`);
         }
         break;
 

@@ -8,7 +8,7 @@
 const net = require('net');
 
 const SERVER_HOST = '127.0.0.1';
-const SERVER_PORT = 8080;
+const SERVER_PORT = 3333;
 const TEST_PLAYER_ID = 'test_player_1';
 
 console.log('===========================================');

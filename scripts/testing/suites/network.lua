@@ -96,7 +96,7 @@ Runner.suite("network_io", function(t)
     end
 
     local ok, sock = pcall(function()
-      return socket.connect("127.0.0.1", 8080)
+      return socket.connect("127.0.0.1", 3333)
     end)
 
     if ok and sock then

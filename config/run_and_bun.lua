@@ -238,8 +238,11 @@ return {
     Task_StartWiredCableClubBattle = 0x080D1655, -- ROM: task callback for cable club battle (BL→IsLinkTaskFinished + CB2_InitBattle LP)
     gLocalLinkPlayer = 0x02022D74,           -- EWRAM: local link player struct (28 bytes), copied to gLinkPlayers by 0x0800AA4C
     gSpecialVar_8000 = 0x02036BB0,           -- EWRAM: script special variables base (from CB2_HandleStartBattle LP)
+    gSpecialVar_Result = 0x02036BCA,        -- EWRAM: VAR_RESULT (0x800D = gSpecialVar_8000 + 0x1A)
+    gSpecialVar_8001 = 0x02036BB2,          -- EWRAM: VAR_0x8001 (gSpecialVar_8000 + 0x02, textbox completion signal)
     gScriptLoad = 0x03000E38,               -- IWRAM: script trigger struct (vanilla match, 6 LP refs)
     gScriptData = 0x096E0000,               -- cart0: safe area for script bytecode (past ROM data at 0x16D2983)
+    gTextData = 0x096E0040,                 -- cart0: text area after script bytecodes (gScriptData + 0x40)
     gNativeData = 0x096F0000,               -- cart0: safe area for ASM code (64KB after gScriptData)
     -- NOTE: InitLocalLinkPlayer does NOT exist as a standalone function in R&B (inlined by compiler).
     -- Our Lua initLocalLinkPlayer() in battle.lua reads SaveBlock2 directly and writes gLinkPlayers[0].

@@ -27,6 +27,15 @@ if scriptDir then
   configDir = scriptDir .. "../config/"
 end
 
+-- Force reload of all project modules to ensure updates apply immediately on script reload
+local modulesToUnload = {
+  "hal", "network", "render", "interpolate", "sprite", "occlusion",
+  "duel", "textbox", "battle", "core", "run_and_bun", "emerald_us"
+}
+for _, mod in ipairs(modulesToUnload) do
+  package.loaded[mod] = nil
+end
+
 -- Load modules
 local HAL = require("hal")
 local Network = require("network")
@@ -35,12 +44,16 @@ local Interpolate = require("interpolate")
 local Sprite = require("sprite")
 local Occlusion = require("occlusion")
 local Duel = require("duel")
+local Textbox = require("textbox")
 local Battle = require("battle")
 -- GameConfig will be loaded dynamically via ROM detection
 
+-- Detected config (set during initialize, used for character name reading)
+local gameConfig = nil
+
 -- Configuration
 local SERVER_HOST = "127.0.0.1"
-local SERVER_PORT = 8080
+local SERVER_PORT = 3333
 local SEND_RATE_MOVING = 1     -- Send on exact frame position changes (tiles change ~once per walk anim)
 local SEND_RATE_IDLE = 30      -- Send every 30 frames (~2x/sec) in idle for correction
 local IDLE_THRESHOLD = 30      -- Frames without movement to consider idle (~0.5sec)
@@ -103,6 +116,8 @@ local State = {
   slaveLocalOutcome = nil, -- Slave's locally detected outcome (used as fallback if master timeout)
   slaveOutcomeClock = nil, -- os.clock() when slave detected battle end (real-time, speedhack-safe)
   lastServerMessageClock = 0, -- os.clock() of last server message during in_battle (real-time ping timeout)
+  characterName = nil,  -- Local player's in-game character name (ASCII, from SaveBlock2)
+  playerNames = {},     -- Dictionary: playerId → character name (from server)
   -- Early movement detection
   earlyDetect = {
     inputDir = nil,         -- KEYINPUT direction ("up"/"down"/"left"/"right")
@@ -122,6 +137,7 @@ local H = 160
 
 -- Real delta time tracking (Fix 4: os.clock based)
 local lastClock = os.clock()
+local prevDuelButtonMask = 0
 
 -- ROM Detection
 local detectedRomId = nil
@@ -211,6 +227,7 @@ end
 
 -- Forward declarations
 local readPlayerPosition
+local readCharacterName
 
 --[[
   Initialize client
@@ -227,6 +244,9 @@ local function initialize()
     detectedConfig = loadConfig("emerald_us.lua")
   end
 
+  -- Store config for later use (character name reading)
+  gameConfig = detectedConfig
+
   -- Initialize HAL with detected config
   HAL.init(detectedConfig)
   log("Using config: " .. (detectedConfig.name or "Unknown"))
@@ -240,6 +260,26 @@ local function initialize()
   Occlusion.init()
   Render.setSprite(Sprite)
   Render.setOcclusion(Occlusion)
+
+  -- Initialize textbox module (native GBA textboxes for duel UI)
+  local textboxOk = Textbox.init(detectedConfig)
+  if textboxOk and Textbox.isConfigured() then
+    log("Textbox module configured (native GBA textboxes)")
+  else
+    log("Textbox module not configured (using fallback overlay)")
+  end
+
+  -- Read local player's character name from GBA memory
+  State.characterName = readCharacterName()
+  if State.characterName and #State.characterName > 0 then
+    log("Character name: " .. State.characterName)
+  else
+    State.characterName = nil
+    log("Could not read character name from SaveBlock2")
+  end
+
+  -- Initialize duel module with textbox
+  Duel.init(Textbox)
 
   -- Initialize battle module (pass HAL for triggerMapLoad)
   Battle.init(detectedConfig, HAL)
@@ -270,10 +310,11 @@ local function initialize()
     State.connected = true
     log("Connected to server!")
 
-    -- Send registration message
+    -- Send registration message (include character name for duel prompts)
     Network.send({
       type = "register",
-      playerId = State.playerId
+      playerId = State.playerId,
+      characterName = State.characterName
     })
 
     -- Join default room
@@ -323,6 +364,31 @@ readPlayerPosition = function()
   end
 
   return nil
+end
+
+--[[
+  Read the local player's character name from SaveBlock2 (GBA memory).
+  Returns ASCII string or nil if unable to read.
+]]
+readCharacterName = function()
+  if not gameConfig or not gameConfig.battle_link or not gameConfig.battle_link.gSaveBlock2Ptr then
+    return nil
+  end
+  local sb2PtrAddr = gameConfig.battle_link.gSaveBlock2Ptr
+  local ok, sb2Addr = pcall(function()
+    return emu.memory.iwram:read32(sb2PtrAddr - 0x03000000)
+  end)
+  if not ok or not sb2Addr or sb2Addr < 0x02000000 or sb2Addr > 0x0203FFFF then
+    return nil
+  end
+  local nameBytes = {}
+  for i = 0, 7 do
+    local ok2, b = pcall(function()
+      return emu.memory.wram:read8(sb2Addr - 0x02000000 + i)
+    end)
+    nameBytes[i + 1] = (ok2 and b) or 0xFF
+  end
+  return Textbox.decodeGBAText(nameBytes)
 end
 
 --[[
@@ -459,7 +525,7 @@ local function drawOverlay(currentPos)
     Render.drawAllGhosts(painter, overlay.image, interpolatedPlayers, currentPos, currentMap)
   end
 
-  -- Draw duel UI (request prompt / outgoing feedback)
+  -- Draw duel UI (fallback overlay — only when native textbox is not active)
   Duel.drawUI(painter)
 
   overlay:update()
@@ -795,6 +861,8 @@ local function update()
   -- Detect disconnection (before receive to avoid processing on dead socket)
   if State.connected and not Network.isConnected() then
     State.connected = false
+    prevDuelButtonMask = 0
+    Textbox.reset()
     Duel.reset()
     Battle.reset()
     -- Cancel pending duel on disconnect (any phase)
@@ -822,7 +890,7 @@ local function update()
       log("Reconnected to server!")
 
       -- Re-register and re-join room
-      Network.send({ type = "register", playerId = State.playerId })
+      Network.send({ type = "register", playerId = State.playerId, characterName = State.characterName })
       Network.send({ type = "join", roomId = State.roomId })
 
       -- Send current position immediately so other players see us
@@ -851,6 +919,10 @@ local function update()
         Interpolate.update(message.playerId, message.data, message.t, message.dur)
         -- Store raw data as backup + update last seen
         State.otherPlayers[message.playerId] = message.data
+        -- Store character name if provided (for duel textbox display)
+        if message.characterName then
+          State.playerNames[message.playerId] = message.characterName
+        end
 
       elseif message.type == "sprite_update" then
         Sprite.updateFromNetwork(message.playerId, message.data)
@@ -859,6 +931,7 @@ local function update()
         Interpolate.remove(message.playerId)
         Sprite.removePlayer(message.playerId)
         State.otherPlayers[message.playerId] = nil
+        State.playerNames[message.playerId] = nil
         log("Player " .. message.playerId .. " disconnected")
 
       elseif message.type == "registered" then
@@ -870,8 +943,14 @@ local function update()
 
       elseif message.type == "duel_request" then
         -- Incoming duel request from another player
-        Duel.handleRequest(message.requesterId, message.requesterName, State.frameCounter)
-        log("Duel request from: " .. (message.requesterName or message.requesterId))
+        local requesterName = message.requesterName
+        -- Store character name if provided
+        if requesterName and message.requesterId then
+          State.playerNames[message.requesterId] = requesterName
+        end
+        Duel.handleRequest(message.requesterId, requesterName, State.frameCounter)
+        log(string.format("Duel request from: %s (state=%s)",
+          requesterName or message.requesterId, Duel.getState()))
 
       elseif message.type == "duel_warp" then
         -- Server says: both players accepted, start battle
@@ -880,6 +959,9 @@ local function update()
         else
           local isMaster = message.isMaster or false
           log(string.format("Duel accepted! master=%s — no warp (GBA-PK style)", tostring(isMaster)))
+          -- Notify duel module (clears textbox) and reset
+          Duel.onResponse("accepted")
+          Textbox.clear()
           Duel.reset()
 
           State.duelPending = { isMaster = isMaster }
@@ -925,6 +1007,7 @@ local function update()
         log("Duel cancelled (requester disconnected)")
 
       elseif message.type == "duel_declined" then
+        Duel.onResponse("declined")
         log("Duel was declined")
 
       elseif message.type == "duel_party" then
@@ -1009,22 +1092,47 @@ local function update()
   -- Capture local player sprite from VRAM (only rebuilds image when sprite changes)
   Sprite.captureLocalPlayer()
 
-  -- Duel module tick (expire timeouts)
+  -- Duel module tick (expire timeouts for fallback overlay)
   Duel.tick(State.frameCounter)
 
-  -- Read A/B buttons for duel interaction
-  local keyA, keyB = HAL.readButtons()
+  -- Read buttons for duel interaction (edge + hold from KEYINPUT)
+  local rawKeys = HAL.readIOReg16(0x0130)
+  local heldMask = 0
+  if rawKeys then
+    heldMask = (~rawKeys) & 0x03FF
+  end
+  local pressedMask = heldMask & (~prevDuelButtonMask)
+  prevDuelButtonMask = heldMask
+
+  local keyState = {
+    a = (heldMask & 0x0001) ~= 0,
+    b = (heldMask & 0x0002) ~= 0,
+    pressedA = (pressedMask & 0x0001) ~= 0,
+    pressedB = (pressedMask & 0x0002) ~= 0,
+    pressedRight = (pressedMask & 0x0010) ~= 0,
+    pressedLeft = (pressedMask & 0x0020) ~= 0,
+    pressedUp = (pressedMask & 0x0040) ~= 0,
+    pressedDown = (pressedMask & 0x0080) ~= 0,
+  }
+  local keyA, keyB = keyState.a, keyState.b
 
   -- Auto-duel support: _G.AUTO_DUEL set by wrapper scripts for automated testing
-  -- "request" = auto-send duel request after seeing another player for 180 frames
-  -- "accept" = auto-accept incoming duel requests
+  -- In auto-duel mode, bypass textbox entirely by writing VAR_RESULT/VAR_0x8001 directly
   if _G.AUTO_DUEL and State.connected and currentPos then
-    if _G.AUTO_DUEL == "accept" and Duel.hasPrompt() then
-      -- Auto-accept: simulate A press on the prompt
-      local response, reqId = Duel.checkResponse(true, false)
-      if response == "accept" and reqId then
-        Network.send({ type = "duel_accept", requesterId = reqId })
-        log("[AUTO] Accepted duel from: " .. reqId)
+    if _G.AUTO_DUEL == "accept" then
+      -- Auto-accept: if a native textbox Yes/No is showing, write VAR_RESULT=1 (Yes) directly
+      if Textbox.isActive() and Textbox.getActiveType() == "yesno" then
+        Textbox.setVarResult(1)
+      elseif Textbox.isActive() and Textbox.getActiveType() == "message" then
+        Textbox.setVar8001(1)
+      end
+      -- Also handle fallback mode
+      if Duel.hasFallbackPrompt() then
+        local response, reqId = Duel.checkResponse(true, false)
+        if response == "accept" and reqId then
+          Network.send({ type = "duel_accept", requesterId = reqId })
+          log("[AUTO] Accepted duel from: " .. reqId)
+        end
       end
     elseif _G.AUTO_DUEL == "request" and not Duel.hasPrompt() then
       -- Auto-request: after 180 frames connected with another player visible, send request
@@ -1039,11 +1147,53 @@ local function update()
           end
         end
       end
+      -- Auto-request: if textbox Yes/No is showing (confirming_challenge), auto-confirm
+      if Textbox.isActive() and Textbox.getActiveType() == "yesno" then
+        Textbox.setVarResult(1)
+      elseif Textbox.isActive() and Textbox.getActiveType() == "message" then
+        Textbox.setVar8001(1)
+      end
     end
   end
 
-  -- Check for duel response (accept/decline) if prompt is showing
-  if Duel.hasPrompt() then
+  -- Update native textbox duel state machine (returns action when main.lua needs to act)
+  local duelAction = Duel.update(State.frameCounter, keyState)
+  if duelAction and State.connected then
+    if duelAction.action == "send_request" then
+      local sent = Network.send({ type = "duel_request", targetId = duelAction.targetId })
+      if sent then
+        if duelAction.latencyFrames then
+          log(string.format("Duel request sent to: %s (%d frames)", duelAction.targetId, duelAction.latencyFrames))
+        else
+          log("Duel request sent to: " .. duelAction.targetId)
+        end
+      else
+        log("ERROR: Failed to send duel_request (network disconnected)")
+      end
+    elseif duelAction.action == "accept" then
+      Network.send({ type = "duel_accept", requesterId = duelAction.requesterId })
+      if duelAction.latencyFrames then
+        log(string.format("Accepted duel from: %s (%d frames)", duelAction.requesterId, duelAction.latencyFrames))
+      else
+        log("Accepted duel from: " .. duelAction.requesterId)
+      end
+    elseif duelAction.action == "decline" then
+      Network.send({ type = "duel_decline", requesterId = duelAction.requesterId })
+      if duelAction.latencyFrames then
+        log(string.format("Declined duel from: %s (%d frames)", duelAction.requesterId, duelAction.latencyFrames))
+      else
+        log("Declined duel from: " .. duelAction.requesterId)
+      end
+    elseif duelAction.action == "cancel" then
+      log("Duel cancelled (no response or timeout)")
+    elseif duelAction.action == "accepted" then
+      log("Duel accepted — proceeding to battle")
+      -- duel_warp already received and processed, nothing extra needed
+    end
+  end
+
+  -- Check for fallback duel response (accept/decline) if fallback prompt is showing
+  if Duel.hasFallbackPrompt() then
     local response, reqId = Duel.checkResponse(keyA, keyB)
     if response == "accept" and reqId and State.connected then
       Network.send({ type = "duel_accept", requesterId = reqId })
@@ -1052,14 +1202,20 @@ local function update()
       Network.send({ type = "duel_decline", requesterId = reqId })
       log("Declined duel from: " .. reqId)
     end
-  else
+  elseif not Duel.hasPrompt() then
     -- Check for duel trigger (A near ghost) — only when no prompt is showing
     if currentPos and State.connected then
       local targetId = Duel.checkTrigger(currentPos, State.otherPlayers, keyA, State.frameCounter)
       if targetId then
-        Network.send({ type = "duel_request", targetId = targetId })
-        Duel.onRequestSent(targetId, State.frameCounter)
-        log("Duel request sent to: " .. targetId)
+        -- Try native textbox flow (use character name if known)
+        local targetName = State.playerNames[targetId] or targetId
+        local started = Duel.startChallenge(targetId, targetName, State.frameCounter)
+        if not started then
+          -- Textbox not configured or failed: send request directly (old behavior)
+          Network.send({ type = "duel_request", targetId = targetId })
+          Duel.onRequestSent(targetId, State.frameCounter)
+          log("Duel request sent to: " .. targetId)
+        end
       end
     end
   end
@@ -1283,7 +1439,8 @@ callbacks:add("shutdown", function()
     Interpolate.remove(playerId)
   end
 
-  -- Clean up battle state
+  -- Clean up textbox and battle state
+  Textbox.reset()
   Battle.reset()
 
   log("Disconnecting from server...")
