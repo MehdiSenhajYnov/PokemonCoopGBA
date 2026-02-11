@@ -27,6 +27,7 @@ local COOLDOWN_FRAMES = 120     -- Frames between outgoing requests (~2s)
 local RESPONSE_TIMEOUT = 900    -- Frames to wait for opponent response (~15s)
 local CHALLENGE_MIN_WAIT_FRAMES = 3   -- Min wait to avoid same-frame A bleed into yes/no
 local CHALLENGE_MAX_WAIT_FRAMES = 10  -- Hard cap: open prompt even if A stays held
+local TRIGGER_BLOCK_FRAMES = 12 -- Short trigger lockout after prompt decisions
 local YESNO_SENTINEL = 0x007F
 
 -- Textbox module reference (set by init)
@@ -36,6 +37,7 @@ local Textbox = nil
 local duelState = "idle"  -- "idle" | "pre_challenge_wait" | "confirming_challenge" | "waiting_response" | "showing_result" | "showing_incoming"
 local lastRequestFrame = -999   -- Frame of last outgoing request (cooldown)
 local prevKeyA = false          -- Previous frame A-button state (edge detect)
+local triggerBlockedUntilFrame = -1
 
 -- Context for current duel flow
 local ctx = {
@@ -83,6 +85,11 @@ local function canUseTextbox()
   return Textbox and Textbox.isConfigured()
 end
 
+local function blockTrigger(frameCounter, keyA)
+  triggerBlockedUntilFrame = frameCounter + TRIGGER_BLOCK_FRAMES
+  prevKeyA = keyA and true or false
+end
+
 local function resetYesNoFallback()
   ctx.yesNoSelection = true
   ctx.yesNoFallbackAnnounced = false
@@ -106,8 +113,14 @@ local function tryManualYesNoFallback(keyInfo)
     ctx.yesNoFallbackAnnounced = true
   end
 
-  if keyInfo.pressedUp or keyInfo.pressedDown or keyInfo.pressedLeft or keyInfo.pressedRight then
-    ctx.yesNoSelection = not ctx.yesNoSelection
+  local nextSelection = ctx.yesNoSelection
+  if keyInfo.pressedUp or keyInfo.pressedLeft then
+    nextSelection = true
+  elseif keyInfo.pressedDown or keyInfo.pressedRight then
+    nextSelection = false
+  end
+  if nextSelection ~= ctx.yesNoSelection then
+    ctx.yesNoSelection = nextSelection
     log("yes/no fallback cursor -> " .. (ctx.yesNoSelection and "Yes" or "No"))
   end
 
@@ -143,6 +156,10 @@ function Duel.checkTrigger(playerPos, otherPlayers, keyA, frameCounter)
   -- Edge detect: only on press (not hold)
   local pressed = keyA and not prevKeyA
   prevKeyA = keyA
+
+  if frameCounter <= triggerBlockedUntilFrame then
+    return nil
+  end
 
   if not pressed then
     return nil
@@ -222,13 +239,14 @@ end
   @param requesterId   string  Who sent the request
   @param requesterName string  Display name
   @param frameCounter  number  Current frame
+  @return boolean  True if request is handled (prompt/fallback shown), false if rejected (busy)
 ]]
 function Duel.handleRequest(requesterId, requesterName, frameCounter)
   log("handleRequest: from=" .. (requesterId or "nil") .. " name=" .. (requesterName or "nil") .. " state=" .. duelState)
   -- Ignore if we're already in a duel flow
   if duelState ~= "idle" then
     log("handleRequest: BLOCKED (state=" .. duelState .. ")")
-    return
+    return false
   end
 
   ctx.requesterId = requesterId
@@ -246,7 +264,7 @@ function Duel.handleRequest(requesterId, requesterName, frameCounter)
       duelState = "showing_incoming"
       resetYesNoFallback()
       log("handleRequest: state → showing_incoming")
-      return
+      return true
     end
     log("handleRequest: textbox FAILED")
     ctx.textboxFailed = true
@@ -260,6 +278,7 @@ function Duel.handleRequest(requesterId, requesterName, frameCounter)
     name = ctx.requesterName,
     frame = frameCounter
   }
+  return true
 end
 
 --[[
@@ -327,10 +346,20 @@ function Duel.update(frameCounter, keyA)
         resetYesNoFallback()
         log("startChallenge: state → confirming_challenge")
       else
-        log("startChallenge: textbox failed, cancelling")
-        duelState = "idle"
-        -- Caller logic in main.lua handles the 'false' return from startChallenge,
-        -- but here we are async. We could return an action to fallback, but for now just cancel.
+        log("startChallenge: textbox failed — fallback direct send_request")
+        ctx.textboxFailed = true
+        lastRequestFrame = frameCounter
+        resetYesNoFallback()
+        duelState = "waiting_response"
+        ctx.stateFrame = frameCounter
+        if canUseTextbox() then
+          Textbox.showMessage("Waiting for\\n" .. ctx.targetName .. "...")
+        end
+        return {
+          action = "send_request",
+          targetId = ctx.targetId,
+          latencyFrames = frameCounter - (ctx.flowStartFrame or frameCounter),
+        }
       end
     end
 
@@ -358,6 +387,7 @@ function Duel.update(frameCounter, keyA)
     elseif result == false then
       -- No selected → back to idle
       log("update: No selected → idle")
+      blockTrigger(frameCounter, keyA)
       duelState = "idle"
       ctx.targetId = nil
       ctx.targetName = nil
@@ -419,13 +449,14 @@ function Duel.update(frameCounter, keyA)
 
     -- Timeout
     if frameCounter - ctx.stateFrame > RESPONSE_TIMEOUT then
+      local targetId = ctx.targetId
       Textbox.clear()
       duelState = "idle"
       ctx.targetId = nil
       ctx.targetName = nil
       ctx.responseReceived = nil
       resetYesNoFallback()
-      return { action = "cancel" }
+      return { action = "cancel", targetId = targetId }
     end
 
   elseif duelState == "showing_result" then
@@ -454,6 +485,7 @@ function Duel.update(frameCounter, keyA)
     if result == true then
       -- Yes = accept
       local reqId = ctx.requesterId
+      blockTrigger(frameCounter, keyA)
       duelState = "idle"
       ctx.requesterId = nil
       ctx.requesterName = nil
@@ -466,6 +498,7 @@ function Duel.update(frameCounter, keyA)
     elseif result == false then
       -- No = decline
       local reqId = ctx.requesterId
+      blockTrigger(frameCounter, keyA)
       duelState = "idle"
       ctx.requesterId = nil
       ctx.requesterName = nil
@@ -623,6 +656,7 @@ function Duel.reset()
   ctx.flowStartFrame = 0
   ctx.textboxFailed = false
   resetYesNoFallback()
+  triggerBlockedUntilFrame = -1
   fallbackPending = nil
   fallbackOutgoing = nil
   prevKeyA = false

@@ -21,6 +21,14 @@ return {
   gameId = "BPEE",
   version = "1.0",
 
+  -- Renderer metadata (GBAPK-style injection into engine OAM buffer)
+  -- gMain is in IWRAM at 0x030022C0, oamBuffer starts at +0x38.
+  render = {
+    gMainAddr = 0x030022C0,
+    oamBufferOffset = 0x38,
+    oamBaseIndex = 110, -- GBAPK-style high OAM reservation to avoid engine churn
+  },
+
   offsets = {
     playerX = 0x02024CBC,     -- 16-bit
     playerY = 0x02024CBE,     -- 16-bit
@@ -31,6 +39,13 @@ return {
     -- Camera offsets (IWRAM 0x03000000 region - read via emu.memory.iwram)
     cameraX = 0x03005DFC,     -- s16, IWRAM (gSpriteCoordOffsetX)
     cameraY = 0x03005DF8,     -- s16, IWRAM (gSpriteCoordOffsetY)
+  },
+
+  -- Overworld map context for deterministic connected-map projection.
+  -- If this fixed address is invalid in a ROM variant, HAL falls back to
+  -- runtime EWRAM scan and caches the detected address.
+  overworld = {
+    gMapHeaderAddr = 0x02036FB8, -- vanilla Emerald BPEE reference
   },
 
   -- Warp system addresses

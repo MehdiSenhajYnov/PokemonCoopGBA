@@ -29,7 +29,7 @@ end
 
 -- Force reload of all project modules to ensure updates apply immediately on script reload
 local modulesToUnload = {
-  "hal", "network", "render", "interpolate", "sprite", "occlusion",
+  "hal", "network", "render", "interpolate", "sprite",
   "duel", "textbox", "battle", "core", "run_and_bun", "emerald_us"
 }
 for _, mod in ipairs(modulesToUnload) do
@@ -42,7 +42,6 @@ local Network = require("network")
 local Render = require("render")
 local Interpolate = require("interpolate")
 local Sprite = require("sprite")
-local Occlusion = require("occlusion")
 local Duel = require("duel")
 local Textbox = require("textbox")
 local Battle = require("battle")
@@ -50,6 +49,8 @@ local Battle = require("battle")
 
 -- Detected config (set during initialize, used for character name reading)
 local gameConfig = nil
+local localMapMetaCache = {}
+local localMapMetaPending = {}
 
 -- Configuration
 local SERVER_HOST = "127.0.0.1"
@@ -59,6 +60,8 @@ local SEND_RATE_IDLE = 30      -- Send every 30 frames (~2x/sec) in idle for cor
 local IDLE_THRESHOLD = 30      -- Frames without movement to consider idle (~0.5sec)
 local MAX_MESSAGES_PER_FRAME = 10 -- Limit messages processed per frame
 local ENABLE_DEBUG = true
+local POSITION_HEARTBEAT_IDLE = 60 -- Force a periodic idle position refresh (~1/sec)
+local SPRITE_HEARTBEAT = 120        -- Force sprite refresh (~2/sec) if packets were missed
 
 -- Early detection constants
 local INPUT_CAMERA_MAX_GAP = 3     -- Max frames between input and camera for validation
@@ -97,6 +100,8 @@ local State = {
   },
   otherPlayers = {},
   showGhosts = true,
+  lastRenderPosition = nil, -- Last known-good local position for rendering fallback (menus/non-overworld)
+  isOverworld = true,
   isMoving = false,
   lastMoveFrame = 0,
   sendCooldown = 0,
@@ -118,6 +123,9 @@ local State = {
   lastServerMessageClock = 0, -- os.clock() of last server message during in_battle (real-time ping timeout)
   characterName = nil,  -- Local player's in-game character name (ASCII, from SaveBlock2)
   playerNames = {},     -- Dictionary: playerId → character name (from server)
+  lastIdleHeartbeatFrame = 0,
+  lastSpriteSendFrame = -SPRITE_HEARTBEAT,
+  hadGameplayPosLastFrame = false,
   -- Early movement detection
   earlyDetect = {
     inputDir = nil,         -- KEYINPUT direction ("up"/"down"/"left"/"right")
@@ -225,6 +233,54 @@ local function detectROM()
   return nil
 end
 
+local function isValidProjectionMeta(meta)
+  if type(meta) ~= "table" then
+    return false
+  end
+
+  local borderX = tonumber(meta.borderX)
+  local borderY = tonumber(meta.borderY)
+  if not borderX or not borderY then
+    return false
+  end
+  if borderX <= 0 or borderY <= 0 or borderX > 4096 or borderY > 4096 then
+    return false
+  end
+
+  if meta.connections ~= nil and type(meta.connections) ~= "table" then
+    return false
+  end
+  if meta.connectionCount ~= nil then
+    local c = tonumber(meta.connectionCount)
+    if not c or c < 0 or c > 64 then
+      return false
+    end
+  end
+
+  return true
+end
+
+local function projectionMetaSignature(meta)
+  if not meta then
+    return nil
+  end
+  local parts = {
+    tostring(math.floor(tonumber(meta.borderX) or -1)),
+    tostring(math.floor(tonumber(meta.borderY) or -1)),
+  }
+  if type(meta.connections) == "table" then
+    for _, conn in ipairs(meta.connections) do
+      parts[#parts + 1] = string.format("%d:%d:%d:%d",
+        tonumber(conn.direction) or -1,
+        tonumber(conn.offset) or 0,
+        tonumber(conn.mapGroup) or -1,
+        tonumber(conn.mapId) or -1
+      )
+    end
+  end
+  return table.concat(parts, "|")
+end
+
 -- Forward declarations
 local readPlayerPosition
 local readCharacterName
@@ -246,6 +302,8 @@ local function initialize()
 
   -- Store config for later use (character name reading)
   gameConfig = detectedConfig
+  localMapMetaCache = {}
+  localMapMetaPending = {}
 
   -- Initialize HAL with detected config
   HAL.init(detectedConfig)
@@ -254,12 +312,10 @@ local function initialize()
   -- Proactively scan for sWarpData (works if game loaded from save)
   HAL.findSWarpData()
 
-  -- Initialize rendering, sprite extraction, and occlusion
+  -- Initialize rendering and sprite extraction
   Render.init(detectedConfig)
   Sprite.init()
-  Occlusion.init()
   Render.setSprite(Sprite)
-  Render.setOcclusion(Occlusion)
 
   -- Initialize textbox module (native GBA textboxes for duel UI)
   local textboxOk = Textbox.init(detectedConfig)
@@ -359,11 +415,89 @@ readPlayerPosition = function()
   }
 
   -- Validate all values are not nil
-  if pos.x and pos.y and pos.mapId and pos.mapGroup and pos.facing then
-    return pos
+  if not (pos.x and pos.y and pos.mapId and pos.mapGroup and pos.facing) then
+    return nil
   end
 
-  return nil
+  -- Run & Bun occasionally reports transient wrapped coordinates during
+  -- route<->town border transitions (e.g. 65535). Reject these frames so
+  -- map-change compensation and network state are not polluted.
+  local maxCoord = 4095
+  if gameConfig and gameConfig.validation then
+    local vx = tonumber(gameConfig.validation.maxX)
+    local vy = tonumber(gameConfig.validation.maxY)
+    if vx and vy then
+      maxCoord = math.max(vx, vy)
+    end
+  end
+
+  if pos.x >= 0x8000 or pos.y >= 0x8000 then
+    return nil
+  end
+  if pos.x > maxCoord or pos.y > maxCoord then
+    return nil
+  end
+  if pos.mapId > 255 or pos.mapGroup > 255 then
+    return nil
+  end
+
+  local mapKey = string.format("%d:%d", pos.mapGroup, pos.mapId)
+  local freshMeta = HAL.readMapProjectionMeta(pos.x, pos.y)
+  local hasFresh = isValidProjectionMeta(freshMeta)
+  if hasFresh then
+    -- Require two consecutive identical snapshots before caching.
+    -- This prevents storing one-frame stale metadata under a new map key.
+    local sig = projectionMetaSignature(freshMeta)
+    local pending = localMapMetaPending[mapKey]
+    if pending and pending.signature == sig then
+      pending.frames = pending.frames + 1
+      pending.meta = freshMeta
+    else
+      pending = {
+        signature = sig,
+        frames = 1,
+        meta = freshMeta,
+      }
+      localMapMetaPending[mapKey] = pending
+    end
+
+    if pending.frames >= 2 then
+      localMapMetaCache[mapKey] = pending.meta
+    end
+  end
+
+  local selectedMeta = localMapMetaCache[mapKey]
+  if not selectedMeta and hasFresh then
+    -- First stable frame: use immediately for local rendering/send, but don't cache yet.
+    selectedMeta = freshMeta
+  end
+
+  if selectedMeta then
+    pos.borderX = selectedMeta.borderX
+    pos.borderY = selectedMeta.borderY
+    pos.connectionCount = selectedMeta.connectionCount
+    pos.connections = selectedMeta.connections
+  end
+
+  return pos
+end
+
+--[[
+  Resolve local positions for gameplay vs rendering.
+  - gameplayPos: only valid in overworld (used for movement/network logic)
+  - renderPos: gameplayPos or last known-good position (used for ghost rendering in menus)
+]]
+local function resolveLocalPositions(rawPos, inOverworld)
+  -- Keep gameplay position when raw data is available.
+  -- Overworld state is still tracked for selective features (sprite capture/send),
+  -- but must not gate core rendering/network position flow on R&B variants.
+  local gameplayPos = rawPos
+  if rawPos then
+    State.lastRenderPosition = rawPos
+  end
+
+  local renderPos = gameplayPos or State.lastRenderPosition
+  return gameplayPos, renderPos
 end
 
 --[[
@@ -502,16 +636,10 @@ local function drawOverlay(currentPos)
     end
   end
 
-  -- Read BG cover-layer config for occlusion (once per frame)
-  Occlusion.beginFrame()
+  local shouldDrawGhosts = State.showGhosts and playerCount > 0 and currentPos
 
   -- Draw ghost players using interpolated positions
-  if State.showGhosts and playerCount > 0 and currentPos then
-    local currentMap = {
-      mapId = currentPos.mapId,
-      mapGroup = currentPos.mapGroup
-    }
-
+  if shouldDrawGhosts then
     -- Build interpolated position table for rendering (with state for debug coloring)
     local interpolatedPlayers = {}
     for playerId, rawPosition in pairs(State.otherPlayers) do
@@ -522,7 +650,9 @@ local function drawOverlay(currentPos)
       }
     end
 
-    Render.drawAllGhosts(painter, overlay.image, interpolatedPlayers, currentPos, currentMap)
+    Render.drawAllGhosts(painter, overlay.image, interpolatedPlayers, currentPos)
+  else
+    Render.hideGhosts()
   end
 
   -- Draw duel UI (fallback overlay — only when native textbox is not active)
@@ -667,6 +797,8 @@ local function update()
 
     -- Phase "in_battle": battle in progress
     elseif State.warpPhase == "in_battle" then
+      Render.hideGhosts()
+
       -- Clear overlay (ghosts should not be drawn during battle)
       if painter and overlay then
         painter:setBlend(false)
@@ -948,9 +1080,16 @@ local function update()
         if requesterName and message.requesterId then
           State.playerNames[message.requesterId] = requesterName
         end
-        Duel.handleRequest(message.requesterId, requesterName, State.frameCounter)
-        log(string.format("Duel request from: %s (state=%s)",
-          requesterName or message.requesterId, Duel.getState()))
+        local handled = Duel.handleRequest(message.requesterId, requesterName, State.frameCounter)
+        if handled then
+          log(string.format("Duel request from: %s (state=%s)",
+            requesterName or message.requesterId, Duel.getState()))
+        elseif State.connected and message.requesterId then
+          -- If we're busy in another duel flow, reject immediately so requester doesn't hang.
+          Network.send({ type = "duel_decline", requesterId = message.requesterId })
+          log(string.format("Auto-declined duel from %s (busy state=%s)",
+            requesterName or message.requesterId, Duel.getState()))
+        end
 
       elseif message.type == "duel_warp" then
         -- Server says: both players accepted, start battle
@@ -987,14 +1126,14 @@ local function update()
           State.warpPhase = "waiting_party"
           State.unlockClock = os.clock() + 10.0  -- 10 second real-time timeout (speedhack-safe)
 
-          -- Reset early detection + occlusion cache
+          -- Reset early detection + ghost OAM cache
           State.earlyDetect.inputDir = nil
           State.earlyDetect.predictedPos = nil
-          Occlusion.clearCache()
+          Render.clearGhostCache()
         end
 
       elseif message.type == "duel_cancelled" then
-        -- Requester disconnected, clear our prompt and pending duel
+        -- Requester cancelled/disconnected, clear our prompt and pending duel
         Duel.reset()
         if State.duelPending then
           State.duelPending = nil
@@ -1004,11 +1143,12 @@ local function update()
           State.lastServerMessageClock = 0
           State.warpPhase = nil
         end
-        log("Duel cancelled (requester disconnected)")
+        log("Duel cancelled by requester")
 
       elseif message.type == "duel_declined" then
         Duel.onResponse("declined")
-        log("Duel was declined")
+        local reason = message.reason and (" (" .. tostring(message.reason) .. ")") or ""
+        log("Duel was declined" .. reason)
 
       elseif message.type == "duel_party" then
         -- Received opponent's party data for PvP battle (stored for handshake)
@@ -1086,10 +1226,16 @@ local function update()
   -- Advance ghost interpolation (after receive so new waypoints are in the queue)
   Interpolate.step(realDt)
 
-  -- Read current position
-  local currentPos = readPlayerPosition()
+  -- Read current position and callback state.
+  -- Keep gameplay logic strict (overworld only), but keep rendering stable in menus
+  -- using the last known-good local position.
+  local rawCurrentPos = readPlayerPosition()
+  local inOverworldNow = HAL.isOverworld()
+  State.isOverworld = inOverworldNow
+  local currentPos, renderPos = resolveLocalPositions(rawCurrentPos, inOverworldNow)
 
-  -- Capture local player sprite from VRAM (only rebuilds image when sprite changes)
+  -- Always attempt local sprite capture. The capture routine already no-ops
+  -- when it cannot find a valid player OAM entry.
   Sprite.captureLocalPlayer()
 
   -- Duel module tick (expire timeouts for fallback overlay)
@@ -1185,6 +1331,9 @@ local function update()
         log("Declined duel from: " .. duelAction.requesterId)
       end
     elseif duelAction.action == "cancel" then
+      if duelAction.targetId then
+        Network.send({ type = "duel_cancel", targetId = duelAction.targetId })
+      end
       log("Duel cancelled (no response or timeout)")
     elseif duelAction.action == "accepted" then
       log("Duel accepted — proceeding to battle")
@@ -1220,7 +1369,7 @@ local function update()
     end
   end
 
-  -- Send sprite update if sprite changed
+  -- Send sprite update when local capture reports a meaningful change.
   if Sprite.hasChanged() and State.connected then
     local spriteData = Sprite.getLocalSpriteData()
     if spriteData then
@@ -1228,13 +1377,32 @@ local function update()
         type = "sprite_update",
         data = spriteData
       })
+      State.lastSpriteSendFrame = State.frameCounter
+    end
+  elseif State.connected and (State.frameCounter - State.lastSpriteSendFrame) >= SPRITE_HEARTBEAT then
+    local spriteData = Sprite.getLocalSpriteData()
+    if spriteData then
+      Network.send({
+        type = "sprite_update",
+        data = spriteData
+      })
+      State.lastSpriteSendFrame = State.frameCounter
     end
   end
+
+  local regainedGameplayPos = (currentPos ~= nil) and (not State.hadGameplayPosLastFrame)
+  State.hadGameplayPosLastFrame = (currentPos ~= nil)
 
   if currentPos then
     -- Read camera early (needed for early movement detection AND render)
     local cameraX = HAL.readCameraX()
     local cameraY = HAL.readCameraY()
+
+    if regainedGameplayPos and State.connected then
+      sendPositionUpdate(currentPos)
+      State.lastSentPosition = currentPos
+      State.lastIdleHeartbeatFrame = State.frameCounter
+    end
 
     -- Detect movement state
     if positionChanged(currentPos, State.lastPosition) then
@@ -1242,11 +1410,23 @@ local function update()
       local mapChanged = currentPos.mapId ~= State.lastPosition.mapId
                       or currentPos.mapGroup ~= State.lastPosition.mapGroup
       if mapChanged then
+        local oldMapGroup = State.lastPosition.mapGroup
+        local oldMapId = State.lastPosition.mapId
+        local dx = math.abs(currentPos.x - State.lastPosition.x)
+        local dy = math.abs(currentPos.y - State.lastPosition.y)
+        if ENABLE_DEBUG then
+          log(string.format("Map change %d:%d -> %d:%d (dx=%d dy=%d)",
+            oldMapGroup, oldMapId, currentPos.mapGroup, currentPos.mapId, dx, dy))
+        end
+
         sendPositionUpdate(currentPos)
         State.lastPosition = currentPos
         State.lastSentPosition = currentPos
         State.sendCooldown = SEND_RATE_MOVING
-        Occlusion.clearCache()
+        State.lastIdleHeartbeatFrame = State.frameCounter
+        -- Keep camera continuity across connected-map seams (GBAPK-like behavior),
+        -- but reset injected OAM/projection allocations.
+        Render.clearGhostCache({ preserveCamera = true })
         Duel.reset()
         -- Scan for sWarpData after natural map change (calibrates warp system)
         HAL.findSWarpData()
@@ -1375,6 +1555,14 @@ local function update()
       sendPositionUpdate(currentPos)
       State.lastSentPosition = currentPos
       State.sendCooldown = SEND_RATE_IDLE
+      State.lastIdleHeartbeatFrame = State.frameCounter
+    end
+
+    if State.connected and not State.isMoving
+      and (State.frameCounter - State.lastIdleHeartbeatFrame) >= POSITION_HEARTBEAT_IDLE then
+      sendPositionUpdate(currentPos)
+      State.lastSentPosition = currentPos
+      State.lastIdleHeartbeatFrame = State.frameCounter
     end
 
     State.sendCooldown = math.max(0, State.sendCooldown - 1)
@@ -1382,13 +1570,13 @@ local function update()
     -- Update sub-tile camera tracking for smooth ghost scrolling
     Render.updateCamera(currentPos.x, currentPos.y, cameraX, cameraY)
 
-    -- Draw overlay
-    drawOverlay(currentPos)
-  else
-    -- Position read failed
-    if State.frameCounter % 300 == 0 then -- Every 5 seconds
-      log("Warning: Failed to read player position")
-    end
+  end
+
+  -- Draw overlay using render fallback position (keeps ghosts visible in menus).
+  if renderPos then
+    drawOverlay(renderPos)
+  elseif rawCurrentPos == nil and State.frameCounter % 300 == 0 then -- Every 5 seconds
+    log("Warning: Failed to read player position")
   end
 
   -- Flush outgoing messages to file (once per frame)

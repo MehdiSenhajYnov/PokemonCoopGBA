@@ -35,14 +35,92 @@ local players = {}
 --[[
   Copy position fields into a new table
 ]]
+local function copyConnections(connections)
+  if type(connections) ~= "table" then
+    return nil
+  end
+
+  local out = {}
+  for _, conn in ipairs(connections) do
+    if type(conn) == "table" then
+      out[#out + 1] = {
+        direction = tonumber(conn.direction),
+        offset = tonumber(conn.offset),
+        mapGroup = tonumber(conn.mapGroup),
+        mapId = tonumber(conn.mapId),
+      }
+    end
+  end
+  return out
+end
+
 local function copyPos(pos)
+  local connections = copyConnections(pos.connections)
+  local connectionCount = tonumber(pos.connectionCount)
+  if connectionCount == nil and connections then
+    connectionCount = #connections
+  end
+
   return {
     x = pos.x,
     y = pos.y,
     mapId = pos.mapId,
     mapGroup = pos.mapGroup,
-    facing = pos.facing or 1
+    facing = pos.facing or 1,
+    borderX = pos.borderX,
+    borderY = pos.borderY,
+    connectionCount = connectionCount,
+    connections = connections
   }
+end
+
+local function positionMapKey(pos)
+  if type(pos) ~= "table" then
+    return nil
+  end
+  if pos.mapGroup == nil or pos.mapId == nil then
+    return nil
+  end
+  return string.format("%d:%d", tonumber(pos.mapGroup) or -1, tonumber(pos.mapId) or -1)
+end
+
+local function hasProjectionMeta(pos)
+  if type(pos) ~= "table" then
+    return false
+  end
+  local borderX = tonumber(pos.borderX)
+  local borderY = tonumber(pos.borderY)
+  return borderX ~= nil and borderY ~= nil and borderX > 0 and borderY > 0
+end
+
+local function normalizePositionForPlayer(player, pos)
+  local normalized = copyPos(pos)
+  local key = positionMapKey(pos)
+  if not key or not player then
+    return normalized
+  end
+
+  if hasProjectionMeta(pos) then
+    player.metaByMap[key] = {
+      borderX = tonumber(pos.borderX),
+      borderY = tonumber(pos.borderY),
+      connectionCount = tonumber(pos.connectionCount),
+      connections = copyConnections(pos.connections),
+    }
+  else
+    local cached = player.metaByMap[key]
+    if cached then
+      normalized.borderX = cached.borderX
+      normalized.borderY = cached.borderY
+      normalized.connectionCount = cached.connectionCount
+      normalized.connections = copyConnections(cached.connections)
+    end
+  end
+
+  if normalized.connectionCount == nil and normalized.connections then
+    normalized.connectionCount = #normalized.connections
+  end
+  return normalized
 end
 
 --[[
@@ -104,25 +182,29 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint)
 
   -- First time seeing this player: snap to position, empty queue
   if not players[playerId] then
-    players[playerId] = {
-      current = copyPos(newPosition),
+    local firstPlayer = {
+      metaByMap = {},
+      current = nil,
       queue = {},
       animFrom = nil,
       animProgress = 0,
       state = "idle",
       lastTimestamp = timestamp,
     }
+    firstPlayer.current = normalizePositionForPlayer(firstPlayer, newPosition)
+    players[playerId] = firstPlayer
     return
   end
 
   local player = players[playerId]
+  local normalizedPos = normalizePositionForPlayer(player, newPosition)
   local ref = lastQueuedPos(player)
 
   -- Teleport detection: map change or large distance jump
-  if not isSameMap(ref, newPosition)
-    or distance(ref, newPosition) > TELEPORT_THRESHOLD then
+  if not isSameMap(ref, normalizedPos)
+    or distance(ref, normalizedPos) > TELEPORT_THRESHOLD then
     -- Flush queue and snap
-    player.current = copyPos(newPosition)
+    player.current = copyPos(normalizedPos)
     player.queue = {}
     player.animFrom = nil
     player.animProgress = 0
@@ -131,10 +213,20 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint)
   end
 
   -- Deduplication: ignore if same tile + map as the reference position
-  if isSamePosition(ref, newPosition) then
+  if isSamePosition(ref, normalizedPos) then
     -- Exception: if only facing changed and queue is empty, update directly
-    if ref.facing ~= newPosition.facing and #player.queue == 0 then
-      player.current.facing = newPosition.facing
+    if #player.queue == 0 then
+      player.current.facing = normalizedPos.facing or player.current.facing
+      player.current.borderX = normalizedPos.borderX or player.current.borderX
+      player.current.borderY = normalizedPos.borderY or player.current.borderY
+      if normalizedPos.connections then
+        player.current.connections = copyConnections(normalizedPos.connections)
+      end
+      if normalizedPos.connectionCount ~= nil then
+        player.current.connectionCount = tonumber(normalizedPos.connectionCount)
+      elseif player.current.connections then
+        player.current.connectionCount = #player.current.connections
+      end
     end
     -- Still update lastTimestamp so next duration calc is accurate
     if timestamp then
@@ -167,7 +259,7 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint)
   player.lastTimestamp = timestamp
 
   -- Enqueue waypoint with duration
-  local wp = copyPos(newPosition)
+  local wp = copyPos(normalizedPos)
   wp.duration = duration
   table.insert(player.queue, wp)
 
@@ -241,6 +333,10 @@ function Interpolate.step(dt)
           player.current.y = lerp(player.animFrom.y, target.y, t)
           player.current.mapId = target.mapId
           player.current.mapGroup = target.mapGroup
+          player.current.borderX = target.borderX
+          player.current.borderY = target.borderY
+          player.current.connectionCount = target.connectionCount
+          player.current.connections = copyConnections(target.connections)
 
           -- Switch facing at halfway point
           if t >= 0.5 then

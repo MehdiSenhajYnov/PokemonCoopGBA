@@ -28,15 +28,20 @@ local localCache = {
   tileIndex = nil,
   palBank = nil,
   hFlip = false,
+  vFlip = false,
   width = 0,
   height = 0,
   img = nil,
   tileBytes = nil,   -- raw tile data string for network
   palette = nil,     -- palette array (16 ARGB values)
+  paletteBgr = nil,  -- palette array (16 BGR555 values)
   changed = false,
+  revision = 0,
 }
 
--- Cache for remote player sprites: playerId -> {img, width, height}
+-- Cache for remote player sprites:
+-- playerId -> {img, width, height, tileBytes, palette, paletteBgr, hFlip, vFlip,
+--              revision, spriteHash, paletteHash}
 local remoteCache = {}
 
 -- No cached OAM index — OAM indices shuffle every frame.
@@ -53,6 +58,45 @@ local function bgr555ToARGB(bgr555)
   local g8 = (g5 << 3) | (g5 >> 2)
   local b8 = (b5 << 3) | (b5 >> 2)
   return 0xFF000000 | (r8 << 16) | (g8 << 8) | b8
+end
+
+local function argbToBgr555(color)
+  local c = tonumber(color) or 0
+  local r8 = (c >> 16) & 0xFF
+  local g8 = (c >> 8) & 0xFF
+  local b8 = c & 0xFF
+  local r5 = math.floor((r8 + 4) / 8) & 0x1F
+  local g5 = math.floor((g8 + 4) / 8) & 0x1F
+  local b5 = math.floor((b8 + 4) / 8) & 0x1F
+  return r5 | (g5 << 5) | (b5 << 10)
+end
+
+local function hashString(bytes)
+  local h = 2166136261
+  for i = 1, #bytes do
+    h = ((h ~ string.byte(bytes, i)) * 16777619) & 0xFFFFFFFF
+  end
+  return h
+end
+
+local function hashPaletteBgr(paletteBgr)
+  local h = 2166136261
+  if type(paletteBgr) ~= "table" then
+    return h
+  end
+  for i = 0, 15 do
+    local v = (paletteBgr[i] or paletteBgr[i + 1] or 0) & 0xFFFF
+    h = ((h ~ v) * 16777619) & 0xFFFFFFFF
+  end
+  return h
+end
+
+local function makeSpriteHash(tileBytes, paletteBgr, width, height, hFlip, vFlip, palBank)
+  local tileHash = hashString(tileBytes or "")
+  local paletteHash = hashPaletteBgr(paletteBgr)
+  local flags = ((hFlip and 1 or 0) << 1) | (vFlip and 1 or 0)
+  local spriteHash = string.format("%08X:%08X:%d:%d:%d:%d", tileHash, paletteHash, width or 0, height or 0, flags, palBank or -1)
+  return spriteHash, tileHash, paletteHash
 end
 
 --[[
@@ -132,22 +176,24 @@ local function findPlayerOAM()
   -- Collect all 16x32 candidates near screen center
   local candidates = {}
   for i = 0, 127 do
-    local attr0, attr1, attr2 = HAL.readOAMEntry(i)
-    local entry = parseOAMEntry(attr0, attr1, attr2)
+    if not (HAL.isGhostReservedOAMIndex and HAL.isGhostReservedOAMIndex(i)) then
+      local attr0, attr1, attr2 = HAL.readOAMEntry(i)
+      local entry = parseOAMEntry(attr0, attr1, attr2)
 
-    -- Accept 16x32 (walk/run: shape=2) and 32x32 (bike: shape=0), both sizeCode=2
-    if entry and entry.sizeCode == 2 and (entry.shape == 2 or entry.shape == 0) then
-      local ey = entry.yPos
-      if ey > 160 then ey = ey - 256 end
+      -- Accept 16x32 (walk/run: shape=2) and 32x32 (bike: shape=0), both sizeCode=2
+      if entry and entry.sizeCode == 2 and (entry.shape == 2 or entry.shape == 0) then
+        local ey = entry.yPos
+        if ey > 160 then ey = ey - 256 end
 
-      local cx = entry.xPos + entry.width / 2   -- expected ~120
-      local cy = ey + entry.height / 2           -- expected ~88
-      local dist = math.abs(cx - 120) + math.abs(cy - 88)
+        local cx = entry.xPos + entry.width / 2   -- expected ~120
+        local cy = ey + entry.height / 2           -- expected ~88
+        local dist = math.abs(cx - 120) + math.abs(cy - 88)
 
-      if dist <= 40 then
-        entry.oamIndex = i
-        entry._dist = dist
-        candidates[#candidates + 1] = entry
+        if dist <= 40 then
+          entry.oamIndex = i
+          entry._dist = dist
+          candidates[#candidates + 1] = entry
+        end
       end
     end
   end
@@ -262,9 +308,12 @@ function Sprite.init()
   localCache.changed = false
   localCache.tileBytes = nil
   localCache.palette = nil
+  localCache.paletteBgr = nil
   localCache.hFlip = false
+  localCache.vFlip = false
   localCache.width = 0
   localCache.height = 0
+  localCache.revision = 0
   remoteCache = {}
 end
 
@@ -295,7 +344,10 @@ function Sprite.captureLocalPlayer()
   -- Detect change: VRAM content, hFlip, or palette bank changed
   local changed = (tileBytes ~= localCache.tileBytes)
                 or (entry.hFlip ~= localCache.hFlip)
+                or (entry.vFlip ~= localCache.vFlip)
                 or (entry.palBank ~= localCache.palBank)
+                or (entry.width ~= localCache.width)
+                or (entry.height ~= localCache.height)
 
   if not changed then
     localCache.changed = false
@@ -326,11 +378,14 @@ function Sprite.captureLocalPlayer()
   localCache.tileIndex = entry.tileIndex
   localCache.palBank = entry.palBank
   localCache.hFlip = entry.hFlip
+  localCache.vFlip = entry.vFlip
   localCache.width = entry.width
   localCache.height = entry.height
   localCache.img = img
   localCache.tileBytes = tileBytes
   localCache.palette = palette
+  localCache.paletteBgr = palRaw
+  localCache.revision = localCache.revision + 1
   localCache.changed = true
 end
 
@@ -346,7 +401,7 @@ end
   Returns table with tile bytes (as array of numbers), palette, and dimensions.
 ]]
 function Sprite.getLocalSpriteData()
-  if not localCache.tileBytes or not localCache.palette then
+  if not localCache.tileBytes or not localCache.palette or not localCache.paletteBgr then
     return nil
   end
 
@@ -363,12 +418,20 @@ function Sprite.getLocalSpriteData()
     palArray[i + 1] = localCache.palette[i] or 0x00000000
   end
 
+  local palBgrArray = {}
+  for i = 0, 15 do
+    palBgrArray[i + 1] = localCache.paletteBgr[i] or 0
+  end
+
   return {
     width = localCache.width,
     height = localCache.height,
+    palBank = localCache.palBank,
     hFlip = localCache.hFlip,
+    vFlip = localCache.vFlip,
     tiles = tileArray,
     palette = palArray,
+    paletteBgr = palBgrArray,
   }
 end
 
@@ -378,37 +441,87 @@ end
   @param data      table   {width, height, hFlip, tiles (array of numbers), palette (table)}
 ]]
 function Sprite.updateFromNetwork(playerId, data)
-  if not data or not data.tiles or not data.palette then
+  if not data or not data.tiles then
     return
   end
 
   local width = data.width or 16
   local height = data.height or 32
+  local palBank = tonumber(data.palBank)
+  if palBank and (palBank < 0 or palBank > 15) then
+    palBank = nil
+  end
+  local hFlip = data.hFlip or false
+  local vFlip = data.vFlip or false
 
   -- Convert tile number array back to string
   local bytes = {}
   for i = 1, #data.tiles do
-    bytes[i] = string.char(data.tiles[i])
+    bytes[i] = string.char((data.tiles[i] or 0) & 0xFF)
   end
   local tileBytes = table.concat(bytes)
 
-  -- Palette arrives as 1-indexed array (palette[1] = color for index 0, etc.)
+  -- Palette data can arrive as:
+  -- - paletteBgr (preferred for OAM injection)
+  -- - palette ARGB (legacy path, converted back to BGR555)
   local palette = {}
+  local paletteBgr = {}
+  local hasPalette = type(data.palette) == "table"
+  local hasPaletteBgr = type(data.paletteBgr) == "table"
+
   for i = 0, 15 do
     if i == 0 then
-      palette[i] = 0x00000000 -- index 0 always transparent
+      palette[i] = 0x00000000
+      paletteBgr[i] = 0
     else
-      palette[i] = data.palette[i + 1] or 0x00000000
+      local argb = hasPalette and (data.palette[i + 1] or 0x00000000) or 0x00000000
+      local bgr = hasPaletteBgr and (data.paletteBgr[i + 1] or 0) or nil
+      if bgr == nil then
+        bgr = argbToBgr555(argb)
+      end
+      if not hasPalette then
+        argb = bgr555ToARGB(bgr)
+      end
+      palette[i] = argb
+      paletteBgr[i] = bgr
     end
   end
 
-  local img = buildImage(tileBytes, palette, width, height, data.hFlip or false, false, GHOST_ALPHA)
+  local spriteHash, _, paletteHash = makeSpriteHash(tileBytes, paletteBgr, width, height, hFlip, vFlip, palBank)
+  local existing = remoteCache[playerId]
+  if existing and existing.spriteHash == spriteHash then
+    return
+  end
+
+  local img = buildImage(tileBytes, palette, width, height, hFlip, vFlip, GHOST_ALPHA)
 
   remoteCache[playerId] = {
     img = img,
     width = width,
     height = height,
+    palBank = palBank,
+    tileBytes = tileBytes,
+    palette = palette,
+    paletteBgr = paletteBgr,
+    hFlip = hFlip,
+    vFlip = vFlip,
+    revision = (existing and existing.revision or 0) + 1,
+    spriteHash = spriteHash,
+    paletteHash = paletteHash,
   }
+end
+
+--[[
+  Get raw remote sprite data for hardware OAM rendering.
+  @param playerId string
+  @return table|nil Cache entry with tileBytes, paletteBgr, dimensions, flip, hashes
+]]
+function Sprite.getGhostRenderData(playerId)
+  local remote = remoteCache[playerId]
+  if not remote or not remote.tileBytes or not remote.paletteBgr then
+    return nil
+  end
+  return remote
 end
 
 --[[
