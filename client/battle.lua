@@ -141,7 +141,6 @@ end
 
 -- Forward declarations (defined after startLinkBattle, called from within it)
 local initLocalLinkPlayer
-local triggerLoadscript37
 
 -- ============================================================
 -- State Machine
@@ -774,23 +773,14 @@ function Battle.startLinkBattle(isMaster)
   local stateOff = config.warp.gMainStateOffset or 0x438
   pcall(writeMem16, gMainBase + stateOff, 0)
 
-  -- === Battle Entry: Loadscript(37) or direct write fallback ===
-  local scriptOk = false
-  if LINK and LINK.gScriptData and LINK.gNativeData and LINK.gScriptLoad
-     and LINK.CreateTask and LINK.Task_StartWiredCableClubBattle
-     and LINK.gSpecialVar_8000 then
-      scriptOk = triggerLoadscript37()
-  end
-
-  if scriptOk then
-      state.battleEntryMethod = "loadscript37"
-      console:log("[Battle] Loadscript(37) triggered — task will call SetMainCallback2")
-  else
-      -- Fallback: direct callback2 write (ancien approach)
-      pcall(writeMem32, config.warp.callback2Addr, battleEntryAddr)
-      state.battleEntryMethod = "direct_write"
-      console:log(string.format("[Battle] callback2 = 0x%08X (direct write)", battleEntryAddr))
-  end
+  -- === Battle Entry: Direct callback2 write ===
+  -- NOTE: loadscript(37) removed — it never changed callback2 in time (always fell back to
+  -- direct_write after 15 frames), and it created Task_StartWiredCableClubBattle (0x080D1655)
+  -- which survived the battle (outside killLinkTasks range) and overwrote savedCallback to
+  -- CB2_ReturnFromCableClubBattle, causing a post-battle save screen + double fade.
+  pcall(writeMem32, config.warp.callback2Addr, battleEntryAddr)
+  state.battleEntryMethod = "direct_write"
+  console:log(string.format("[Battle] callback2 = 0x%08X (direct write)", battleEntryAddr))
 
   -- Transition to STARTING stage
   state.stage = STAGE.STARTING
@@ -1146,52 +1136,10 @@ initLocalLinkPlayer = function()
   return true
 end
 
--- ============================================================
--- Loadscript(37) — Battle Entry via Script Engine (GBA-PK)
--- ============================================================
-
-triggerLoadscript37 = function()
-    if not LINK then return false end
-    local gSD = LINK.gScriptData
-    local gND = LINK.gNativeData
-    local gSL = LINK.gScriptLoad
-    local cTask = LINK.CreateTask
-    local tFunc = LINK.Task_StartWiredCableClubBattle
-    local sv8k = LINK.gSpecialVar_8000
-    if not (gSD and gND and gSL and cTask and tFunc and sv8k) then return false end
-
-    -- 1. Write ASM to gNativeData (cart0) — GBA-PK writes ASM FIRST
-    local asmCode = {
-        0x2101B500, 0x80014806, 0x80194B06, 0x21804A02,
-        0x47104802, 0x4600BD00,
-        cTask + 1, tFunc + 1, sv8k + 8, sv8k + 10
-    }
-    local ndOff = gND - 0x08000000
-    for i, w in ipairs(asmCode) do
-        emu.memory.cart0:write32(ndOff + (i-1)*4, w)
-    end
-
-    -- 2. Write script bytecode to gScriptData (cart0)
-    -- Adapted: skip InitLocalLinkPlayer (inlined, handled by Lua)
-    local scriptCode = {0x23000000, gND + 1, 0xFFFFFF02}
-    local sdOff = gSD - 0x08000000
-    for i, w in ipairs(scriptCode) do
-        emu.memory.cart0:write32(sdOff + (i-1)*4, w)
-    end
-
-    -- 3. Trigger script engine via gScriptLoad (IWRAM)
-    -- Mode 256 = ASM, Word 4 = gScriptData (no +1 for ASM mode)
-    local loadData = {0, 0, 256, 0, gSD, 0, 0, 0, 0, 0, 0, 0}
-    local slOff = gSL - 0x03000000
-    for i, w in ipairs(loadData) do
-        emu.memory.iwram:write32(slOff + (i-1)*4, w)
-    end
-
-    -- Verify cart0 write
-    local v = emu.memory.cart0:read32(ndOff)
-    if v ~= asmCode[1] then return false end
-    return true
-end
+-- NOTE: triggerLoadscript37 REMOVED — it created Task_StartWiredCableClubBattle (0x080D1655)
+-- which survived the battle (outside killLinkTasks range 0x08025000-0x0804A000) and
+-- overwrote savedCallback to CB2_ReturnFromCableClubBattle, causing post-battle save screen
+-- + double fade. Direct callback2 write is always used now.
 
 local function loadscriptClear()
     if not (LINK and LINK.gScriptLoad) then return end
@@ -1327,21 +1275,7 @@ function Battle.tick()
   -- === STAGE: STARTING ===
   -- GBA-PK stages 3-6: ROM patches, party exchange, comm advancement, VS screen
   if state.stage == STAGE.STARTING then
-    -- Loadscript(37) fallback: if callback2 hasn't changed after 15 frames, direct write
-    -- (Reduced from 30: loadscript37 rarely works in R&B, causing unnecessary black screen delay)
-    if state.battleEntryMethod == "loadscript37" and state.stageTimer == 15 then
-      local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
-      if okCb then
-        local isBattle = (cb2 == LINK.CB2_InitBattle or cb2 == LINK.CB2_InitBattleInternal
-            or cb2 == LINK.CB2_HandleStartBattle or cb2 == ADDRESSES.CB2_BattleMain)
-        if not isBattle then
-          console:log("[Battle] Loadscript(37) timeout — direct write fallback")
-          local entry = LINK.CB2_InitBattle or LINK.CB2_HandleStartBattle
-          if entry then pcall(writeMem32, config.warp.callback2Addr, entry) end
-          state.battleEntryMethod = "direct_fallback"
-        end
-      end
-    end
+    -- (Loadscript(37) fallback removed — direct_write is always used now)
 
     -- Keep link-related RAM values correct during init
     -- GBA-PK: 0x0F before comm advancement (engine needs it to advance through early cases)
@@ -1631,21 +1565,48 @@ function Battle.tick()
   -- No GBRS dynamic patching, no HTASS action sync, no iState restoration.
   if state.stage == STAGE.MAIN_LOOP then
 
-    -- EARLY BAIL-OUT: if callback2 is already overworld/CB2_ReturnToField, enter ENDING immediately.
-    -- This prevents maintainLinkState/enforceFlags from corrupting the overworld reload
-    -- (CB2_ReturnToField reloads map data into EWRAM — our link state writes would overwrite it).
+    -- EARLY BAIL-OUT: if callback2 is no longer BattleMainCB2, battle engine has stopped.
+    -- This catches:
+    --   (a) Normal exit: cb2 = CB2_ReturnToField or CB2_Overworld
+    --   (b) Link results screen: cb2 = CB2_InitEndLinkBattle or CB2_EndLinkBattle
+    -- For case (b), the endlinkbattle script command triggers a VS results screen
+    -- (PlayerHandleEndLinkBattle → SetBattleEndCallbacks → CB2_InitEndLinkBattle)
+    -- which causes a visible "double fade" (fade-in results, wait, fade-out, then overworld fade-in).
+    -- Fix: when cb2 leaves BattleMainCB2, force it to CB2_ReturnToField immediately,
+    -- skipping any intermediate screens. The screen is already faded to black at this point.
     if not state.forceEndPending and state.stageTimer > 10 and config and config.warp then
       local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
       if okCb then
-        local isOverworld = (cb2 == config.warp.cb2Overworld)
-        local isReturnToField = (LINK and LINK.CB2_ReturnToField and cb2 == LINK.CB2_ReturnToField)
-        if isOverworld or isReturnToField then
+        local battleMainAddr = ADDRESSES and ADDRESSES.CB2_BattleMain
+        if battleMainAddr and cb2 ~= battleMainAddr then
           state.cachedOutcome = Battle.readOutcomeRaw()
+
+          -- Force cb2 to CB2_ReturnToField if it's not already overworld/returnToField
+          local isOverworld = (cb2 == config.warp.cb2Overworld)
+          local isReturnToField = (LINK and LINK.CB2_ReturnToField and cb2 == LINK.CB2_ReturnToField)
+          if not isOverworld and not isReturnToField then
+            local returnCb = (LINK and LINK.CB2_ReturnToField) or config.warp.cb2Overworld
+            if returnCb then
+              pcall(writeMem32, config.warp.callback2Addr, returnCb)
+              -- Reset gMain.state to 0 (SetMainCallback2 normally does this)
+              local gMainBase = config.warp.callback2Addr - 4
+              local stateOffset = config.warp.gMainStateOffset or 0x438
+              pcall(writeMem32, gMainBase + stateOffset, 0)
+              -- Clear BATTLE_TYPE_LINK_IN_BATTLE (CB2_InitEndLinkBattle normally does this)
+              if ADDRESSES and ADDRESSES.gBattleTypeFlags then
+                local okF, flags = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
+                if okF and flags then
+                  pcall(writeMem32, ADDRESSES.gBattleTypeFlags, flags & ~BATTLE_TYPE_LINK_IN_BATTLE)
+                end
+              end
+              console:log(string.format("[Battle] Skipped link results screen: cb2 was 0x%08X, forced CB2_ReturnToField", cb2))
+            end
+          end
+
           state.stage = STAGE.ENDING
           state.stageTimer = 0
           state.stageClock = os.clock()
-          console:log(string.format("[Battle] Quick exit: cb2=0x%08X (overworld/returnToField) at tick=%d",
-            cb2, state.stageTimer))
+          console:log(string.format("[Battle] Quick exit: cb2=0x%08X at tick=%d", cb2, state.stageTimer))
           return
         end
       end
