@@ -12,7 +12,8 @@ local patches = {
   { name = "markBattlerExecLocal",       off = 0x040F50, expect = 0xE010, sz = 2 },
   { name = "isBattlerExecLocal",         off = 0x040EFC, expect = 0xE00E, sz = 2 },
   { name = "markAllBattlersExecLocal",   off = 0x040E88, expect = 0xE018, sz = 2 },
-  { name = "initBtlControllersBeginIntro", off = 0x032ACE, expect = 0x46C0, sz = 2 },
+  -- REMOVED: patch no longer applied (CLIENT follows slave path)
+  -- { name = "initBtlControllersBeginIntro", off = 0x032ACE, expect = 0x46C0, sz = 2 },
   { name = "nopHandleLinkSetup_SetUpBV_hi", off = 0x032494, expect = 0x46C0, sz = 2 },
   { name = "nopHandleLinkSetup_SetUpBV_lo", off = 0x032496, expect = 0x46C0, sz = 2 },
   { name = "nopHandleLinkSetup_CB2Init_hi", off = 0x036456, expect = 0x46C0, sz = 2 },

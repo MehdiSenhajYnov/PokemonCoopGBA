@@ -8,7 +8,8 @@
   Init chain: CB2_InitBattle → CB2_InitBattleInternal → CB2_HandleStartBattle → BattleMainCB2
 
   IS_MASTER: Only master gets BATTLE_TYPE_IS_MASTER (like real link cable).
-  A BEQ→NOP patch at InitBtlControllersInternal ensures slave still gets BeginBattleIntro.
+  CLIENT follows slave path in InitBtlControllersInternal (reversed positions/controllers).
+  gBattleMainFunc = BeginBattleIntro is written by Lua on CLIENT (slave path only sets dummy).
 
   Slot mapping (asymmetric):
     Master (GetMultiplayerId=0): battler 0 = Player, battler 1 = LinkOpponent
@@ -306,7 +307,7 @@ function Battle.cleanupStalePatches()
     { name = "markBattlerExecLocal",    patchVal = 0xE010, origVal = 0xD010, sz = 2, romOffset = 0x040F50 },
     { name = "isBattlerExecLocal",      patchVal = 0xE00E, origVal = 0xD00E, sz = 2, romOffset = 0x040EFC },
     { name = "markAllBattlersExecLocal", patchVal = 0xE018, origVal = 0xD018, sz = 2, romOffset = 0x040E88 },
-    { name = "initBtlControllersBeginIntro", patchVal = 0x46C0, origVal = 0xD01D, sz = 2 },
+    { name = "initBtlControllersBeginIntro", patchVal = 0x46C0, origVal = 0xD01D, sz = 2, romOffset = 0x032ACE },
     -- OLD WRONG patches (targeted PlayerBufferExecCompleted instead of HandleLinkBattleSetup):
     { name = "nopHandleLinkBattleSetup_hi", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x06F420 },
     { name = "nopHandleLinkBattleSetup_lo", patchVal = 0x46C0, origVal = nil, sz = 2, romOffset = 0x06F422 },
@@ -652,6 +653,10 @@ function Battle.startLinkBattle(isMaster)
   state.relay.pendingCmd = {}
   state.relay.processingCmd = {}
   state.relay.remoteBufferB_queue = {}
+  state.relay.activeCmd = {}             -- CLIENT: per-frame re-write data during processing
+  state.relay.lastClientBufB = {}        -- HOST: per-frame re-write of CLIENT's bufferB
+  state.relay.ctxWritten = {}            -- CLIENT: context vars written once per command (not per-frame)
+  state.relay.pendingAck = {}            -- D5: HOST waits for CLIENT ACK before activating remote battler
   state.relay.introComplete = false
 
   -- CRITICAL: Save local party BEFORE battle init!
@@ -703,9 +708,10 @@ function Battle.startLinkBattle(isMaster)
     console:log("[Battle] Pre-cleared gBattlerControllerFuncs (4 x u32 = 0)")
   end
 
-  -- Set gBlockReceivedStatus to 0x0F (bitmask: all 4 players received)
+  -- Set gBlockReceivedStatus to 0x00 (GBA-PK stage 2: clear before InitiateBattle)
+  -- Will be set to 0x03 at comm skip (stage 4-5), then 0x0F by maintainLinkState during battle.
   if LINK and LINK.gBlockReceivedStatus then
-    for i = 0, 3 do pcall(writeMem8, LINK.gBlockReceivedStatus + i, 0x0F) end
+    for i = 0, 3 do pcall(writeMem8, LINK.gBlockReceivedStatus + i, 0x00) end
   end
 
   -- Clear link status byte
@@ -949,7 +955,7 @@ function Battle.onRemoteBufferCmd(message)
   if not message or message.battler == nil then return end
   state.relay.lastRelayActivityFrame = state.stageTimer
   -- Store both bufA and ctx (attacker/target/absent/effect) for the relay protocol
-  state.relay.pendingCmd[message.battler] = { bufA = message.bufA, ctx = message.ctx }
+  state.relay.pendingCmd[message.battler] = { bufA = message.bufA, bufB = message.bufB, ctx = message.ctx }
   console:log(string.format("[Battle] CLIENT: Received bufA cmd from HOST for battler %d (cmd=0x%02X)",
     message.battler, (message.bufA and message.bufA[1]) or 0))
 end
@@ -961,6 +967,17 @@ function Battle.onRemoteBufferResp(message)
   state.relay.remoteBufferB_queue[message.battler] = message.bufB
   console:log(string.format("[Battle] HOST: Received bufB resp from CLIENT for battler %d",
     message.battler))
+end
+
+-- D5: HOST receives ACK from CLIENT (bufferA written confirmation)
+-- GBA-PK waits for FLAGS.WRITTEN before activating controller — this is our equivalent.
+function Battle.onRemoteBufferAck(message)
+  if not message or message.battler == nil then return end
+  state.relay.lastRelayActivityFrame = state.stageTimer
+  if state.relay.pendingAck then
+    state.relay.pendingAck[message.battler] = true
+  end
+  console:log(string.format("[Battle] HOST: Received ACK from CLIENT for battler %d", message.battler))
 end
 
 function Battle.onRemoteStage(remoteStage)
@@ -982,8 +999,8 @@ end
 
 local function maintainLinkState(blockRecvStatus)
   if not LINK then return end
-  -- blockRecvStatus: 0x0F during STARTING (engine needs "all received" to advance),
-  --                  0x00 during MAIN_LOOP (prevent VBlank functions from reading garbage gBlockRecvBuffer data)
+  -- blockRecvStatus: 0x0F during STARTING pre-comm-skip (engine needs "all received" to advance),
+  --                  0x03 during MAIN_LOOP (GBA-PK leaves at 0x03 after comm skip, never touches again)
   local brs = blockRecvStatus or 0x0F
   if LINK.gReceivedRemoteLinkPlayers then
     pcall(writeMem8, LINK.gReceivedRemoteLinkPlayers, 1)
@@ -997,14 +1014,10 @@ local function maintainLinkState(blockRecvStatus)
   if LINK.linkStatusByte then
     pcall(writeMem8, LINK.linkStatusByte, 0)
   end
-  -- Sanitize gBlockRecvBuffer: zero dataSize field (byte 2 in each slot) to prevent
-  -- any VBlank function from doing a garbage-sized memcpy over the EWRAM heap
-  if LINK.gBlockRecvBuffer then
-    local stride = LINK.gBlockRecvBufferStride or 0x100
-    for slot = 0, 3 do
-      pcall(writeMem8, LINK.gBlockRecvBuffer + slot * stride + 2, 0)
-    end
-  end
+  -- NOTE: gBlockRecvBuffer byte 2 is vsScreenHealthFlagsLo (NOT dataSize).
+  -- Previously zeroed here to prevent VBlank garbage memcpy, but ROM patch #10
+  -- (NOP TryReceiveLinkBattleData) already prevents that. Zeroing byte 2 destroyed
+  -- the health flags written by injectEnemyParty, causing incorrect VS screen pokeballs.
 end
 
 -- ============================================================
@@ -1326,7 +1339,7 @@ function Battle.tick()
 
     -- Keep link-related RAM values correct during init
     -- GBA-PK: 0x0F before comm advancement (engine needs it to advance through early cases)
-    --         0x03 after comm advancement to 12 (stage 4-6: only players 0+1 "received")
+    --         0x03 after comm advancement to 7 (skip link exchange, states 7-10 auto-advance)
     -- Note: GetBlockReceivedStatus is patched to return 0x0F always, so memory value
     -- doesn't affect engine behavior — but this aligns with GBA-PK's timing.
     local brsValue = state.relay.commAdvanced and 0x03 or 0x0F
@@ -1392,18 +1405,20 @@ function Battle.tick()
       end
     end
 
-    -- === GBA-PK STAGE 4-5: Wait for comm==2, inject BAT3 data, skip to 12 ===
-    -- GBA-PK flow: wait for engine to reach comm[0]==2 (gSendBuffer ready / case 1 done),
-    -- then inject BAT3 header into gBlockRecvBuffer, set gBlockReceivedStatus=0x03,
-    -- and advance comm to 12 (skip link exchange cases 3-11).
-    -- Cases 12+ handle controller setup, VS screen, display init.
+    -- === STAGE 4-5: Wait for comm==2, inject parties, skip to state 7 ===
+    -- R&B has 11 states (0-10) in CB2_HandleStartBattle, NOT 17 like vanilla expansion.
+    -- States 3-6 do link party exchange via SendBlock/memcpy — we do this via TCP instead.
+    -- State 7 = InitBattleControllers (critical!), states 8-9 = more link data, state 10 = SetMainCallback2(BattleMainCB2).
+    -- Skip from state 2 to state 7 to avoid unnecessary link operations while preserving
+    -- the InitBattleControllers call and BattleMainCB2 transition.
+    -- NOTE: Setting comm to 12 (old value) made CB2_HandleStartBattle exit immediately
+    -- (CMP R0, #10; BHI → exit), preventing BattleMainCB2 from ever being set.
+    -- Without BattleMainCB2, RunTextPrinters() was never called → empty textboxes!
     if inHandleStartBattle and not state.relay.commAdvanced and LINK and LINK.gBattleCommunication then
       local okC, comm0 = pcall(readMem8, LINK.gBattleCommunication)
       if okC then
-        if comm0 >= 2 and comm0 < 12 then
-          -- GBA-PK Stage 4: Re-inject parties into gBlockRecvBuffer at the moment
-          -- the engine expects link data (comm==2 = gSendBuffer populated).
-          -- This ensures gBlockRecvBuffer has correct health flags for case 12+ (VS screen).
+        if comm0 >= 2 and comm0 < 7 then
+          -- Re-inject parties before skipping (ensures correct data for VS screen health flags)
           if state.opponentParty and ADDRESSES and ADDRESSES.gEnemyParty then
             Battle.injectEnemyParty(state.opponentParty)
           end
@@ -1416,17 +1431,26 @@ function Battle.tick()
             end)
           end
 
-          -- GBA-PK Stage 5: Advance comm to 12 (skip link data exchange cases 3-11)
-          pcall(writeMem8, LINK.gBattleCommunication, 12)
+          -- Skip to state 7 (InitBattleControllers) — states 3-6 are link exchange, handled by TCP
+          pcall(writeMem8, LINK.gBattleCommunication, 7)
           -- Set gBlockReceivedStatus = 0x03 (GBA-PK stage 4: players 0+1 "received")
           if LINK.gBlockReceivedStatus then
             for i = 0, 3 do pcall(writeMem8, LINK.gBlockReceivedStatus + i, 0x03) end
           end
+          -- D1 fix: OR merge instead of overwrite — preserve any bits the ROM engine set during cases 0-2
           if ADDRESSES and ADDRESSES.gBattleTypeFlags and state.battleFlags then
-            pcall(writeMem32, ADDRESSES.gBattleTypeFlags, state.battleFlags)
+            local okBtf, curBtf = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
+            if okBtf then
+              pcall(writeMem32, ADDRESSES.gBattleTypeFlags, curBtf | state.battleFlags)
+            else
+              pcall(writeMem32, ADDRESSES.gBattleTypeFlags, state.battleFlags)
+            end
           end
           pcall(writeMem8, LINK.gReceivedRemoteLinkPlayers, 1)
-          -- GBA-PK defense-in-depth: clear exec flags + bufferA at comm skip (L12855-12858)
+          -- GBA-PK defense-in-depth: clear exec flags + bufferA at comm skip
+          -- NOTE: gBattlerControllerFuncs NOT cleared here — InitBtlControllersInternal
+          -- already set them. HOST=master path (Player/LinkOpp), CLIENT=slave path
+          -- (LinkOpp/Player — reversed, matching relay localSlot/remoteSlot mapping).
           if LINK.gBattleControllerExecFlags then
             pcall(writeMem32, LINK.gBattleControllerExecFlags, 0)
           end
@@ -1439,24 +1463,30 @@ function Battle.tick()
             pcall(writeMem32, savedCbAddr, LINK.CB2_ReturnToField)
           end
           state.relay.commAdvanced = true
-          console:log(string.format("[Battle] Stage 4-5: comm[0]=%d → 12, gBlockReceivedStatus=0x03, parties re-injected", comm0))
-        elseif comm0 >= 12 then
+          console:log(string.format("[Battle] Stage 4-5: comm[0]=%d -> 7 (R&B: skip to InitBattleControllers), parties re-injected", comm0))
+        elseif comm0 >= 7 then
           state.relay.commAdvanced = true
         end
       end
     end
 
-    -- === GBA-PK STAGE 6: VS screen advancement ===
+    -- CLIENT FIX: Write gBattleMainFunc = BeginBattleIntro
+    -- Slave path sets BeginBattleIntroDummy (no-op) → battle stuck without this.
+    -- Every-frame write because the exact timing of InitBtlControllersInternal (state 1 or 7) is ambiguous.
+    if not state.isMaster and state.relay.commAdvanced and LINK
+        and LINK.gBattleMainFunc and LINK.BeginBattleIntro then
+      pcall(writeMem32, LINK.gBattleMainFunc, LINK.BeginBattleIntro)
+    end
+
+    -- === STAGE 6: Wait for states 7-10 to complete naturally ===
+    -- R&B states 7-10 auto-advance with our patches (IsLinkTaskFinished→TRUE, GetBlockReceivedStatus→0x0F).
+    -- State 10 calls SetMainCallback2(BattleMainCB2) which changes callback2 — detected below.
+    -- No manual comm advancement needed (R&B has no state 16/18 like vanilla expansion).
     if inHandleStartBattle and state.relay.commAdvanced and not state.relay.commReady and LINK and LINK.gBattleCommunication then
       local okC, comm0 = pcall(readMem8, LINK.gBattleCommunication)
-      if okC then
-        if comm0 == 16 then
-          pcall(writeMem8, LINK.gBattleCommunication, 18)
-          state.relay.commReady = true
-          console:log("[Battle] Stage 6: comm[0] 16 -> 18 (VS screen done)")
-        elseif comm0 > 16 then
-          state.relay.commReady = true
-        end
+      if okC and comm0 >= 10 then
+        state.relay.commReady = true
+        console:log(string.format("[Battle] Stage 6: comm[0]=%d reached R&B final state 10", comm0))
       end
     end
 
@@ -1514,17 +1544,12 @@ function Battle.tick()
       -- ROM patches simulate link hardware completion.
       -- We just manage exec flags and relay buffers via TCP.
 
-      -- Clear exec flags for clean start
-      if LINK and LINK.gBattleControllerExecFlags then
-        pcall(writeMem32, LINK.gBattleControllerExecFlags, 0)
-      end
-
-      -- Clear gBattleBufferA command IDs
-      local bufABase, _ = getBufferAddresses()
-      if bufABase then
-        pcall(writeMem32, bufABase, 0)
-        pcall(writeMem32, bufABase + BATTLER_BUFFER_STRIDE, 0)
-      end
+      -- NOTE: No exec flags / bufferA clear here!
+      -- GBA-PK only clears at comm skip (Text_Stage 5), NOT at MAIN_LOOP entry.
+      -- Clearing here would race with the HOST engine: if it already dispatched a
+      -- command (byte3 set) between comm skip and MAIN_LOOP, the clear destroys it
+      -- → lost commands → empty textboxes or stuck battle.
+      -- The comm skip clear at L1452-1454 is sufficient.
 
       pcall(function() emu:screenshot("transition_to_mainloop.png") end)
       console:log("[Battle] Both players ready → MAIN_LOOP (GBA-PK Stage 7: LINK active, buffer relay)")
@@ -1647,19 +1672,18 @@ function Battle.tick()
       state.relay.pendingCmd = {}
       state.relay.processingCmd = {}
       state.relay.remoteBufferB_queue = {}
+      state.relay.activeCmd = {}             -- CLIENT: per-frame re-write data during processing
+      state.relay.lastClientBufB = {}        -- HOST: per-frame re-write of CLIENT's bufferB
+      state.relay.ctxWritten = {}            -- CLIENT: context vars written once per command (not per-frame)
       state.relay.introComplete = false
+      state.relay.pendingAck = {}  -- D5: HOST waits for CLIENT ACK before activating remote battler
 
-      -- Clear exec flags for clean start
-      if LINK and LINK.gBattleControllerExecFlags then
-        pcall(writeMem32, LINK.gBattleControllerExecFlags, 0)
-      end
+      -- D4 fix: exec flags NOT cleared here — already cleared at comm skip (stage 4-5).
+      -- Clearing here would destroy any byte3 bits the engine may have set between
+      -- comm skip and MAIN_LOOP entry (race condition: engine dispatches first DoBattleIntro command).
 
-      -- Kill link tasks
-      local killedTasks, activeTasks = killLinkTasks()
-      local taskLog = {}
-      for _, t in ipairs(activeTasks) do
-        table.insert(taskLog, string.format("[%d]=0x%08X", t.idx, t.func))
-      end
+      -- D3 fix: killLinkTasks removed from MAIN_LOOP — NOP ROM patches prevent link task creation.
+      -- The killLinkTasks during STARTING phase is sufficient belt-and-suspenders.
 
       -- Re-inject parties
       if state.localPartyBackup and ADDRESSES and ADDRESSES.gPlayerParty then
@@ -1675,11 +1699,7 @@ function Battle.tick()
       end
 
       if state.sendFn then
-        state.sendFn({
-          type = "duel_stage", stage = "tasks",
-          taskCount = #activeTasks, killed = killedTasks,
-          tasks = table.concat(taskLog, " ")
-        })
+        state.sendFn({ type = "duel_stage", stage = "mainloop_entered" })
       end
 
       -- (mainloop_ready already sent in STARTING phase A — both players synced before entering MAIN_LOOP)
@@ -1692,18 +1712,17 @@ function Battle.tick()
     -- EVERY FRAME: Maintain link state + exec flags buffer relay
     -- ================================================================
 
-    maintainLinkState(0x0F)
+    -- D2 fix: use 0x03 (GBA-PK leaves gBlockReceivedStatus at 0x03 during battle, never 0x00)
+    maintainLinkState(0x03)
 
-    -- Kill link tasks every 30 frames
-    if state.stageTimer % 30 == 0 and state.stageTimer > 1 then
-      killLinkTasks()
-    end
-
-    -- Enforce gBattleTypeFlags
+    -- Enforce gBattleTypeFlags (OR merge: preserve engine-set bits like LINK_IN_BATTLE)
     if ADDRESSES and ADDRESSES.gBattleTypeFlags and state.relay.localBtf then
       local okBTF, btfNow = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
-      if okBTF and btfNow ~= state.relay.localBtf then
-        pcall(writeMem32, ADDRESSES.gBattleTypeFlags, state.relay.localBtf)
+      if okBTF then
+        local merged = btfNow | state.relay.localBtf
+        if merged ~= btfNow then
+          pcall(writeMem32, ADDRESSES.gBattleTypeFlags, merged)
+        end
       end
     end
 
@@ -1780,8 +1799,9 @@ function Battle.tick()
         -- ============================================================
         -- HOST: Relay ALL battlers (like GBA-PK)
         -- GBA-PK sends bufferA for EVERY battler with byte3 set.
-        -- For remote battlers: copy CLIENT's bufferB to memory.
-        -- For local battlers: relay but DON'T copy bufferB (just ACK).
+        -- D5: For REMOTE battlers, wait for CLIENT ACK before activating controller
+        --     (GBA-PK waits for FLAGS.WRITTEN before clearing byte3 + setting byte0).
+        --     For LOCAL battlers, activate immediately (HOST's own controller).
         -- ============================================================
         if state.isMaster then
           for battler = 0, 1 do
@@ -1789,12 +1809,12 @@ function Battle.tick()
             local pbit = (1 << battler)          -- PLAYERS bit in byte0
             local isRemote = (battler == remoteSlot)
 
-            -- Detect new command in byte3 for ANY battler
+            -- Phase 1: Detect new command in byte3 for ANY battler
             if (byte3 & p2bit) ~= 0 and not state.relay.pendingRelay[battler] then
+              state.relay.lastClientBufB[battler] = nil  -- new cycle: clear previous per-frame re-write data
               local bufAAddr = bufABase + battler * BATTLER_BUFFER_STRIDE
               local bufA = readEWRAMBlock(bufAAddr, BUFFER_READ_SIZE)
               -- GBA-PK also sends bufferB alongside bufferA (L13038-13046)
-              -- CLIENT controllers may read bufferB for context before overwriting it
               local bufBAddr = bufBBase + battler * BATTLER_BUFFER_STRIDE
               local bufB = readEWRAMBlock(bufBAddr, BUFFER_READ_SIZE)
 
@@ -1828,46 +1848,74 @@ function Battle.tick()
                   ctx = ctx
                 })
                 state.relay.lastRelayActivityFrame = state.stageTimer
-
-                -- Clear byte3, set PLAYERS+PLAYERS2 in byte0 (network wait)
-                byte3 = byte3 & ~p2bit
-                byte0 = byte0 | pbit | (1 << (4 + battler))
                 state.relay.pendingRelay[battler] = true
+                state.relay.pendingAck[battler] = nil  -- clear any stale ACK
+
+                if isRemote then
+                  -- D5: REMOTE battler — DON'T activate yet, wait for CLIENT ACK
+                  -- byte3 stays set → engine stays blocked until ACK arrives (GBA-PK FLAGS.WRITTEN)
+                else
+                  -- LOCAL battler — activate immediately (HOST's own controller)
+                  byte3 = byte3 & ~p2bit
+                  byte0 = byte0 | pbit | (1 << (4 + battler))
+                end
 
                 if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
-                  console:log(string.format("[Battle] HOST: Sent bufA for battler %d %s (cmd=0x%02X)",
-                    battler, isRemote and "REMOTE" or "LOCAL", bufA[1] or 0))
+                  console:log(string.format("[Battle] HOST: Sent bufA for battler %d %s (cmd=0x%02X)%s",
+                    battler, isRemote and "REMOTE" or "LOCAL", bufA[1] or 0,
+                    isRemote and " (waiting ACK)" or " (activated)"))
                 end
               end
             end
 
-            -- Check completion: controller done AND CLIENT responded
-            if state.relay.pendingRelay[battler] then
-              local controllerDone = (byte0 & pbit) == 0
-              local hasBufB = state.relay.remoteBufferB_queue[battler] ~= nil
-
-              if controllerDone and hasBufB then
-                if isRemote then
-                  -- REMOTE battler: write CLIENT's bufferB to memory
-                  local bufBAddr = bufBBase + battler * BATTLER_BUFFER_STRIDE
-                  writeEWRAMBlock(bufBAddr, state.relay.remoteBufferB_queue[battler])
-                end
-                -- LOCAL battler: don't copy bufferB (HOST's own controller wrote it)
-                -- Just ACK and clear, like GBA-PK (battler 1/3 = no copy)
-
-                -- Clear PLAYERS2 in byte0
-                byte0 = byte0 & ~(1 << (4 + battler))
-                state.relay.pendingRelay[battler] = false
-                state.relay.remoteBufferB_queue[battler] = nil
-
-                if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
-                  console:log(string.format("[Battle] HOST: bufB done for battler %d %s%s",
-                    battler, isRemote and "REMOTE" or "LOCAL", isRemote and " (written)" or " (ACK only)"))
-                end
-              elseif controllerDone and not hasBufB then
-                -- Controller done but no bufferB yet — keep PLAYERS2 to signal waiting
-                byte0 = byte0 | (1 << (4 + battler))
+            -- Phase 1.5 (D5): REMOTE battler — ACK received, now activate controller
+            if state.relay.pendingRelay[battler] and isRemote and state.relay.pendingAck[battler] then
+              byte3 = byte3 & ~p2bit
+              byte0 = byte0 | pbit | (1 << (4 + battler))
+              state.relay.pendingAck[battler] = nil
+              if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                console:log(string.format("[Battle] HOST: ACK received for REMOTE battler %d — controller activated", battler))
               end
+            end
+
+            -- Phase 2: Check completion — controller done AND CLIENT responded
+            if state.relay.pendingRelay[battler] then
+              -- Guard: only check completion if controller has been activated
+              -- For REMOTE pre-ACK: byte0 doesn't have pbit/p2bit, skip completion check
+              local activated = not isRemote or (byte0 & (pbit | (1 << (4 + battler)))) ~= 0
+              if activated then
+                local controllerDone = (byte0 & pbit) == 0
+                local hasBufB = state.relay.remoteBufferB_queue[battler] ~= nil
+
+                if controllerDone and hasBufB then
+                  if isRemote then
+                    -- REMOTE battler: write CLIENT's bufferB to memory
+                    local bufBAddr = bufBBase + battler * BATTLER_BUFFER_STRIDE
+                    writeEWRAMBlock(bufBAddr, state.relay.remoteBufferB_queue[battler])
+                    state.relay.lastClientBufB[battler] = state.relay.remoteBufferB_queue[battler]
+                  end
+                  -- LOCAL battler: don't copy bufferB (HOST's own controller wrote it)
+
+                  -- Clear PLAYERS2 in byte0
+                  byte0 = byte0 & ~(1 << (4 + battler))
+                  state.relay.pendingRelay[battler] = false
+                  state.relay.remoteBufferB_queue[battler] = nil
+
+                  if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                    console:log(string.format("[Battle] HOST: bufB done for battler %d %s%s",
+                      battler, isRemote and "REMOTE" or "LOCAL", isRemote and " (written)" or " (ACK only)"))
+                  end
+                elseif controllerDone and not hasBufB then
+                  -- Controller done but no bufferB yet — keep PLAYERS2 to signal waiting
+                  byte0 = byte0 | (1 << (4 + battler))
+                end
+              end
+            end
+
+            -- Per-frame re-write: persist CLIENT's bufferB for remote battler
+            if not state.relay.pendingRelay[battler] and isRemote and state.relay.lastClientBufB[battler] then
+              local bufBAddr = bufBBase + battler * BATTLER_BUFFER_STRIDE
+              writeEWRAMBlock(bufBAddr, state.relay.lastClientBufB[battler])
             end
           end
 
@@ -1903,11 +1951,17 @@ function Battle.tick()
                 if ctx.effect and LINK.gEffectBattler then pcall(writeMem8, LINK.gEffectBattler, ctx.effect) end
               end
 
+              -- D5: Send ACK to HOST — bufferA is written, HOST can activate controller
+              if state.sendFn then
+                state.sendFn({ type = "duel_buffer_ack", battler = battler })
+              end
+
               -- Set PLAYERS in byte0 to trigger local controller
               byte0 = byte0 | pbit
               -- Clear any byte3 bit for this battler (HOST already sent it)
               byte3 = byte3 & ~p2bit
 
+              state.relay.activeCmd[battler] = state.relay.pendingCmd[battler]  -- keep for per-frame re-write
               state.relay.pendingCmd[battler] = nil
               state.relay.processingCmd[battler] = true
 
@@ -1916,14 +1970,31 @@ function Battle.tick()
                   battler, (cmdData.bufA and cmdData.bufA[1]) or 0))
               end
 
-            -- Priority 2: No HOST command — handle byte3 locally
-            -- (for battlers HOST handles on its own, e.g. HOST's local = CLIENT's remote)
-            elseif (byte3 & p2bit) ~= 0 and not state.relay.processingCmd[battler] then
-              byte3 = byte3 & ~p2bit
-              byte0 = byte0 | pbit  -- PLAYERS only, no PLAYERS2
-              if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
-                console:log(string.format("[Battle] CLIENT: Local byte3→byte0 for battler %d (no HOST cmd)", battler))
+            end
+            -- NOTE: No Priority 2 / local byte3 handling. CLIENT is 100% HOST-driven.
+            -- Engine sets byte3 → stays blocked (exec flags ≠ 0) → HOST detects on its side
+            -- → sends duel_buffer_cmd via TCP → Priority 1 fires → command processed.
+            -- Stuck detection (600f timeout) handles HOST never responding.
+
+            -- Per-frame re-write: persist bufferA while controller processes
+            if state.relay.processingCmd[battler] and state.relay.activeCmd[battler] then
+              local cmdData = state.relay.activeCmd[battler]
+              local bufAAddr = bufABase + battler * BATTLER_BUFFER_STRIDE
+              writeEWRAMBlock(bufAAddr, cmdData.bufA or cmdData)
+              -- Context vars: write ONCE at first frame only (GBA-PK style).
+              -- The engine may change gBattlerAttacker/Target during multi-frame commands
+              -- (multi-target moves, ability triggers). Per-frame re-write would undo those changes.
+              if not state.relay.ctxWritten[battler] then
+                local ctx = cmdData.ctx
+                if ctx and LINK then
+                  if ctx.attacker and LINK.gBattlerAttacker then pcall(writeMem8, LINK.gBattlerAttacker, ctx.attacker) end
+                  if ctx.target and LINK.gBattlerTarget then pcall(writeMem8, LINK.gBattlerTarget, ctx.target) end
+                  if ctx.absent and LINK.gAbsentBattlerFlags then pcall(writeMem8, LINK.gAbsentBattlerFlags, ctx.absent) end
+                  if ctx.effect and LINK.gEffectBattler then pcall(writeMem8, LINK.gEffectBattler, ctx.effect) end
+                end
+                state.relay.ctxWritten[battler] = true
               end
+              -- NOTE: Do NOT re-write bufferB — the controller is actively writing into it
             end
 
             -- Check if controller finished processing a HOST command
@@ -1944,6 +2015,8 @@ function Battle.tick()
                 end
 
                 state.relay.processingCmd[battler] = false
+                state.relay.activeCmd[battler] = nil  -- clear per-frame re-write data
+                state.relay.ctxWritten[battler] = nil -- allow fresh ctx write on next command
 
                 if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
                   console:log(string.format("[Battle] CLIENT: Sent bufB resp for battler %d", battler))
@@ -1952,8 +2025,9 @@ function Battle.tick()
             end
           end
 
-          -- CLIENT: always clear byte3 at end (HOST drives command detection)
-          byte3 = 0
+          -- NOTE: byte3 is NOT cleared here. CLIENT leaves byte3 intact so the engine
+          -- stays blocked (exec flags ≠ 0) until HOST relays each command via TCP.
+          -- Priority 1 clears byte3 per-bit when HOST command arrives (GBA-PK model).
         end
 
         -- Write exec flags back to memory
@@ -2342,6 +2416,9 @@ function Battle.reset()
   state.relay.pendingCmd = {}
   state.relay.processingCmd = {}
   state.relay.remoteBufferB_queue = {}
+  state.relay.activeCmd = {}             -- CLIENT: per-frame re-write data during processing
+  state.relay.lastClientBufB = {}        -- HOST: per-frame re-write of CLIENT's bufferB
+  state.relay.ctxWritten = {}            -- CLIENT: context vars written once per command (not per-frame)
   state.relay.lastRelayActivityFrame = 0
 end
 

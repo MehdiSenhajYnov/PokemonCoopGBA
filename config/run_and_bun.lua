@@ -220,6 +220,7 @@ return {
     gBattleOutcome = 0x02023716,            -- FOUND: u8, 0=ongoing, 1=won, 2=lost (after gBattleCommunication[8])
 
     -- Battle phase function pointers (for context-aware exec safety)
+    BeginBattleIntro = 0x08039C31,                 -- from literal pool at 0x032AF4 in InitBtlControllersInternal
     DoBattleIntro = 0x0803ACB1,                    -- Intro animation (send-out Pokemon sprites, health boxes)
     HandleTurnActionSelectionState = 0x0803BE39,   -- Action selection (Fight/Bag/Pokemon/Run menu)
     RunTurnActionsFunctions = 0x0803E371,          -- Turn execution (animations, damage)
@@ -250,12 +251,12 @@ return {
       -- GetMultiplayerId is patched separately in battle.lua applyPatches() (MOV R0,#n; BX LR)
 
       -- IsLinkTaskFinished: MOV R0, #1; BX LR (always returns TRUE)
-      -- CB2_HandleStartBattle checks this 4x — blocks Cases 1,3,5,7 if FALSE
-      -- Without this patch, link sync cases never advance
+      -- CB2_HandleStartBattle calls this 5x in R&B — states 1,3,5,8,10 (gates on link completion)
+      -- Without this patch, link sync states never advance
       isLinkTaskFinished = { romOffset = 0x0A568, value = 0x47702001, size = 4 },
 
       -- GetBlockReceivedStatus: MOV R0, #15; BX LR (always returns 0x0F = all received)
-      -- CB2_HandleStartBattle checks (result & 0x0F) == 0x0F — blocks Cases 2,4,6,8
+      -- CB2_HandleStartBattle calls this 4x in R&B — states 2,4,6,9 (gates on link data receipt)
       getBlockReceivedStatus = { romOffset = 0x0A598, value = 0x4770200F, size = 4 },
 
       -- PlayerBufferExecCompleted +0x1C: BEQ → B (skip link check)
@@ -273,11 +274,9 @@ return {
       -- memcpy to gBattleBufferA → commands never written → exec flags never cleared!
       prepBufDataTransferLocal = { romOffset = 0x032FC0, value = 0xE008, size = 2 },
 
-      -- InitBtlControllersInternal: BEQ→NOP so slave gets BeginBattleIntro
-      -- Original: 0xD01D (BEQ +0x3A → skip to slave path), Patch: 0x46C0 (NOP = MOV R8,R8)
-      -- Without this, slave (no IS_MASTER) gets gBattleMainFunc = BeginBattleIntroDummy (empty) → stuck on VS screen
-      -- With NOP, slave falls through to BeginBattleIntro write BUT continues to slave controller setup (reversed positions)
-      initBtlControllersBeginIntro = { romOffset = 0x032ACE, value = 0x46C0, size = 2 },
+      -- initBtlControllersBeginIntro: REMOVED (2026-02-11)
+      -- BEQ at 0x032ACE skips ENTIRE master path (controllers+positions), not just BeginBattleIntro.
+      -- CLIENT follows slave path (reversed positions). gBattleMainFunc written by Lua instead.
 
       -- NOP the BL to HandleLinkBattleSetup (GBA-PK critical patch!)
       -- HandleLinkBattleSetup() at 0x0803240C creates link buffer tasks:
@@ -303,6 +302,23 @@ return {
       -- We use TCP relay, not link hardware, so this function is never needed.
       nopTryRecvLinkBattleData_hi = { romOffset = 0x0007BC, value = 0x46C0, size = 2 },
       nopTryRecvLinkBattleData_lo = { romOffset = 0x0007BE, value = 0x46C0, size = 2 },
+
+      -- NOP memcpy calls in CB2_HandleStartBattle that copy from gBlockRecvBuffer (garbage).
+      -- R&B has 11 states (0-10). States 4 and 6 copy link-received data into party arrays.
+      -- We inject parties via TCP, so these memcpy calls overwrite correct data with garbage.
+      -- States 3-6 are skipped by comm advancement (2->7), but NOP'd as defense-in-depth.
+      -- State 4 (+0x031C, +0x032E): memcpy 200 bytes each (gPlayerParty/gEnemyParty batches)
+      -- State 6 (+0x0434, +0x0446): memcpy 100 bytes each (individual Pokemon copies)
+      -- State 9 (+0x05AA): memcpy 4 bytes only (RNG seed, harmless — not NOP'd)
+      -- func_start = 0x037B44 (CB2_HandleStartBattle)
+      nopMemcpyHSB_s4a_hi = { romOffset = 0x037E60, value = 0x46C0, size = 2 },
+      nopMemcpyHSB_s4a_lo = { romOffset = 0x037E62, value = 0x46C0, size = 2 },
+      nopMemcpyHSB_s4b_hi = { romOffset = 0x037E72, value = 0x46C0, size = 2 },
+      nopMemcpyHSB_s4b_lo = { romOffset = 0x037E74, value = 0x46C0, size = 2 },
+      nopMemcpyHSB_s6a_hi = { romOffset = 0x037F78, value = 0x46C0, size = 2 },
+      nopMemcpyHSB_s6a_lo = { romOffset = 0x037F7A, value = 0x46C0, size = 2 },
+      nopMemcpyHSB_s6b_hi = { romOffset = 0x037F8A, value = 0x46C0, size = 2 },
+      nopMemcpyHSB_s6b_lo = { romOffset = 0x037F8C, value = 0x46C0, size = 2 },
     },
   },
 

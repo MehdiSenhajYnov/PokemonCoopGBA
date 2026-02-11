@@ -625,6 +625,8 @@ local function update()
             if Battle.isActive() then Battle.onRemoteBufferCmd(message) end
           elseif message.type == "duel_buffer_resp" then
             if Battle.isActive() then Battle.onRemoteBufferResp(message) end
+          elseif message.type == "duel_buffer_ack" then
+            if Battle.isActive() then Battle.onRemoteBufferAck(message) end
           elseif message.type == "duel_choice" then
             if Battle.isActive() then Battle.onRemoteChoice(message) end
           elseif message.type == "duel_player_info" then
@@ -932,6 +934,8 @@ local function update()
         if Battle.isActive() then Battle.onRemoteBufferCmd(message) end
       elseif message.type == "duel_buffer_resp" then
         if Battle.isActive() then Battle.onRemoteBufferResp(message) end
+      elseif message.type == "duel_buffer_ack" then
+        if Battle.isActive() then Battle.onRemoteBufferAck(message) end
 
       elseif message.type == "duel_choice" then
         -- Received PvP move choice from opponent

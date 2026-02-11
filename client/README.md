@@ -23,6 +23,8 @@ mGBA Lua script for the Pokémon Co-op Framework.
 - `sprite.lua` - VRAM sprite extraction (OAM scan, 4bpp tile decode, palette, cache, network sync)
 - `occlusion.lua` - BG layer occlusion (reads BG1 tilemap, redraws cover tiles over ghosts via Painter)
 - `interpolate.lua` - Smooth ghost movement (animate-toward-target interpolation)
+- `duel.lua` - Duel system (proximity trigger, request/accept UI, A button edge detect)
+- `battle.lua` - PvP battle system (Link Battle Emulation: buffer relay with per-frame re-write, ROM patching, state machine)
 - `core.lua` - (Future) Core engine
 
 ## Configuration

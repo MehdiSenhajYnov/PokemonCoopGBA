@@ -361,7 +361,8 @@ function handleMessage(client, messageStr) {
       }
 
       case 'duel_buffer_cmd':
-      case 'duel_buffer_resp': {
+      case 'duel_buffer_resp':
+      case 'duel_buffer_ack': {
         // Relay buffer command/response to duel opponent (GBA-PK protocol)
         if (!client.roomId || !client.duelOpponent) return;
 

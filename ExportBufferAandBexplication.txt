@@ -1,0 +1,308 @@
+  Voici l'exemple multi-tour que tu as demandé, dans le contexte d'un combat
+  Pokémon réel :
+
+  Workflow BufferA / BufferB — Combat Pokémon 2 tours
+
+  Setup : Mehdi (HOST, Chimchar) vs Alex (CLIENT, Piplup)
+
+  ---
+  Tour 1 — Choix d'action
+
+  Étape 1 : Le moteur de combat demande "que veux-tu faire ?"
+
+  Le moteur écrit dans BufferA pour chaque combattant :
+  Battler: 0 (Chimchar de Mehdi)
+  BufferA (commande): CHOOSE_ACTION = "Affiche le menu Combat/Sac/Pokémon/Fuite"
+  Qui le traite: Mehdi localement
+  ────────────────────────────────────────
+  Battler: 1 (Piplup d'Alex)
+  BufferA (commande): CHOOSE_ACTION = "Affiche le menu Combat/Sac/Pokémon/Fuite"
+  Qui le traite: Relayé à Alex via TCP
+  Côté Mehdi (HOST) :
+  - Battler 0 : son propre contrôleur affiche le menu. Mehdi choisit "Combat".
+  Le contrôleur écrit BufferB[0] = ACTION_FIGHT
+  - Battler 1 : Mehdi détecte le exec flag → lit BufferA[1] ET BufferB[1] →
+  envoie les deux à Alex via TCP
+
+  Côté Alex (CLIENT) :
+  - Reçoit BufferA + BufferB → les écrit en mémoire
+  - Son contrôleur local affiche le menu. Alex choisit "Combat"
+  - Le contrôleur écrit BufferB = ACTION_FIGHT
+  - Alex lit BufferB → le renvoie à Mehdi via TCP
+
+  Mehdi écrit le BufferB reçu dans BufferB[1], efface le exec flag du battler 1.
+
+  → Le moteur sait maintenant : les deux veulent combattre.
+
+  ---
+  Étape 2 : Le moteur demande "quelle attaque ?"
+  Battler: 0 (Chimchar)
+  BufferA (commande): CHOOSE_MOVE
+  Contenu: Liste des attaques de Chimchar : Flammeche, Griffe, Rugissement,
+    Provoc
+  ────────────────────────────────────────
+  Battler: 1 (Piplup)
+  BufferA (commande): CHOOSE_MOVE
+  Contenu: Liste des attaques de Piplup : Ecume, Griffe, Rugissement
+  Même processus de relay :
+  - Mehdi choisit Flammeche → BufferB[0] = "move slot 0"
+  - Alex reçoit le CHOOSE_MOVE, voit ses attaques, choisit Ecume → BufferB
+  renvoyé = "move slot 0"
+
+  → Le moteur sait : Chimchar utilise Flammeche, Piplup utilise Ecume.
+
+  ---
+  Étape 3 : Le moteur exécute les attaques (animations, dégâts, texte)
+
+  Le moteur calcule : Chimchar est plus rapide → attaque en premier.
+
+  Maintenant il envoie une rafale de commandes BufferA aux deux battlers :
+  #: 1
+  Battler: 0
+  BufferA (commande): PLAY_ANIMATION (Flammeche)
+  Description: Chimchar joue l'animation d'attaque
+  ────────────────────────────────────────
+  #: 2
+  Battler: 1
+  BufferA (commande): PLAY_ANIMATION (reçoit Flammeche)
+  Description: Piplup joue l'animation de dégât
+  ────────────────────────────────────────
+  #: 3
+  Battler: 1
+  BufferA (commande): HEALTHBAR_UPDATE (-15 HP)
+  Description: La barre de vie de Piplup descend
+  ────────────────────────────────────────
+  #: 4
+  Battler: 0+1
+  BufferA (commande): PRINT_STRING "Chimchar utilise Flammeche!"
+  Description: Texte affiché
+  ────────────────────────────────────────
+  #: 5
+  Battler: 1
+  BufferA (commande): PLAY_ANIMATION (Ecume)
+  Description: Piplup attaque
+  ────────────────────────────────────────
+  #: 6
+  Battler: 0
+  BufferA (commande): PLAY_ANIMATION (reçoit Ecume)
+  Description: Chimchar reçoit l'animation
+  ────────────────────────────────────────
+  #: 7
+  Battler: 0
+  BufferA (commande): HEALTHBAR_UPDATE (-20 HP)
+  Description: La barre de Chimchar descend
+  ────────────────────────────────────────
+  #: 8
+  Battler: 0+1
+  BufferA (commande): PRINT_STRING "Piplup utilise Ecume!"
+  Description: Texte
+  Chacune de ces commandes suit le même cycle :
+  1. Moteur écrit BufferA → exec flag activé
+  2. Si battler 1 → relay TCP vers Alex (avec BufferA ET BufferB)
+  3. Contrôleur exécute (joue l'anim, etc.) → écrit BufferB = "done"
+  4. Si battler 1 → BufferB renvoyé à Mehdi via TCP
+  5. Exec flag effacé → moteur passe à la commande suivante
+
+  ---
+  Tour 2 — Pareil, boucle
+
+  Le moteur re-envoie CHOOSE_ACTION puis CHOOSE_MOVE, etc.
+
+  ---
+  Pourquoi BufferB est AUSSI envoyé avec BufferA (notre bug)
+
+  Quand le HOST envoie une commande au CLIENT, GBA-PK envoie les deux buffers :
+
+  HOST → CLIENT : { BufferA: [CHOOSE_MOVE, Ecume, Griffe, ...], BufferB:
+  [données contexte] }
+
+  BufferB contient des données de contexte que le moteur a pu écrire avant de
+  poser la commande — par exemple l'état du Pokémon actif, des flags internes,
+  etc. Sans ces données, le contrôleur du CLIENT peut lire des vieux résidus en
+  mémoire et se comporter de manière imprévisible.
+
+  Notre bug : On envoie uniquement BufferA. Alex reçoit "choisis ton attaque"
+  mais le BufferB contient des données périmées du tour précédent (ou pire, des
+  zéros). Le contrôleur lit ces données pourries → crash ou comportement
+  bizarre.
+
+  ---
+  Tu veux que je corrige les 6 bugs identifiés maintenant ?
+
+✻ Worked for 3m 24s
+
+❯ enfaite je me pose plusieurs quesiton, deja dans un premier temps meme si
+   on s'en fou un peu c'est pas un jeu esport ou quoi, mais y a pas un
+  probleme de sécurité? si je fais rien et j'attends que l'adversaire
+  m'attaque, en analysant le trafique reseau je pourrais voir quelle
+  attaque l'adversaire a utilisé et m'adapter. Mais bon en soit on s'en
+  fou.
+  Les vrai question sont :
+  Quand tu dis : "CHOOSE_ACTION = "Affiche le menu
+  Combat/Sac/Pokémon/Fuite"", CHOOSE_ACTION est le buffer A et "Affiche le
+  menu Combat/Sac/Pokémon/Fuite" est le bufferB?
+  si Mehdi, décide au debut de combattre et ducoup il a le choix des
+  attaque devant lui, on envoie l'info a Alex, mais si mehdi il rechange
+  d'avis et au final il veut changer de pokemon par exemple, l'info qu'on a
+   envoyé avant est inutile non?
+
+● Bonnes questions ! Réponses dans l'ordre :
+
+  1. Sécurité (sniff réseau)
+
+  Oui, tu as raison — en interceptant le TCP, le CLIENT pourrait voir le choix
+  du HOST avant que le tour se résolve. GBA-PK a exactement le même "problème".
+  Sur le vrai câble link GBA, les deux côtés envoyaient simultanément, donc
+  c'était plus équitable. Mais bon, comme tu dis, on s'en fiche.
+
+  2. CHOOSE_ACTION c'est quoi exactement ?
+
+  Non ! CHOOSE_ACTION n'est pas séparé entre BufferA et BufferB. C'est tout dans
+   BufferA :
+
+  - BufferA = le paquet complet de la commande. Le premier octet = l'ID de
+  commande (ex: 0x01 = CHOOSE_ACTION, 0x04 = CHOOSE_MOVE, etc.), suivi des
+  paramètres
+  - BufferB = le paquet de réponse, écrit plus tard par le contrôleur
+
+  Donc concrètement :
+
+  BufferA = [0x01, ...]     ← "Choisis ton action"
+     (le contrôleur affiche le menu, le joueur choisit)
+  BufferB = [réponse, 0x00] ← "J'ai choisi Combat"
+
+  "Affiche le menu Combat/Sac/Pokémon/Fuite" c'était juste ma traduction humaine
+   de ce que la commande 0x01 signifie. Tout est à l'intérieur de BufferA.
+
+  3. Et si Mehdi change d'avis ?
+
+  C'est la meilleure question. La réponse : il n'y a pas de gaspillage, parce
+  que BufferB n'est envoyé qu'une seule fois, avec la décision finale.
+
+  Voici ce qui se passe vraiment :
+
+  1. Le moteur envoie BufferA = CHOOSE_ACTION au contrôleur de Mehdi
+  2. Le contrôleur affiche : Combat / Sac / Pokémon / Fuite
+  3. Mehdi appuie sur "Combat"
+     → PAS de BufferB envoyé ! C'est juste le contrôleur LOCAL qui passe au
+  sous-menu
+  4. Le contrôleur affiche les attaques : Flammeche, Griffe, Rugissement...
+  5. Mehdi hésite... appuie sur B (retour)
+     → Toujours PAS de BufferB ! Le contrôleur revient au menu principal
+  6. Mehdi choisit "Pokémon" cette fois, sélectionne Monferno
+     → MAINTENANT seulement : BufferB = [ACTION_SWITCH, slot 1]
+  7. Le exec flag est effacé → le moteur lit la réponse
+
+  Toute la navigation dans les menus est 100% locale. Le contrôleur gère le
+  va-et-vient (Combat → liste attaques → retour → Pokémon → choix) sans rien
+  envoyer au réseau. Il écrit BufferB uniquement quand le joueur a confirmé son
+  choix final.
+
+  Donc dans le relay :
+  - HOST envoie CHOOSE_ACTION au CLIENT → 1 seul message réseau
+  - Le CLIENT navigue dans ses menus localement (peut changer d'avis 10 fois)
+  - Le CLIENT renvoie BufferB avec le choix final → 1 seul message retour
+
+  Pas de messages inutiles, pas de changement d'avis qui pollue le réseau.
+
+✻ Brewed for 56s
+
+❯ ducoup BufferA et bufferB sont pas envoyé au meme temps si??
+
+● Exactement, ils ne sont pas envoyés au même moment dans le sens où leur rôle
+  est différent :
+
+  Phase 1 — HOST → CLIENT (commande) :
+  HOST envoie BufferA + BufferB ensemble, dans 1 seul message TCP
+  BufferA = la commande ("choisis ton action")
+  BufferB = des données de contexte/résidus que le moteur a pu écrire avant
+
+  Phase 2 — CLIENT → HOST (réponse, plus tard) :
+  CLIENT renvoie BufferB seul, dans 1 message TCP
+  BufferB = maintenant écrasé par le contrôleur avec la réponse ("j'ai choisi
+  Flammeche")
+
+  Donc le cycle complet c'est :
+
+  HOST ──[BufferA + BufferB]──► CLIENT     (commande)
+           ... le joueur CLIENT réfléchit, navigue les menus ...
+  HOST ◄──[BufferB]────────── CLIENT       (réponse)
+
+  Le truc un peu contre-intuitif c'est que BufferB fait l'aller ET le retour —
+  il part avec BufferA au début (comme contexte), puis il revient seul à la fin
+  (comme réponse). C'est pour ça que GBA-PK envoie les deux ensemble : le CLIENT
+   a besoin d'avoir le même état mémoire que le HOST avant que son contrôleur
+  commence à travailler.
+
+  Et c'est exactement notre bug : nous on envoie seulement BufferA au CLIENT. Le
+   CLIENT se retrouve avec un vieux BufferB qui traîne en mémoire → son
+  contrôleur lit des données périmées.
+
+❯ enfaite c'est ca que j'ai pas compris, pourquoi bufferB fait l'aller et
+  le retour, qu'est ce qu'il fait a l'allée avec la question?
+
+● Honnêtement, c'est surtout une mesure de synchronisation mémoire.
+
+  Le moteur de combat GBA n'a jamais été conçu pour du réseau. Sur un vrai câble
+   link, les deux GBA partagent la même mémoire via DMA — BufferA et BufferB
+  sont juste des zones mémoire que le moteur et le contrôleur lisent/écrivent
+  librement. Y'a pas de séparation stricte "A = question, B = réponse" au niveau
+   hardware.
+
+  Donc dans certains cas, quand le moteur écrit une commande dans BufferA, il a
+  aussi laissé des données dans BufferB — par exemple des résultats d'un calcul
+  précédent, l'état du Pokémon actif, ou juste des résidus du tour d'avant. Le
+  contrôleur, quand il s'exécute, peut potentiellement lire les deux buffers.
+
+  GBA-PK copie les deux pour se dire :
+
+  "Je sais pas exactement ce que le contrôleur va lire en mémoire. Plutôt que de
+   deviner, je copie tout. Comme ça le CLIENT a exactement le même état mémoire
+  que le HOST au moment où son contrôleur démarre."
+
+  C'est pas que BufferB contient une info spécifique à l'aller — c'est que ne
+  pas l'envoyer, c'est risquer que le CLIENT ait des données différentes du
+  HOST, et là ça peut partir en vrille.
+
+  En résumé : c'est du "mieux vaut trop copier que pas assez" pour compenser le
+  fait qu'on simule un câble link par du TCP.
+
+✻ Brewed for 35s
+
+❯ et buffer A et bufferB, on les a en x2? Genre un pour Mehdi et l'autre
+  pour Alex?
+
+● Oui exactement ! Il y a un BufferA et un BufferB par combattant :
+
+  Mémoire GBA :
+
+  gBattleBufferA ──┬── [Battler 0] 512 octets  → Chimchar de Mehdi
+                   └── [Battler 1] 512 octets  → Piplup d'Alex
+
+  gBattleBufferB ──┬── [Battler 0] 512 octets  → Chimchar de Mehdi
+                   └── [Battler 1] 512 octets  → Piplup d'Alex
+
+  Dans le code, on accède au bon battler avec un décalage :
+
+  BufferA du battler 0 = gBattleBufferA + 0 × 0x200
+  BufferA du battler 1 = gBattleBufferA + 1 × 0x200
+
+  (0x200 = 512 octets = la taille réservée par battler)
+
+  Et en combat double, ça monte à 4 :
+
+  Battler 0 → Pokémon 1 de Mehdi
+  Battler 1 → Pokémon 1 d'Alex
+  Battler 2 → Pokémon 2 de Mehdi
+  Battler 3 → Pokémon 2 d'Alex
+
+  C'est aussi pour ça qu'il y a des exec flags par battler — quand le moteur
+  écrit une commande dans BufferA[1], il active le flag du battler 1. Le HOST
+  voit "ah, le battler 1 a une commande en attente" → c'est celui d'Alex → il
+  relay via TCP.
+
+  Les commandes du battler 0 (Mehdi), le HOST les traite directement en local,
+  pas besoin de réseau.
+
+❯ /export
+  ⎿  Export cancelled

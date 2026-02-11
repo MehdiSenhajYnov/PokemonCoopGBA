@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Phase 3B - PvP Battle System: Remove InitBtlControllersInternal NOP — CLIENT slave path (2026-02-11)
+- **ROOT CAUSE**: CLIENT had same battler→controller mapping as HOST (both followed master path)
+  - The NOP patch (0x46C0) at ROM 0x032ACE replaced a BEQ (0xD01D) that tests `gBattleTypeFlags & IS_MASTER`
+  - BEQ skips the ENTIRE master path: BeginBattleIntro + controllers (Player/LinkOpponent) + positions (0/1)
+  - NOP made CLIENT fall through to master path → same mapping as HOST → CLIENT saw HOST's moves via buffer relay
+- **config/run_and_bun.lua**: Removed `initBtlControllersBeginIntro` from active patches table
+  - Added `BeginBattleIntro = 0x08039C31` address (from literal pool at 0x032AF4)
+- **client/battle.lua**: CLIENT now follows slave path (reversed positions/controllers)
+  - Added `romOffset = 0x032ACE` to stale cleanup entry (ensures previous sessions' NOP is restored)
+  - Added every-frame write of `gBattleMainFunc = BeginBattleIntro` on CLIENT after comm skip
+    (slave path only sets `BeginBattleIntroDummy` which is a no-op → battle would be stuck without this)
+  - Updated header comment and gBattlerControllerFuncs comment to document HOST=master/CLIENT=slave paths
+- **scripts/ToUse/verify_patches.lua**: Removed `initBtlControllersBeginIntro` from verification list
+- **scripts/ToUse/syntax_check_battle.lua**: Removed assertion for patch in config
+- **No relay protocol changes needed** — `localSlot=1, remoteSlot=0` on CLIENT already assumes reversed positions
+
+### Phase 3B - PvP Battle System: CB2_HandleStartBattle Comm Skip Fix (2026-02-11)
+- **ROOT CAUSE FOUND**: Empty textbox after "Go [PokemonName]!" on both HOST and CLIENT
+  - R&B's CB2_HandleStartBattle has **11 states (0-10)**, NOT 17 like vanilla pokeemerald-expansion
+  - Dispatch: `CMP R0, #10; BHI → exit` — any state > 10 exits immediately without processing
+  - Old code set `gBattleCommunication[0] = 12` (out of range!) → state 10 never reached
+  - State 10 calls `SetMainCallback2(BattleMainCB2)` — without it, `RunTextPrinters()` never called → empty textboxes
+- **client/battle.lua**: Changed comm skip target from 12 to 7 (InitBattleControllers)
+  - States 1-6: link exchange (SendBlock/GetBlockReceivedStatus) — skipped, handled by TCP relay
+  - State 7: InitBattleControllers — first state that must execute
+  - States 7-10: auto-advance with existing ROM patches (IsLinkTaskFinished→TRUE, GetBlockReceivedStatus→0x0F)
+  - State 10: `SetMainCallback2(BattleMainCB2)` — the FINAL state, now reached correctly
+  - Updated stage 6 VS screen detection: `comm0 >= 10` replaces old `comm0 == 16..18` checks
+- **config/run_and_bun.lua**: Added 8 NOP patches for memcpy calls in CB2_HandleStartBattle states 4 and 6
+  - Defense-in-depth against party corruption from gBlockRecvBuffer (garbage without real link hardware)
+  - State 4: 2 memcpy(200 bytes each) — gPlayerParty/gEnemyParty from gBlockRecvBuffer
+  - State 6: 2 memcpy(100 bytes each) — partial party data from gBlockRecvBuffer
+  - All 8 patches verified: BL target = 0x08347BB4 (memcpy), replaced with 0x46C0 (NOP)
+- **R&B CB2_HandleStartBattle state map** (0x08037B45, ~0x620 bytes):
+  - State 0: ShowBg, SetGpuReg (visual init)
+  - State 1: IsLinkTaskFinished → SendBlock (32 bytes)
+  - State 2: GetBlockReceivedStatus → process received data
+  - State 3: IsLinkTaskFinished → SendBlock
+  - State 4: GetBlockReceivedStatus → memcpy×2 (200 bytes each) [NOP'd]
+  - State 5: IsLinkTaskFinished → SendBlock
+  - State 6: GetBlockReceivedStatus → memcpy×2 (100 bytes each) [NOP'd]
+  - State 7: InitBattleControllers (0x08032524) ← NEW comm skip target
+  - State 8: IsLinkTaskFinished → SendBlock
+  - State 9: GetBlockReceivedStatus → memcpy (4 bytes, RNG)
+  - State 10: IsLinkTaskFinished → SetMainCallback2(BattleMainCB2) ← FINAL state
+
+### Phase 3B - PvP Battle System: Optional Fixes (2026-02-10)
+- **client/battle.lua**: Fix maintainLinkState value in MAIN_LOOP every-frame
+  - Changed `maintainLinkState(0x0F)` to `maintainLinkState(0x00)` in MAIN_LOOP every-frame section
+  - Comment at L989-990 specifies 0x00 during MAIN_LOOP (0x0F is for initial staging only)
+  - First-frame init (L1642) still uses 0x0F as intended for GBRS staging
+  - Impact: cosmetic — all code paths reading gBlockReceivedStatus are ROM-patched/NOP'd
+- **client/battle.lua**: Fix gBattleTypeFlags enforcement from overwrite to OR merge
+  - Was: `write(localBtf)` — overwrites engine value, strips any bits engine sets (e.g. LINK_IN_BATTLE 0x20)
+  - Now: `write(btfNow | localBtf)` — preserves engine-set bits while ensuring required flags present
+  - Impact: cosmetic — LINK_IN_BATTLE's only runtime check (TryReceiveLinkBattleData) is NOP'd by ROM patch #10
+
+### Phase 3B - PvP Battle System: Fix gBattlerControllerFuncs null crash (2026-02-10)
+- **client/battle.lua**: Removed gBattlerControllerFuncs clear at comm skip (was L1433-1435)
+  - Case 1 (InitBtlControllersFunctions) sets gBattlerControllerFuncs[0..3] to correct controller handlers
+  - The comm skip clear happened AFTER case 1, zeroing out all 4 function pointers
+  - When BattleMainCB2 started and called `gBattlerControllerFuncs[battler]()` → null pointer → crash/freeze
+  - Pre-clear at startLinkBattle (L704-706) is CORRECT and remains — it cleans stale pointers from previous battles
+  - REVERTS the "Clear gBattlerControllerFuncs at comm skip (GBA-PK parity)" change from earlier today
+
 ### Phase 2 - Ghosting System (Complete)
 - [x] Camera offset discovery for Run & Bun (IWRAM 0x03005DFC, 0x03005DF8)
 - [x] Ghost overlay rendering (render.lua) with Painter API
@@ -25,6 +90,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] Sprite detection reliability (lowest-tileIndex sort, variable size 16x32/32x32)
 - [x] BG layer occlusion (ghosts hidden behind buildings/trees)
 - [x] Bike sprite support (32x32 OAM detection + centered rendering)
+
+### Phase 3B - PvP Battle System: Per-Frame Buffer Re-write (2026-02-10)
+- **client/battle.lua**: Per-frame buffer re-write pattern for relay persistence
+  - **Bug fix**: `onRemoteBufferCmd` now stores `bufB` from HOST (was silently dropped)
+  - CLIENT: new `activeCmd` field — saves command data before clearing `pendingCmd`
+  - CLIENT: per-frame re-write of bufferA while controller processes
+  - CLIENT: context vars (attacker/target/absent/effect) written ONCE at first frame only (GBA-PK style)
+  - CLIENT: `activeCmd` + `ctxWritten` cleared when controller finishes and bufferB is sent back
+  - HOST: new `lastClientBufB` field — saves CLIENT's bufferB after initial write
+  - HOST: per-frame re-write of CLIENT's bufferB for remote battler (engine may overwrite between frames)
+  - HOST: `lastClientBufB` cleared when new command cycle starts (byte3 detection)
+  - Fields initialized at 3 points: startLinkBattle, MAIN_LOOP frame 1, Battle.reset()
+  - Pattern consistent with existing per-frame re-writes (gBattleTypeFlags, localPartyBackup, maintainLinkPlayers)
+  - bufferB NOT re-written on CLIENT side during processing (controller actively writes into it)
+
+### Phase 3B - PvP Battle System: CLIENT 100% HOST-driven (2026-02-10)
+- **client/battle.lua**: Removed Priority 2 local byte3 handling — CLIENT is now 100% HOST-driven (GBA-PK model)
+  - **Bug fix #1**: Removed `byte3 = 0` blanket clear at end of CLIENT loop (was silently clearing exec flags)
+    - Without Priority 2, this would skip commands entirely (engine sees exec flags = 0, advances without processing)
+    - byte3 now persists naturally; only cleared per-bit by Priority 1 when HOST command arrives
+  - **Bug fix #2**: Removed Priority 2 entirely (local byte3→byte0 fallback for CLIENT)
+    - Priority 2 processed commands locally before HOST arrived → double-processing when HOST command arrived later
+    - HOST relays ALL battler commands (both local and remote) → CLIENT doesn't need local fallback
+  - **Bug fix #3**: Race condition eliminated (implicit from removing Priority 2)
+    - Priority 2 didn't set `processingCmd[battler]` → Priority 1 could fire during active controller → bufferA corruption
+  - CLIENT now stays blocked on byte3 until HOST sends command via TCP (correct link battle model)
+  - Stuck detection (600f timeout) handles HOST never responding
+
+### Phase 3B - PvP Battle System: 4 Bug Fixes (2026-02-10)
+- **client/battle.lua**: Fix maintainLinkState overwriting vsScreenHealthFlagsLo
+  - Removed gBlockRecvBuffer byte 2 zeroing (was destroying health flags written by injectEnemyParty)
+  - Comment was wrong: byte 2 = vsScreenHealthFlagsLo, NOT dataSize (dataSize is in sBlockRecv)
+  - ROM patch #10 (NOP TryReceiveLinkBattleData) already prevents the VBlank garbage memcpy this defended against
+  - Impact: VS screen pokeballs now display correctly
+- ~~**client/battle.lua**: Clear gBattlerControllerFuncs at comm skip (GBA-PK parity)~~ **REVERTED** — see "Fix gBattlerControllerFuncs null crash" above
+  - ~~Added `gBattlerControllerFuncs` clear alongside exec flags + bufferA at stage 4-5 comm skip~~
+  - ~~Matches GBA-PK stage 5 behavior: clear all 3 controller state arrays~~
+- **client/battle.lua**: Correct gBlockReceivedStatus initial value (GBA-PK parity)
+  - Changed from 0x0F to 0x00 at startLinkBattle() (GBA-PK stage 2: clear before InitiateBattle)
+  - Progression now matches GBA-PK: 0x00 (start) → 0x03 (comm skip) → 0x0F (maintainLinkState)
+- **client/battle.lua**: Context vars written once per command, not per-frame
+  - New `ctxWritten[battler]` flag prevents per-frame overwrite of gBattlerAttacker/Target/etc.
+  - Engine may change these during multi-frame commands (multi-target moves, ability triggers)
+  - bufferA still re-written per-frame (controller reads it each frame)
 
 ### Phase 3B - PvP Battle System: Context Vars & Stuck Recovery (2026-02-10)
 - **config/run_and_bun.lua**: Found 4 battler context variable addresses via BSS layout analysis
@@ -370,6 +479,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Version History
 
+- **0.7.6-alpha** (2026-02-11): Remove InitBtlControllersInternal NOP — CLIENT follows slave path (reversed positions), gBattleMainFunc written by Lua
+- **0.7.5-alpha** (2026-02-11): CB2_HandleStartBattle comm skip fix (12→7) — R&B has 11 states not 17, empty textbox root cause found + 8 NOP memcpy patches
+- **0.7.4-alpha** (2026-02-10): Optional fixes — maintainLinkState 0x00 in MAIN_LOOP, gBattleTypeFlags OR merge
+- **0.7.3-alpha** (2026-02-10): Fix gBattlerControllerFuncs null crash — removed comm skip clear (case 1 already sets them)
+- **0.7.2-alpha** (2026-02-10): Per-frame buffer re-write — bufA/ctx persistence on CLIENT, bufB persistence on HOST, bufB storage fix
 - **0.7.1-alpha** (2026-02-10): Context vars found + stuck detection + multi-frame forceEnd + ping timeout
 - **0.3.2-alpha** (2026-02-03): Bike sprite support — 32x32 OAM detection, sort-based player identification, centered rendering
 - **0.3.1-alpha** (2026-02-03): Waypoint queue interpolation — FIFO queue + adaptive catch-up, exact path fidelity at any speedhack rate
@@ -409,6 +523,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] Context vars found (gBattlerAttacker/Target/Effect/Absent)
 - [x] Stuck detection (relay timeout + ping timeout + safety timeout)
 - [x] forceEnd multi-frame 0x37 injection
+- [x] Per-frame buffer re-write (bufA/ctx on CLIENT, bufB on HOST)
+- [x] CB2_HandleStartBattle comm skip fix (12→7) — R&B 11 states, empty textbox root cause
+- [x] 8 NOP memcpy patches (states 4/6 defense-in-depth)
+- [x] CLIENT slave path fix — reversed positions/controllers, gBattleMainFunc via Lua
 - [ ] Multi-turn PvP battles
 - [ ] BATTLE_FLAGS system (items, exp, heal, level cap)
 

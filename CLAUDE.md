@@ -254,7 +254,7 @@ PokemonCoop/
 - [x] **2-player PvP end-to-end VERIFIED** (2026-02-08): both enter battle, exchange moves, both exit cleanly
 - [x] **DoBattleIntro fix** (2026-02-09→10): LINK stays active throughout. IS_MASTER only on HOST eliminates DMA corruption root cause.
 - [x] **NOP HandleLinkBattleSetup** (2 call sites) + NOP TryReceiveLinkBattleData in VBlank — prevents link buffer tasks and VBlank corruption
-- [x] **InitBtlControllersBeginIntro NOP** — slave gets BeginBattleIntro despite no IS_MASTER
+- [x] **InitBtlControllersInternal slave path** — CLIENT follows slave path (reversed positions/controllers), gBattleMainFunc = BeginBattleIntro written by Lua
 - [x] **Loadscript(37)** battle entry via GBA script engine (GBA-PK style) + direct write fallback
 - [x] **initLocalLinkPlayer** — reads SaveBlock2 for real player name on VS screen
 - [x] **killLinkTasks** — scans gTasks IWRAM, kills link-range tasks every 30 frames
@@ -268,6 +268,14 @@ PokemonCoop/
 - [x] **Context vars found** (2026-02-10): gBattlerAttacker=0x0202358C, gBattlerTarget=0x0202358D, gEffectBattler=0x0202358F, gAbsentBattlerFlags=0x02023591 (BSS layout analysis from battle_main.c anchors)
 - [x] **Stuck detection** (2026-02-10): relay timeout (600f/10s) + ping timeout (900f/15s) + forceEnd multi-frame 0x37 injection (GBA-PK approach)
 - [x] **forceEnd rewrite** (2026-02-10): forceEndPending flag + 30-frame 0x37 re-injection loop (was single-shot). Safety timeout 5min→1min.
+- [x] **Per-frame buffer re-write** (2026-02-10): bufferA re-written every frame on CLIENT while controller processes (activeCmd pattern). HOST re-writes CLIENT's bufferB every frame (lastClientBufB). Fix: onRemoteBufferCmd now stores bufB from HOST.
+- [x] **4 bug fixes** (2026-02-10): (1) maintainLinkState no longer zeroes vsScreenHealthFlagsLo — VS screen pokeballs correct, (2) ~~gBattlerControllerFuncs cleared at comm skip~~ REVERTED — clearing after case 1 nulls controllers → crash, (3) gBlockReceivedStatus starts at 0x00 not 0x0F (GBA-PK staging), (4) context vars written once per command not per-frame (ctxWritten flag — prevents overwriting engine state during multi-frame commands)
+- [x] **Fix gBattlerControllerFuncs null crash** (2026-02-10): Removed comm skip clear of gBattlerControllerFuncs — InitBtlControllersInternal sets them (HOST=master path, CLIENT=slave path with reversed positions)
+- [x] **CLIENT 100% HOST-driven** (2026-02-10): Removed Priority 2 (local byte3 handling) + `byte3 = 0` blanket clear. CLIENT stays blocked on byte3 until HOST relays command via TCP. Fixes: (1) byte3 blanket clear skipping commands, (2) double-processing local then HOST, (3) processingCmd race condition.
+- [x] **Optional fixes** (2026-02-10): maintainLinkState(0x0F→0x00) in MAIN_LOOP every-frame + gBattleTypeFlags OR merge (preserves engine-set bits like LINK_IN_BATTLE)
+- [x] **CRITICAL: R&B comm skip 12→7** (2026-02-11): R&B CB2_HandleStartBattle has 11 states (0-10), NOT 17 like expansion. Old comm=12 was OUT OF RANGE (CMP #10, BHI→exit), so SetMainCallback2(BattleMainCB2) at state 10 never ran → RunTextPrinters() never called → empty textboxes after "Go [PokemonName]!". Fix: skip to state 7 (InitBattleControllers). States 7-10 auto-advance with existing ROM patches.
+- [x] **8 NOP memcpy patches** (2026-02-11): NOP'd 4 memcpy BL calls in CB2_HandleStartBattle states 4/6 that copy from gBlockRecvBuffer (garbage) into gPlayerParty/gEnemyParty. States are skipped by comm advancement (2→7), NOP'd as defense-in-depth.
+- [x] **CLIENT slave path fix** (2026-02-11): Removed InitBtlControllersInternal NOP — BEQ skips ENTIRE master path (controllers+positions), not just BeginBattleIntro. CLIENT follows slave path (reversed positions matching relay mapping). gBattleMainFunc = BeginBattleIntro written by Lua.
 - [ ] Multi-turn PvP battles (current: 1-turn KO due to save state Pokemon levels)
 - [ ] BATTLE_FLAGS system (items, exp, heal, level cap, overwrite — GBA-PK feature parity)
 
@@ -331,6 +339,7 @@ Ces adresses sont celles d'Émeraude vanilla. Run & Bun modifiant énormément l
 - **gRngValue**: IWRAM 0x03005D90 (32-bit)
 - **CB2_InitBattle**: 0x080363C1 (ROM, 204 bytes) — proper battle init entry point
 - **CB2_InitBattleInternal**: 0x0803648D (ROM, ~4KB) — multi-frame init state machine
+- **CB2_HandleStartBattle**: 0x08037B45 (ROM, ~0x620 bytes) — 11 states (0-10), NOT 17 like expansion
 - **CB2_BattleMain (BattleMainCB2)**: 0x0803816D (ROM) — CORRECTED (was 0x08094815)
 - **SetMainCallback2**: 0x08000544 (ROM)
 - **gBattlerAttacker**: 0x0202358C (u8, BSS layout from battle_main.c)
@@ -478,6 +487,6 @@ Sent during `waiting_party` phase. Server relays to duel opponent. Used by `Batt
 
 ---
 
-**Dernière mise à jour**: 2026-02-10
-**Version**: 0.7.1-alpha
-**Status**: Phase 3B - PvP Battle System (context vars found, stuck detection, multi-frame forceEnd)
+**Dernière mise à jour**: 2026-02-11
+**Version**: 0.7.6-alpha
+**Status**: Phase 3B - PvP Battle System (FIX: CLIENT slave path — reversed positions, gBattleMainFunc via Lua)
