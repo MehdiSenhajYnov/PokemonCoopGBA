@@ -14,9 +14,58 @@ local WRAM_START = 0x00000000  -- WRAM is accessed at offset 0 in emu.memory.wra
 local WRAM_SIZE = 0x00040000   -- 256KB
 local IWRAM_START = 0x00000000 -- IWRAM is accessed at offset 0 in emu.memory.iwram
 local IWRAM_SIZE = 0x00008000  -- 32KB
+local OBJ_VRAM_BASE = 0x06010000
+local OBJ_VRAM_OFFSET_BASE = 0x00010000
+local OBJ_VRAM_OFFSET_END = 0x00018000
+local GHOST_OBJ_VRAM_BASE = 0x06013C00
+local GHOST_OBJ_VRAM_STRIDE = 0x600
+local GHOST_OBJ_MAX_SLOTS = 6
+local GHOST_OBJ_TILE_BYTES = 32
+local OAM_ENTRY_BYTES = 8
+local OAM_BUFFER_DEFAULT_OFFSET = 0x38
+local GHOST_OAM_BASE_DEFAULT = 110
+local MAP_HEADER_CONFIRM_FRAMES = 3
+local ROM_BASE = 0x08000000
+local ROM_END = 0x0A000000
 
 -- Current game configuration
 local config = nil
+local oamBufferAddr = nil
+local ghostOamBaseIndex = GHOST_OAM_BASE_DEFAULT
+local mapHeaderAddr = nil
+local mapHeaderScanAttempts = 0
+local mapHeaderCandidateAddr = nil
+local mapHeaderCandidateFrames = 0
+
+local function resolveOAMBufferAddress(gameConfig)
+  if not gameConfig then
+    return nil
+  end
+
+  if gameConfig.render and gameConfig.render.oamBufferAddr then
+    return gameConfig.render.oamBufferAddr
+  end
+
+  local gMainBase = nil
+  if gameConfig.render and gameConfig.render.gMainAddr then
+    gMainBase = gameConfig.render.gMainAddr
+  elseif gameConfig.battle and gameConfig.battle.gMainAddr then
+    gMainBase = gameConfig.battle.gMainAddr
+  elseif gameConfig.warp and gameConfig.warp.callback2Addr then
+    gMainBase = gameConfig.warp.callback2Addr - 4
+  end
+
+  if not gMainBase then
+    return nil
+  end
+
+  local oamOffset = OAM_BUFFER_DEFAULT_OFFSET
+  if gameConfig.render and gameConfig.render.oamBufferOffset then
+    oamOffset = gameConfig.render.oamBufferOffset
+  end
+
+  return gMainBase + oamOffset
+end
 
 --[[
   Initialize HAL with game-specific configuration
@@ -24,7 +73,28 @@ local config = nil
 ]]
 function HAL.init(gameConfig)
   config = gameConfig
+  oamBufferAddr = resolveOAMBufferAddress(gameConfig)
+  mapHeaderAddr = nil
+  mapHeaderScanAttempts = 0
+  mapHeaderCandidateAddr = nil
+  mapHeaderCandidateFrames = 0
+  ghostOamBaseIndex = GHOST_OAM_BASE_DEFAULT
+  if gameConfig and gameConfig.render and type(gameConfig.render.oamBaseIndex) == "number" then
+    ghostOamBaseIndex = math.floor(gameConfig.render.oamBaseIndex)
+  end
+  if ghostOamBaseIndex < 0 then ghostOamBaseIndex = 0 end
+  if ghostOamBaseIndex > 127 then ghostOamBaseIndex = 127 end
+  if ghostOamBaseIndex + GHOST_OBJ_MAX_SLOTS - 1 > 127 then
+    ghostOamBaseIndex = 128 - GHOST_OBJ_MAX_SLOTS
+  end
   console:log("[HAL] Initialized with config: " .. (gameConfig.name or "Unknown"))
+  if oamBufferAddr then
+    console:log(string.format("[HAL] Engine OAM buffer: 0x%08X", oamBufferAddr))
+  else
+    console:log("[HAL] Engine OAM buffer unknown (hardware OAM writes only)")
+  end
+  console:log(string.format("[HAL] Ghost OAM reserve: [%d..%d]",
+    ghostOamBaseIndex, ghostOamBaseIndex + GHOST_OBJ_MAX_SLOTS - 1))
   if config.warp then
     console:log(string.format("[HAL] Warp config OK: callback2=0x%08X cb2LoadMap=0x%08X",
       config.warp.callback2Addr, config.warp.cb2LoadMap))
@@ -35,6 +105,52 @@ function HAL.init(gameConfig)
   else
     console:log("[HAL] WARNING: No warp config in profile — duel warp will not work")
   end
+end
+
+--[[
+  Get engine OAM buffer address (gMain.oamBuffer equivalent), when known.
+  @return number|nil Absolute address
+]]
+function HAL.getOAMBufferAddress()
+  return oamBufferAddr
+end
+
+--[[
+  Get reserved OAM base index for ghost injection.
+  @return number
+]]
+function HAL.getGhostOAMBaseIndex()
+  return ghostOamBaseIndex
+end
+
+--[[
+  Get reserved OAM index for a ghost slot.
+  @param ghostSlot number Slot index (0..GHOST_OBJ_MAX_SLOTS-1)
+  @return number|nil OAM index
+]]
+function HAL.getGhostOAMIndexForSlot(ghostSlot)
+  local slot = tonumber(ghostSlot)
+  if not slot or slot < 0 or slot >= GHOST_OBJ_MAX_SLOTS then
+    return nil
+  end
+  local idx = ghostOamBaseIndex + slot
+  if idx < 0 or idx > 127 then
+    return nil
+  end
+  return idx
+end
+
+--[[
+  Check whether an OAM index is reserved for ghost injection.
+  @param index number OAM entry index
+  @return boolean
+]]
+function HAL.isGhostReservedOAMIndex(index)
+  local i = tonumber(index)
+  if not i or i < 0 or i > 127 then
+    return false
+  end
+  return i >= ghostOamBaseIndex and i < (ghostOamBaseIndex + GHOST_OBJ_MAX_SLOTS)
 end
 
 --[[
@@ -135,6 +251,82 @@ local function safeReadIWRAM(address, size)
   end
 
   return nil
+end
+
+local function isValidRomPointer(address)
+  return type(address) == "number" and address >= ROM_BASE and address < ROM_END
+end
+
+local function toCartOffset(address)
+  return address - ROM_BASE
+end
+
+local function readCart8(address)
+  if not isValidRomPointer(address) then
+    return nil
+  end
+  local offset = toCartOffset(address)
+  local ok, value = pcall(function()
+    return emu.memory.cart0:read8(offset)
+  end)
+  if ok then
+    return value
+  end
+  return nil
+end
+
+local function readCart16(address)
+  if not isValidRomPointer(address) then
+    return nil
+  end
+
+  local offset = toCartOffset(address)
+  local ok16, value16 = pcall(function()
+    return emu.memory.cart0:read16(offset)
+  end)
+  if ok16 and value16 then
+    return value16
+  end
+
+  local b0 = readCart8(address)
+  local b1 = readCart8(address + 1)
+  if b0 == nil or b1 == nil then
+    return nil
+  end
+  return (b0 & 0xFF) | ((b1 & 0xFF) << 8)
+end
+
+local function readCart32(address)
+  if not isValidRomPointer(address) then
+    return nil
+  end
+
+  local offset = toCartOffset(address)
+  local ok32, value32 = pcall(function()
+    return emu.memory.cart0:read32(offset)
+  end)
+  if ok32 and value32 then
+    return value32
+  end
+
+  local b0 = readCart8(address)
+  local b1 = readCart8(address + 1)
+  local b2 = readCart8(address + 2)
+  local b3 = readCart8(address + 3)
+  if b0 == nil or b1 == nil or b2 == nil or b3 == nil then
+    return nil
+  end
+  return (b0 & 0xFF) | ((b1 & 0xFF) << 8) | ((b2 & 0xFF) << 16) | ((b3 & 0xFF) << 24)
+end
+
+local function toSigned32(value)
+  if value == nil then
+    return nil
+  end
+  if value >= 0x80000000 then
+    return value - 0x100000000
+  end
+  return value
 end
 
 --[[
@@ -310,6 +502,255 @@ function HAL.readFacing()
     return nil
   end
   return readOffset(config.offsets.facing, 1)
+end
+
+local function readMapLayoutSize(mapLayoutPtr)
+  if not isValidRomPointer(mapLayoutPtr) then
+    return nil, nil
+  end
+  local width = readCart32(mapLayoutPtr)
+  local height = readCart32(mapLayoutPtr + 4)
+  if not width or not height then
+    return nil, nil
+  end
+  if width <= 0 or height <= 0 or width > 1024 or height > 1024 then
+    return nil, nil
+  end
+  local borderPtr = readCart32(mapLayoutPtr + 8)
+  local mapPtr = readCart32(mapLayoutPtr + 0x0C)
+  if not isValidRomPointer(borderPtr) or not isValidRomPointer(mapPtr) then
+    return nil, nil
+  end
+  return width, height
+end
+
+local function validateMapHeaderAt(address, x, y)
+  local mapLayoutPtr = safeRead(address, 4)
+  local eventsPtr = safeRead(address + 4, 4)
+  local connectionsPtr = safeRead(address + 0x0C, 4)
+  local mapLayoutId = safeRead(address + 0x12, 2)
+  local mapType = safeRead(address + 0x17, 1)
+  if not mapLayoutPtr or not eventsPtr or not mapLayoutId then
+    return false
+  end
+  if not isValidRomPointer(mapLayoutPtr) or not isValidRomPointer(eventsPtr) then
+    return false
+  end
+  if mapType and mapType > 64 then
+    return false
+  end
+
+  local width, height = readMapLayoutSize(mapLayoutPtr)
+  if not width or not height then
+    return false
+  end
+  if x and y then
+    if x < 0 or y < 0 or x > (width + 32) or y > (height + 32) then
+      return false
+    end
+  end
+
+  if connectionsPtr and connectionsPtr ~= 0 then
+    if not isValidRomPointer(connectionsPtr) then
+      return false
+    end
+    local count = readCart32(connectionsPtr)
+    local tablePtr = readCart32(connectionsPtr + 4)
+    if not count or count < 0 or count > 32 then
+      return false
+    end
+    if count > 0 and not isValidRomPointer(tablePtr) then
+      return false
+    end
+  end
+
+  return true
+end
+
+local function scoreMapHeaderAt(addr, currentX, currentY)
+  if type(addr) ~= "number" then
+    return -1
+  end
+  if not validateMapHeaderAt(addr, currentX, currentY) then
+    return -1
+  end
+
+  local mapLayoutPtr = safeRead(addr, 4)
+  local width, height = readMapLayoutSize(mapLayoutPtr)
+  if not width or not height then
+    return -1
+  end
+
+  local connectionsPtr = safeRead(addr + 0x0C, 4)
+  local mapLayoutId = safeRead(addr + 0x12, 2) or 0
+  local mapType = safeRead(addr + 0x17, 1) or 0xFF
+  local score = 0
+
+  if mapLayoutId > 0 and mapLayoutId < 10000 then
+    score = score + 2
+  end
+  if mapType <= 64 then
+    score = score + 1
+  end
+  if currentX and currentY and currentX >= 0 and currentY >= 0
+    and currentX <= (width + 32) and currentY <= (height + 32) then
+    score = score + 3
+  end
+
+  if connectionsPtr == 0 then
+    score = score + 1
+  elseif isValidRomPointer(connectionsPtr) then
+    local count = readCart32(connectionsPtr)
+    local tablePtr = readCart32(connectionsPtr + 4)
+    if count and count >= 0 and count <= 32 and (count == 0 or isValidRomPointer(tablePtr)) then
+      score = score + 2
+    else
+      score = score - 2
+    end
+  end
+
+  -- gMapHeader is typically in higher EWRAM.
+  if addr >= 0x02030000 then
+    score = score + 1
+  end
+
+  return score
+end
+
+local function findMapHeaderAddress(currentX, currentY)
+  local bestAddr = nil
+  local bestScore = -1
+
+  for offset = 0, WRAM_SIZE - 0x20, 4 do
+    local addr = 0x02000000 + offset
+    local score = scoreMapHeaderAt(addr, currentX, currentY)
+    if score > bestScore then
+      bestScore = score
+      bestAddr = addr
+    end
+  end
+
+  return bestAddr, bestScore
+end
+
+local function getMapHeaderAddress(currentX, currentY)
+  if mapHeaderAddr and validateMapHeaderAt(mapHeaderAddr, currentX, currentY) then
+    mapHeaderCandidateAddr = nil
+    mapHeaderCandidateFrames = 0
+    return mapHeaderAddr
+  end
+
+  mapHeaderScanAttempts = mapHeaderScanAttempts + 1
+  local configured = nil
+  local configuredScore = -1
+  if config and config.overworld and config.overworld.gMapHeaderAddr then
+    configured = tonumber(config.overworld.gMapHeaderAddr)
+    configuredScore = scoreMapHeaderAt(configured, currentX, currentY)
+    if configuredScore < 0 then
+      configured = nil
+    end
+  end
+
+  local scanned, scannedScore = findMapHeaderAddress(currentX, currentY)
+  local chosen = nil
+  if configured and scanned and scanned ~= configured and scannedScore > configuredScore then
+    chosen = scanned
+  else
+    chosen = configured or scanned
+  end
+
+  if chosen and validateMapHeaderAt(chosen, currentX, currentY) then
+    if mapHeaderCandidateAddr == chosen then
+      mapHeaderCandidateFrames = mapHeaderCandidateFrames + 1
+    else
+      mapHeaderCandidateAddr = chosen
+      mapHeaderCandidateFrames = 1
+    end
+
+    if mapHeaderCandidateFrames >= MAP_HEADER_CONFIRM_FRAMES then
+      mapHeaderAddr = chosen
+      mapHeaderCandidateAddr = nil
+      mapHeaderCandidateFrames = 0
+
+      if configured and scanned and configured ~= scanned and chosen == scanned then
+        console:log(string.format("[HAL] gMapHeader override: config 0x%08X -> scan 0x%08X (attempt %d)",
+          configured, scanned, mapHeaderScanAttempts))
+      else
+        console:log(string.format("[HAL] gMapHeader detected at 0x%08X (attempt %d)", mapHeaderAddr, mapHeaderScanAttempts))
+      end
+      return mapHeaderAddr
+    end
+
+    if mapHeaderScanAttempts <= 3 or mapHeaderScanAttempts % 120 == 0 then
+      console:log(string.format(
+        "[HAL] gMapHeader candidate 0x%08X (%d/%d)",
+        chosen,
+        mapHeaderCandidateFrames,
+        MAP_HEADER_CONFIRM_FRAMES
+      ))
+    end
+  else
+    mapHeaderCandidateAddr = nil
+    mapHeaderCandidateFrames = 0
+  end
+
+  mapHeaderAddr = nil
+  if mapHeaderScanAttempts <= 3 or mapHeaderScanAttempts % 120 == 0 then
+    console:log("[HAL] WARNING: could not resolve gMapHeader for map connections")
+  end
+  return nil
+end
+
+--[[
+  Read deterministic map projection metadata used for cross-map ghost rendering.
+  Returns map width/height (borderX/borderY) and the active map connection list.
+]]
+function HAL.readMapProjectionMeta(currentX, currentY)
+  local headerAddr = getMapHeaderAddress(currentX, currentY)
+  if not headerAddr then
+    return nil
+  end
+
+  local mapLayoutPtr = safeRead(headerAddr, 4)
+  local width, height = readMapLayoutSize(mapLayoutPtr)
+  if not width or not height then
+    return nil
+  end
+
+  local connections = {}
+  local connectionsPtr = safeRead(headerAddr + 0x0C, 4)
+  if connectionsPtr and connectionsPtr ~= 0 and isValidRomPointer(connectionsPtr) then
+    local count = readCart32(connectionsPtr) or 0
+    local tablePtr = readCart32(connectionsPtr + 4)
+    if count > 0 and count <= 32 and isValidRomPointer(tablePtr) then
+      for i = 0, count - 1 do
+        local base = tablePtr + i * 12
+        local direction = readCart8(base)
+        local offsetRaw = readCart32(base + 4)
+        local mapGroup = readCart8(base + 8)
+        local mapId = readCart8(base + 9)
+        local offset = toSigned32(offsetRaw)
+
+        if direction and offset and mapGroup and mapId
+          and direction >= 1 and direction <= 4 then
+          connections[#connections + 1] = {
+            direction = direction,
+            offset = offset,
+            mapGroup = mapGroup,
+            mapId = mapId,
+          }
+        end
+      end
+    end
+  end
+
+  return {
+    borderX = width,
+    borderY = height,
+    connectionCount = #connections,
+    connections = connections,
+    mapHeaderAddr = headerAddr,
+  }
 end
 
 --[[
@@ -1606,17 +2047,54 @@ function HAL.testMemoryAccess()
 end
 
 --[[
-  Read a single OAM entry (3x u16: attr0, attr1, attr2)
+  Read one OAM entry from the engine OAM buffer (gMain.oamBuffer-like area).
   @param index OAM index (0-127)
-  @return attr0, attr1, attr2 or nil on error
+  @return attr0, attr1, attr2 or nils
 ]]
-function HAL.readOAMEntry(index)
-  if not index or index < 0 or index > 127 then
+local function readEngineOAMEntry(index)
+  if not oamBufferAddr then
     return nil, nil, nil
   end
 
+  local base = oamBufferAddr + index * OAM_ENTRY_BYTES
+  local a0 = autoRead(base, 2)
+  local a1 = autoRead(base + 2, 2)
+  local a2 = autoRead(base + 4, 2)
+
+  if a0 == nil or a1 == nil or a2 == nil then
+    return nil, nil, nil
+  end
+  return a0, a1, a2
+end
+
+--[[
+  Write one OAM entry into the engine OAM buffer (gMain.oamBuffer-like area).
+  @param index OAM index (0-127)
+  @param attr0 number
+  @param attr1 number
+  @param attr2 number
+  @return boolean
+]]
+local function writeEngineOAMEntry(index, attr0, attr1, attr2)
+  if not oamBufferAddr then
+    return false
+  end
+
+  local base = oamBufferAddr + index * OAM_ENTRY_BYTES
+  local ok0 = autoWrite(base, (attr0 or 0) & 0xFFFF, 2)
+  local ok1 = autoWrite(base + 2, (attr1 or 0) & 0xFFFF, 2)
+  local ok2 = autoWrite(base + 4, (attr2 or 0) & 0xFFFF, 2)
+  return ok0 and ok1 and ok2
+end
+
+--[[
+  Read one OAM entry from hardware OAM memory.
+  @param index OAM index (0-127)
+  @return attr0, attr1, attr2 or nils
+]]
+local function readHardwareOAMEntry(index)
   local success, attr0, attr1, attr2 = pcall(function()
-    local base = index * 8
+    local base = index * OAM_ENTRY_BYTES
     local a0 = emu.memory.oam:read16(base)
     local a1 = emu.memory.oam:read16(base + 2)
     local a2 = emu.memory.oam:read16(base + 4)
@@ -1627,6 +2105,42 @@ function HAL.readOAMEntry(index)
     return attr0, attr1, attr2
   end
   return nil, nil, nil
+end
+
+--[[
+  Write one OAM entry to hardware OAM memory.
+  @param index OAM index (0-127)
+  @param attr0 number
+  @param attr1 number
+  @param attr2 number
+  @return boolean
+]]
+local function writeHardwareOAMEntry(index, attr0, attr1, attr2)
+  return pcall(function()
+    local base = index * OAM_ENTRY_BYTES
+    emu.memory.oam:write16(base, (attr0 or 0) & 0xFFFF)
+    emu.memory.oam:write16(base + 2, (attr1 or 0) & 0xFFFF)
+    emu.memory.oam:write16(base + 4, (attr2 or 0) & 0xFFFF)
+  end)
+end
+
+--[[
+  Read a single OAM entry (3x u16: attr0, attr1, attr2)
+  @param index OAM index (0-127)
+  @return attr0, attr1, attr2 or nil on error
+]]
+function HAL.readOAMEntry(index)
+  if not index or index < 0 or index > 127 then
+    return nil, nil, nil
+  end
+
+  -- Prefer the engine OAM buffer (GBAPK-like path), then fall back to hardware OAM.
+  local attr0, attr1, attr2 = readEngineOAMEntry(index)
+  if attr0 ~= nil then
+    return attr0, attr1, attr2
+  end
+
+  return readHardwareOAMEntry(index)
 end
 
 --[[
@@ -1683,6 +2197,233 @@ function HAL.readSpritePalette(bank)
     return palette
   end
   return nil
+end
+
+--[[
+  Read gMain.callback2 and compare against the ROM profile's CB2_Overworld.
+  @return boolean True when the game is currently in overworld callback
+]]
+function HAL.isOverworld()
+  local cb2 = HAL.readCallback2()
+  local inBattle = HAL.readInBattle()
+
+  if config and config.warp then
+    if config.warp.cb2LoadMap and cb2 == config.warp.cb2LoadMap then
+      return false
+    end
+
+    -- Prefer explicit callback2 match over potentially noisy inBattle reads.
+    if config.warp.cb2Overworld and cb2 == config.warp.cb2Overworld then
+      return true
+    end
+  end
+
+  if inBattle == 1 then
+    return false
+  end
+
+  -- Keep ghosts visible when not in battle to avoid false negatives across ROM variants.
+  return true
+end
+
+--[[
+  Find up to N likely free OAM entries, prioritizing high indices to reduce
+  conflicts with engine-managed sprite slots.
+  @param count number Number of slots requested
+  @return table Array of OAM indices
+]]
+function HAL.findFreeOAMSlots(count)
+  local needed = tonumber(count) or 0
+  if needed <= 0 then
+    return {}
+  end
+
+  local free = {}
+  local used = {}
+  for i = 127, 0, -1 do
+    local attr0, _, attr2 = HAL.readOAMEntry(i)
+    if attr0 ~= nil then
+      local y = attr0 & 0xFF
+      local affineMode = (attr0 >> 8) & 0x3
+      local tileIndex = attr2 and (attr2 & 0x3FF) or 0
+      if affineMode == 2 or y >= 160 or (y == 0 and tileIndex == 0) then
+        free[#free + 1] = i
+        used[i] = true
+        if #free >= needed then
+          break
+        end
+      end
+    end
+  end
+
+  -- Fallback: reserve high OAM indices if scan did not find enough hidden slots.
+  if #free < needed then
+    for i = 127, 0, -1 do
+      if not used[i] then
+        free[#free + 1] = i
+        if #free >= needed then
+          break
+        end
+      end
+    end
+  end
+
+  return free
+end
+
+--[[
+  Write a raw OAM entry.
+  @param index number OAM entry index (0-127)
+  @param attr0 number OAM attr0
+  @param attr1 number OAM attr1
+  @param attr2 number OAM attr2
+  @return boolean Success
+]]
+function HAL.writeOAMEntry(index, attr0, attr1, attr2)
+  if not index or index < 0 or index > 127 then
+    return false
+  end
+
+  local wroteEngine = writeEngineOAMEntry(index, attr0, attr1, attr2)
+  local wroteHardware = writeHardwareOAMEntry(index, attr0, attr1, attr2)
+  return wroteEngine or wroteHardware
+end
+
+--[[
+  Hide an OAM entry by moving Y off-screen (160).
+  @param index number OAM entry index (0-127)
+  @return boolean Success
+]]
+function HAL.hideOAMEntry(index)
+  local attr0, attr1, attr2 = HAL.readOAMEntry(index)
+  if attr0 == nil then attr0 = 0 end
+  if attr1 == nil then attr1 = 0 end
+  if attr2 == nil then attr2 = 0 end
+  local hiddenAttr0 = (attr0 & 0xFF00) | 160
+  return HAL.writeOAMEntry(index, hiddenAttr0, attr1, attr2)
+end
+
+--[[
+  Get absolute OBJ VRAM address for a ghost slot.
+  Slots are allocated in descending 0x600-byte blocks.
+  @param ghostSlot number Slot index (0..GHOST_OBJ_MAX_SLOTS-1)
+  @return number|nil Absolute VRAM address or nil on invalid slot
+]]
+function HAL.getGhostVRAMAddress(ghostSlot)
+  if ghostSlot == nil then
+    return nil
+  end
+  local slot = tonumber(ghostSlot)
+  if not slot or slot < 0 or slot >= GHOST_OBJ_MAX_SLOTS then
+    return nil
+  end
+  return GHOST_OBJ_VRAM_BASE - (slot * GHOST_OBJ_VRAM_STRIDE)
+end
+
+function HAL.getGhostMaxSlots()
+  return GHOST_OBJ_MAX_SLOTS
+end
+
+function HAL.getGhostTilesPerSlot()
+  return GHOST_OBJ_VRAM_STRIDE / GHOST_OBJ_TILE_BYTES
+end
+
+--[[
+  Compute OBJ tile index for a ghost slot's VRAM base.
+  @param ghostSlot number Slot index (0..GHOST_OBJ_MAX_SLOTS-1)
+  @return number|nil Tile index relative to OBJ VRAM base
+]]
+function HAL.getGhostTileIndex(ghostSlot)
+  local addr = HAL.getGhostVRAMAddress(ghostSlot)
+  if not addr then
+    return nil
+  end
+  return math.floor((addr - OBJ_VRAM_BASE) / GHOST_OBJ_TILE_BYTES)
+end
+
+--[[
+  Write ghost tile bytes to reserved OBJ VRAM.
+  Accepts either a raw byte string or an array of byte values.
+  @param ghostSlot number Slot index (0..GHOST_OBJ_MAX_SLOTS-1)
+  @param tileData string|table Raw tile data
+  @return boolean Success
+]]
+function HAL.writeGhostTilesToVRAM(ghostSlot, tileData)
+  local addr = HAL.getGhostVRAMAddress(ghostSlot)
+  if not addr or not tileData then
+    return false
+  end
+
+  local length = 0
+  if type(tileData) == "string" then
+    length = #tileData
+  elseif type(tileData) == "table" then
+    length = #tileData
+  else
+    return false
+  end
+
+  if length <= 0 or length > GHOST_OBJ_VRAM_STRIDE then
+    return false
+  end
+
+  local vramOffset = addr - 0x06000000
+  if vramOffset < OBJ_VRAM_OFFSET_BASE or (vramOffset + length) > OBJ_VRAM_OFFSET_END then
+    return false
+  end
+
+  local ok = pcall(function()
+    if type(tileData) == "string" then
+      for i = 1, length do
+        emu.memory.vram:write8(vramOffset + i - 1, string.byte(tileData, i))
+      end
+    else
+      for i = 1, length do
+        emu.memory.vram:write8(vramOffset + i - 1, (tileData[i] or 0) & 0xFF)
+      end
+    end
+  end)
+  return ok
+end
+
+local function argbToBgr555(color)
+  local c = tonumber(color) or 0
+  local r8 = (c >> 16) & 0xFF
+  local g8 = (c >> 8) & 0xFF
+  local b8 = c & 0xFF
+  local r5 = math.floor((r8 + 4) / 8) & 0x1F
+  local g5 = math.floor((g8 + 4) / 8) & 0x1F
+  local b5 = math.floor((b8 + 4) / 8) & 0x1F
+  return r5 | (g5 << 5) | (b5 << 10)
+end
+
+--[[
+  Write a 16-color OBJ palette slot used by ghost sprites.
+  Supports BGR555 input (0..0x7FFF) or ARGB 0xAARRGGBB values.
+  @param paletteSlot number OBJ palette bank (0-15)
+  @param paletteData table 16 colors (index 0..15 or 1..16)
+  @return boolean Success
+]]
+function HAL.writeGhostPalette(paletteSlot, paletteData)
+  if not paletteSlot or paletteSlot < 0 or paletteSlot > 15 or type(paletteData) ~= "table" then
+    return false
+  end
+
+  local base = 0x200 + paletteSlot * 32
+  local ok = pcall(function()
+    for i = 0, 15 do
+      local raw = paletteData[i]
+      if raw == nil then
+        raw = paletteData[i + 1]
+      end
+      raw = tonumber(raw) or 0
+      if raw > 0x7FFF then
+        raw = argbToBgr555(raw)
+      end
+      emu.memory.palette:write16(base + i * 2, raw & 0x7FFF)
+    end
+  end)
+  return ok
 end
 
 --[[

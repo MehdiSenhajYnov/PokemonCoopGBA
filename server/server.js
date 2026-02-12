@@ -12,6 +12,7 @@ const net = require('net');
 // Configuration
 const PORT = process.env.PORT || 3333;
 const HEARTBEAT_INTERVAL = 30000; // 30s
+const PENDING_DUEL_TTL_MS = 20000; // stale pending request guard
 
 // Duel: no physical warp — battle starts from overworld (GBA-PK style)
 
@@ -60,6 +61,28 @@ function sendToClient(client, message) {
     const jsonMessage = JSON.stringify(message) + '\n';
     client.socket.write(jsonMessage);
   }
+}
+
+/**
+ * Notify requester that duel request cannot proceed.
+ */
+function sendDuelDeclined(requester, targetId, reason) {
+  if (!requester) return;
+  sendToClient(requester, {
+    type: 'duel_declined',
+    playerId: targetId || null,
+    reason: reason || 'declined'
+  });
+}
+
+function clearExpiredPendingDuel(client) {
+  if (!client || !client.pendingDuel) return false;
+  const createdAt = client.pendingDuel.createdAt;
+  if (!createdAt || (Date.now() - createdAt) > PENDING_DUEL_TTL_MS) {
+    client.pendingDuel = null;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -177,6 +200,13 @@ function handleMessage(client, messageStr) {
                     playerId: existingId,
                     data: existing.lastPosition
                   };
+                  if (existing.lastPositionMeta) {
+                    joinPosMsg.mapRev = existing.lastPositionMeta.mapRev;
+                    joinPosMsg.metaStable = existing.lastPositionMeta.metaStable;
+                    if (existing.lastPositionMeta.metaHash) {
+                      joinPosMsg.metaHash = existing.lastPositionMeta.metaHash;
+                    }
+                  }
                   if (existing.characterName) joinPosMsg.characterName = existing.characterName;
                   sendToClient(client, joinPosMsg);
                 }
@@ -201,6 +231,11 @@ function handleMessage(client, messageStr) {
         }
 
         client.lastPosition = message.data;
+        client.lastPositionMeta = {
+          mapRev: Number.isFinite(Number(message.mapRev)) ? Number(message.mapRev) : 0,
+          metaStable: message.metaStable === true,
+          metaHash: typeof message.metaHash === 'string' ? message.metaHash : null
+        };
 
         // Relay to other clients in room (include timestamp + duration hint for interpolation)
         const posMsg = {
@@ -208,8 +243,11 @@ function handleMessage(client, messageStr) {
           playerId: client.id,
           data: message.data,
           t: message.t,
-          dur: message.dur
+          dur: message.dur,
+          mapRev: client.lastPositionMeta.mapRev,
+          metaStable: client.lastPositionMeta.metaStable
         };
+        if (client.lastPositionMeta.metaHash) posMsg.metaHash = client.lastPositionMeta.metaHash;
         if (client.characterName) posMsg.characterName = client.characterName;
         broadcastToRoom(client.roomId, client.id, posMsg);
         break;
@@ -232,18 +270,49 @@ function handleMessage(client, messageStr) {
         // Duel warp request — forward to target player only
         if (!client.roomId) {
           console.log(`[Duel] DROPPED: ${client.id} not in a room`);
+          sendDuelDeclined(client, message.targetId, 'requester_not_in_room');
           return;
+        }
+        if (!message.targetId || message.targetId === client.id) {
+          console.log(`[Duel] DROPPED: invalid target '${message.targetId}' from ${client.id}`);
+          sendDuelDeclined(client, message.targetId, 'invalid_target');
+          break;
+        }
+        if (client.duelOpponent) {
+          console.log(`[Duel] DROPPED: requester ${client.id} already in duel with ${client.duelOpponent}`);
+          sendDuelDeclined(client, message.targetId, 'requester_in_duel');
+          break;
         }
 
         console.log(`[Duel] Request from ${client.id} to ${message.targetId} (registered clients: ${[...clients.keys()].join(', ')})`);
+        clearExpiredPendingDuel(client);
         const targetClient = clients.get(message.targetId);
+        clearExpiredPendingDuel(targetClient);
         if (!targetClient) {
           console.log(`[Duel] DROPPED: target ${message.targetId} not found in clients map`);
+          sendDuelDeclined(client, message.targetId, 'target_not_found');
         } else if (targetClient.roomId !== client.roomId) {
           console.log(`[Duel] DROPPED: target in room ${targetClient.roomId}, requester in room ${client.roomId}`);
+          sendDuelDeclined(client, message.targetId, 'different_room');
+        } else if (targetClient.duelOpponent) {
+          console.log(`[Duel] DROPPED: target ${message.targetId} already in duel with ${targetClient.duelOpponent}`);
+          sendDuelDeclined(client, message.targetId, 'target_in_duel');
+        } else if (targetClient.pendingDuel) {
+          console.log(`[Duel] DROPPED: target ${message.targetId} has outgoing pending duel`);
+          sendDuelDeclined(client, message.targetId, 'target_busy');
         } else {
+          // If requester had another pending target, clear it first.
+          if (client.pendingDuel && client.pendingDuel.targetId !== message.targetId) {
+            const previousTarget = clients.get(client.pendingDuel.targetId);
+            if (previousTarget && previousTarget.roomId === client.roomId) {
+              sendToClient(previousTarget, {
+                type: 'duel_cancelled',
+                requesterId: client.id
+              });
+            }
+          }
           // Store pending duel on the requester
-          client.pendingDuel = { targetId: message.targetId };
+          client.pendingDuel = { targetId: message.targetId, createdAt: Date.now() };
 
           sendToClient(targetClient, {
             type: 'duel_request',
@@ -260,6 +329,7 @@ function handleMessage(client, messageStr) {
         if (!client.roomId) return;
 
         const requester = clients.get(message.requesterId);
+        clearExpiredPendingDuel(requester);
         if (!requester || !requester.pendingDuel) {
           break;
         }
@@ -299,15 +369,49 @@ function handleMessage(client, messageStr) {
         if (!client.roomId) return;
 
         const declinedRequester = clients.get(message.requesterId);
-        if (declinedRequester) {
-          declinedRequester.pendingDuel = null;
-          sendToClient(declinedRequester, {
-            type: 'duel_declined',
-            playerId: client.id
+        clearExpiredPendingDuel(declinedRequester);
+        if (!declinedRequester || !declinedRequester.pendingDuel) {
+          break;
+        }
+
+        // Verify the decline matches an actual pending request targeting this client
+        if (declinedRequester.pendingDuel.targetId !== client.id
+          || declinedRequester.roomId !== client.roomId) {
+          break;
+        }
+
+        declinedRequester.pendingDuel = null;
+        sendToClient(declinedRequester, {
+          type: 'duel_declined',
+          playerId: client.id
+        });
+
+        console.log(`[Duel] ${client.id} declined duel from ${message.requesterId}`);
+        break;
+      }
+
+      case 'duel_cancel': {
+        // Requester cancelled waiting state (timeout/manual cancel)
+        if (!client.roomId || !client.pendingDuel) return;
+        clearExpiredPendingDuel(client);
+        if (!client.pendingDuel) break;
+
+        const pendingTargetId = client.pendingDuel.targetId;
+        if (message.targetId && message.targetId !== pendingTargetId) {
+          break;
+        }
+
+        const pendingTarget = clients.get(pendingTargetId);
+        client.pendingDuel = null;
+
+        if (pendingTarget && pendingTarget.roomId === client.roomId) {
+          sendToClient(pendingTarget, {
+            type: 'duel_cancelled',
+            requesterId: client.id
           });
         }
 
-        console.log(`[Duel] ${client.id} declined duel from ${message.requesterId}`);
+        console.log(`[Duel] ${client.id} cancelled duel request to ${pendingTargetId}`);
         break;
       }
 
@@ -590,6 +694,7 @@ const server = net.createServer((socket) => {
     roomId: null,
     alive: true,
     lastPosition: null,
+    lastPositionMeta: null,
     buffer: ''
   };
 
