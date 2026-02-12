@@ -625,12 +625,19 @@ function Render.updateCamera(playerX, playerY, cameraX, cameraY, mapGroup, mapId
 
     local camX = math.floor(tonumber(cameraX) or 0)
     local camY = math.floor(tonumber(cameraY) or 0)
+    local prevCamForDeltaX = prevCamX
+    local prevCamForDeltaY = prevCamY
 
+    local previousMapKey = lastCameraMapKey
     local currentMapKey = buildMapKey(mapGroup, mapId)
-    if currentMapKey and lastCameraMapKey and currentMapKey ~= lastCameraMapKey then
-        resetCameraTrackingState(CAMERA_WARMUP_FRAMES)
+    local mapChangedThisFrame = false
+    if currentMapKey and previousMapKey and currentMapKey ~= previousMapKey then
+        mapChangedThisFrame = true
     end
     if currentMapKey then
+        -- Map-change reset policy is controlled by caller (main.lua) via
+        -- Render.clearGhostCache(resetCameraTracking=...).
+        -- Do not auto-reset here, otherwise seam transitions force ST=0 mid-step.
         lastCameraMapKey = currentMapKey
     end
 
@@ -653,7 +660,8 @@ function Render.updateCamera(playerX, playerY, cameraX, cameraY, mapGroup, mapId
 
     local deltaTileX = playerX - prevTileX
     local deltaTileY = playerY - prevTileY
-    if math.abs(deltaTileX) > 2 or math.abs(deltaTileY) > 2 then
+    local largeTileDelta = math.abs(deltaTileX) > 2 or math.abs(deltaTileY) > 2
+    if largeTileDelta and not mapChangedThisFrame then
         -- Teleport/map churn safety.
         stepDirX, stepDirY = 0, 0
         subTileX, subTileY = 0, 0
@@ -662,10 +670,15 @@ function Render.updateCamera(playerX, playerY, cameraX, cameraY, mapGroup, mapId
         return
     end
 
-    if deltaTileX ~= 0 then
+    -- Seam transitions can wrap tile coordinates (e.g. y: 19 -> 0) while the
+    -- scrolling step is still in progress. In that case, keep the previous
+    -- movement axis instead of deriving it from wrapped tile deltas.
+    local keepStepDirX = mapChangedThisFrame and math.abs(deltaTileX) > 2
+    local keepStepDirY = mapChangedThisFrame and math.abs(deltaTileY) > 2
+    if not keepStepDirX and deltaTileX ~= 0 then
         stepDirX = (deltaTileX > 0) and 1 or -1
     end
-    if deltaTileY ~= 0 then
+    if not keepStepDirY and deltaTileY ~= 0 then
         stepDirY = (deltaTileY > 0) and 1 or -1
     end
 
@@ -674,6 +687,36 @@ function Render.updateCamera(playerX, playerY, cameraX, cameraY, mapGroup, mapId
     local camYByte = ((camY % 256) + 256) % 256
     local phaseX = (256 - camXByte) % TILE_SIZE
     local phaseY = (256 - camYByte) % TILE_SIZE
+
+    -- Fallback for seam crossings with wrapped local tile coords (e.g. y 19 -> 0):
+    -- infer movement axis from signed camera byte delta when stepDir was not
+    -- recoverable from tile delta in this frame.
+    local function signedByteDelta(curr, prev)
+        if prev == nil then
+            return 0
+        end
+        local d = (curr - prev) % 256
+        if d > 127 then
+            d = d - 256
+        end
+        return d
+    end
+    local camDeltaX = signedByteDelta(camXByte, prevCamForDeltaX)
+    local camDeltaY = signedByteDelta(camYByte, prevCamForDeltaY)
+    if stepDirX == 0 and phaseX ~= 0 then
+        if camDeltaX > 0 then
+            stepDirX = -1
+        elseif camDeltaX < 0 then
+            stepDirX = 1
+        end
+    end
+    if stepDirY == 0 and phaseY ~= 0 then
+        if camDeltaY > 0 then
+            stepDirY = -1
+        elseif camDeltaY < 0 then
+            stepDirY = 1
+        end
+    end
 
     -- Local tile coordinates can switch to the destination tile before camera
     -- scrolling completes. In that case we must use the remaining sub-tile
@@ -757,8 +800,8 @@ end
 
 function Render.getCameraDebugState()
     return {
-        subTileX = math.abs(subTileX),
-        subTileY = math.abs(subTileY),
+        subTileX = subTileX,
+        subTileY = subTileY,
         prevCamX = prevCamX,
         prevCamY = prevCamY,
         prevTileX = prevTileX,
@@ -781,8 +824,8 @@ function Render.getDebugProjectionSnapshot(localPos, remotePos, playerId)
 
     local snapshot = {
         crossMap = false,
-        subTileX = math.abs(subTileX),
-        subTileY = math.abs(subTileY),
+        subTileX = subTileX,
+        subTileY = subTileY,
         projected = nil,
         screen = nil,
     }

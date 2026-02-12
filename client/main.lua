@@ -1893,10 +1893,12 @@ local function update()
         State.lastSentPosition = currentPos
         State.sendCooldown = SEND_RATE_MOVING
         State.lastIdleHeartbeatFrame = State.frameCounter
-        -- Always reset camera tracking on map change to avoid stale +/-16px offsets.
-        -- Keep projection trust across seams to avoid disappearing cross-map ghosts.
+        -- Reset camera tracking only for hard transitions (warp/teleport).
+        -- For seam-connected route<->town transitions, keep camera tracking so
+        -- sub-tile offset (ST) continues through the crossing step.
+        local shouldResetCameraTracking = transitionType == "warp_or_hard"
         Render.clearGhostCache({
-          resetCameraTracking = true,
+          resetCameraTracking = shouldResetCameraTracking,
           dropProjectionState = dropProjectionState
         })
         if ENABLE_DEBUG then
