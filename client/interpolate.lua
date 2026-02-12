@@ -27,6 +27,7 @@ local TELEPORT_THRESHOLD = 10  -- Tile distance considered a teleport
 local DEFAULT_DURATION = 266   -- Fallback for 1st message (~16 walk frames at 60fps)
 local MIN_DURATION = 10        -- Clamp minimum (ms)
 local MAX_DURATION = 2000      -- Clamp maximum (ms)
+local MIN_VISUAL_DURATION = 64 -- Prevent start-of-step snap on jittery timestamp bursts
 local MAX_QUEUE_SIZE = 1000    -- Safety cap on queue length
 
 -- Player data storage
@@ -61,16 +62,32 @@ local function copyPos(pos)
     connectionCount = #connections
   end
 
+  local mapRev = tonumber(pos.mapRev)
+  if mapRev == nil then
+    mapRev = 0
+  end
+
+  local metaStable = (pos.metaStable == true)
+  local metaHash = pos.metaHash
+
   return {
     x = pos.x,
     y = pos.y,
     mapId = pos.mapId,
     mapGroup = pos.mapGroup,
     facing = pos.facing or 1,
+    mapRev = mapRev,
+    metaStable = metaStable,
+    metaHash = metaHash,
     borderX = pos.borderX,
     borderY = pos.borderY,
     connectionCount = connectionCount,
-    connections = connections
+    connections = connections,
+    transitionFromMapGroup = pos.transitionFromMapGroup,
+    transitionFromMapId = pos.transitionFromMapId,
+    transitionFromX = pos.transitionFromX,
+    transitionFromY = pos.transitionFromY,
+    transitionToken = pos.transitionToken,
   }
 end
 
@@ -84,6 +101,18 @@ local function positionMapKey(pos)
   return string.format("%d:%d", tonumber(pos.mapGroup) or -1, tonumber(pos.mapId) or -1)
 end
 
+local function positionMetaKey(pos, mapRev)
+  local mapKey = positionMapKey(pos)
+  if mapKey == nil then
+    return nil
+  end
+  local rev = tonumber(mapRev)
+  if rev == nil then
+    rev = tonumber(pos and pos.mapRev) or 0
+  end
+  return string.format("%s@%d", mapKey, rev)
+end
+
 local function hasProjectionMeta(pos)
   if type(pos) ~= "table" then
     return false
@@ -93,32 +122,59 @@ local function hasProjectionMeta(pos)
   return borderX ~= nil and borderY ~= nil and borderX > 0 and borderY > 0
 end
 
-local function normalizePositionForPlayer(player, pos)
+local function normalizePositionForPlayer(player, pos, envelope)
   local normalized = copyPos(pos)
-  local key = positionMapKey(pos)
+  if type(envelope) == "table" then
+    if envelope.mapRev ~= nil then
+      normalized.mapRev = tonumber(envelope.mapRev) or normalized.mapRev
+    end
+    if envelope.metaStable ~= nil then
+      normalized.metaStable = envelope.metaStable == true
+    end
+    if envelope.metaHash ~= nil then
+      normalized.metaHash = envelope.metaHash
+    end
+  end
+
+  local key = positionMetaKey(normalized, normalized.mapRev)
   if not key or not player then
+    if normalized.connectionCount == nil and normalized.connections then
+      normalized.connectionCount = #normalized.connections
+    end
+    if not normalized.metaStable then
+      normalized.metaHash = nil
+    end
     return normalized
   end
 
-  if hasProjectionMeta(pos) then
-    player.metaByMap[key] = {
-      borderX = tonumber(pos.borderX),
-      borderY = tonumber(pos.borderY),
-      connectionCount = tonumber(pos.connectionCount),
-      connections = copyConnections(pos.connections),
+  local incomingMeta = hasProjectionMeta(normalized)
+  if incomingMeta then
+    player.metaByMapRev[key] = {
+      borderX = tonumber(normalized.borderX),
+      borderY = tonumber(normalized.borderY),
+      connectionCount = tonumber(normalized.connectionCount),
+      connections = copyConnections(normalized.connections),
+      metaHash = normalized.metaHash,
     }
   else
-    local cached = player.metaByMap[key]
+    -- No metadata payload in this packet: fall back to cached map metadata.
+    local cached = player.metaByMapRev[key]
     if cached then
       normalized.borderX = cached.borderX
       normalized.borderY = cached.borderY
       normalized.connectionCount = cached.connectionCount
       normalized.connections = copyConnections(cached.connections)
+      if cached.metaHash ~= nil then
+        normalized.metaHash = cached.metaHash
+      end
     end
   end
 
   if normalized.connectionCount == nil and normalized.connections then
     normalized.connectionCount = #normalized.connections
+  end
+  if not normalized.metaStable then
+    normalized.metaHash = nil
   end
   return normalized
 end
@@ -174,8 +230,9 @@ end
   @param newPosition  table   {x, y, mapId, mapGroup, facing}
   @param timestamp    number  Sender timeMs (for duration calculation)
   @param durationHint number  Optional: sender-estimated step duration (ms)
+  @param envelope     table|nil Optional {mapRev, metaStable, metaHash}
 ]]
-function Interpolate.update(playerId, newPosition, timestamp, durationHint)
+function Interpolate.update(playerId, newPosition, timestamp, durationHint, envelope)
   if not newPosition or not newPosition.x or not newPosition.y then
     return
   end
@@ -183,21 +240,25 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint)
   -- First time seeing this player: snap to position, empty queue
   if not players[playerId] then
     local firstPlayer = {
-      metaByMap = {},
+      metaByMapRev = {},
       current = nil,
       queue = {},
       animFrom = nil,
       animProgress = 0,
       state = "idle",
-      lastTimestamp = timestamp,
+      lastMoveTimestamp = timestamp,
     }
-    firstPlayer.current = normalizePositionForPlayer(firstPlayer, newPosition)
+    firstPlayer.current = normalizePositionForPlayer(firstPlayer, newPosition, envelope)
     players[playerId] = firstPlayer
     return
   end
 
   local player = players[playerId]
-  local normalizedPos = normalizePositionForPlayer(player, newPosition)
+  if player.lastMoveTimestamp == nil and player.lastTimestamp ~= nil then
+    -- Backward compatibility with older in-memory state field name.
+    player.lastMoveTimestamp = player.lastTimestamp
+  end
+  local normalizedPos = normalizePositionForPlayer(player, newPosition, envelope)
   local ref = lastQueuedPos(player)
 
   -- Teleport detection: map change or large distance jump
@@ -209,6 +270,9 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint)
     player.animFrom = nil
     player.animProgress = 0
     player.state = "idle"
+    if timestamp then
+      player.lastMoveTimestamp = timestamp
+    end
     return
   end
 
@@ -217,21 +281,34 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint)
     -- Exception: if only facing changed and queue is empty, update directly
     if #player.queue == 0 then
       player.current.facing = normalizedPos.facing or player.current.facing
-      player.current.borderX = normalizedPos.borderX or player.current.borderX
-      player.current.borderY = normalizedPos.borderY or player.current.borderY
-      if normalizedPos.connections then
-        player.current.connections = copyConnections(normalizedPos.connections)
+      player.current.mapRev = normalizedPos.mapRev or player.current.mapRev or 0
+      player.current.metaStable = normalizedPos.metaStable == true
+      player.current.transitionFromMapGroup = normalizedPos.transitionFromMapGroup
+      player.current.transitionFromMapId = normalizedPos.transitionFromMapId
+      player.current.transitionFromX = normalizedPos.transitionFromX
+      player.current.transitionFromY = normalizedPos.transitionFromY
+      player.current.transitionToken = normalizedPos.transitionToken
+      if normalizedPos.metaHash ~= nil then
+        player.current.metaHash = normalizedPos.metaHash
+      elseif not player.current.metaStable then
+        player.current.metaHash = nil
       end
-      if normalizedPos.connectionCount ~= nil then
-        player.current.connectionCount = tonumber(normalizedPos.connectionCount)
-      elseif player.current.connections then
-        player.current.connectionCount = #player.current.connections
+      if hasProjectionMeta(normalizedPos) then
+        player.current.borderX = normalizedPos.borderX or player.current.borderX
+        player.current.borderY = normalizedPos.borderY or player.current.borderY
+        if normalizedPos.connections then
+          player.current.connections = copyConnections(normalizedPos.connections)
+        end
+        if normalizedPos.connectionCount ~= nil then
+          player.current.connectionCount = tonumber(normalizedPos.connectionCount)
+        elseif player.current.connections then
+          player.current.connectionCount = #player.current.connections
+        end
       end
     end
-    -- Still update lastTimestamp so next duration calc is accurate
-    if timestamp then
-      player.lastTimestamp = timestamp
-    end
+    -- Important: do NOT update lastMoveTimestamp on same-tile packets.
+    -- Facing/heartbeat packets would shrink the next step duration and cause
+    -- a visual kick at the start of movement.
     return
   end
 
@@ -240,8 +317,8 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint)
   --           2) sender-estimated hint (camera scroll rate — used for first step after idle)
   --           3) DEFAULT_DURATION (fallback)
   local duration = DEFAULT_DURATION
-  if timestamp and player.lastTimestamp then
-    local dt = timestamp - player.lastTimestamp
+  if timestamp and player.lastMoveTimestamp then
+    local dt = timestamp - player.lastMoveTimestamp
     if dt >= MIN_DURATION and dt <= DEFAULT_DURATION * 2 then
       duration = dt  -- Consecutive step: use actual timing
     elseif durationHint and durationHint >= MIN_DURATION and durationHint <= MAX_DURATION then
@@ -255,8 +332,13 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint)
   -- The ghost interpolates slightly slower, so the next waypoint arrives before
   -- the current one finishes. Catch-up formula corrects any accumulation.
   duration = math.floor(duration * 1.08)
+  if duration < MIN_VISUAL_DURATION then
+    duration = MIN_VISUAL_DURATION
+  end
 
-  player.lastTimestamp = timestamp
+  if timestamp then
+    player.lastMoveTimestamp = timestamp
+  end
 
   -- Enqueue waypoint with duration
   local wp = copyPos(normalizedPos)
@@ -333,10 +415,18 @@ function Interpolate.step(dt)
           player.current.y = lerp(player.animFrom.y, target.y, t)
           player.current.mapId = target.mapId
           player.current.mapGroup = target.mapGroup
+          player.current.mapRev = target.mapRev or player.current.mapRev or 0
+          player.current.metaStable = target.metaStable == true
+          player.current.metaHash = target.metaHash
           player.current.borderX = target.borderX
           player.current.borderY = target.borderY
           player.current.connectionCount = target.connectionCount
           player.current.connections = copyConnections(target.connections)
+          player.current.transitionFromMapGroup = target.transitionFromMapGroup
+          player.current.transitionFromMapId = target.transitionFromMapId
+          player.current.transitionFromX = target.transitionFromX
+          player.current.transitionFromY = target.transitionFromY
+          player.current.transitionToken = target.transitionToken
 
           -- Switch facing at halfway point
           if t >= 0.5 then

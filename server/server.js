@@ -200,6 +200,13 @@ function handleMessage(client, messageStr) {
                     playerId: existingId,
                     data: existing.lastPosition
                   };
+                  if (existing.lastPositionMeta) {
+                    joinPosMsg.mapRev = existing.lastPositionMeta.mapRev;
+                    joinPosMsg.metaStable = existing.lastPositionMeta.metaStable;
+                    if (existing.lastPositionMeta.metaHash) {
+                      joinPosMsg.metaHash = existing.lastPositionMeta.metaHash;
+                    }
+                  }
                   if (existing.characterName) joinPosMsg.characterName = existing.characterName;
                   sendToClient(client, joinPosMsg);
                 }
@@ -224,6 +231,11 @@ function handleMessage(client, messageStr) {
         }
 
         client.lastPosition = message.data;
+        client.lastPositionMeta = {
+          mapRev: Number.isFinite(Number(message.mapRev)) ? Number(message.mapRev) : 0,
+          metaStable: message.metaStable === true,
+          metaHash: typeof message.metaHash === 'string' ? message.metaHash : null
+        };
 
         // Relay to other clients in room (include timestamp + duration hint for interpolation)
         const posMsg = {
@@ -231,8 +243,11 @@ function handleMessage(client, messageStr) {
           playerId: client.id,
           data: message.data,
           t: message.t,
-          dur: message.dur
+          dur: message.dur,
+          mapRev: client.lastPositionMeta.mapRev,
+          metaStable: client.lastPositionMeta.metaStable
         };
+        if (client.lastPositionMeta.metaHash) posMsg.metaHash = client.lastPositionMeta.metaHash;
         if (client.characterName) posMsg.characterName = client.characterName;
         broadcastToRoom(client.roomId, client.id, posMsg);
         break;
@@ -679,6 +694,7 @@ const server = net.createServer((socket) => {
     roomId: null,
     alive: true,
     lastPosition: null,
+    lastPositionMeta: null,
     buffer: ''
   };
 

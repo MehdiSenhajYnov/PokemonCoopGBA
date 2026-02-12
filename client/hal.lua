@@ -24,6 +24,7 @@ local GHOST_OBJ_TILE_BYTES = 32
 local OAM_ENTRY_BYTES = 8
 local OAM_BUFFER_DEFAULT_OFFSET = 0x38
 local GHOST_OAM_BASE_DEFAULT = 110
+local MAP_HEADER_CONFIRM_FRAMES = 3
 local ROM_BASE = 0x08000000
 local ROM_END = 0x0A000000
 
@@ -33,6 +34,8 @@ local oamBufferAddr = nil
 local ghostOamBaseIndex = GHOST_OAM_BASE_DEFAULT
 local mapHeaderAddr = nil
 local mapHeaderScanAttempts = 0
+local mapHeaderCandidateAddr = nil
+local mapHeaderCandidateFrames = 0
 
 local function resolveOAMBufferAddress(gameConfig)
   if not gameConfig then
@@ -73,6 +76,8 @@ function HAL.init(gameConfig)
   oamBufferAddr = resolveOAMBufferAddress(gameConfig)
   mapHeaderAddr = nil
   mapHeaderScanAttempts = 0
+  mapHeaderCandidateAddr = nil
+  mapHeaderCandidateFrames = 0
   ghostOamBaseIndex = GHOST_OAM_BASE_DEFAULT
   if gameConfig and gameConfig.render and type(gameConfig.render.oamBaseIndex) == "number" then
     ghostOamBaseIndex = math.floor(gameConfig.render.oamBaseIndex)
@@ -630,6 +635,8 @@ end
 
 local function getMapHeaderAddress(currentX, currentY)
   if mapHeaderAddr and validateMapHeaderAt(mapHeaderAddr, currentX, currentY) then
+    mapHeaderCandidateAddr = nil
+    mapHeaderCandidateFrames = 0
     return mapHeaderAddr
   end
 
@@ -653,14 +660,38 @@ local function getMapHeaderAddress(currentX, currentY)
   end
 
   if chosen and validateMapHeaderAt(chosen, currentX, currentY) then
-    mapHeaderAddr = chosen
-    if configured and scanned and configured ~= scanned and chosen == scanned then
-      console:log(string.format("[HAL] gMapHeader override: config 0x%08X -> scan 0x%08X (attempt %d)",
-        configured, scanned, mapHeaderScanAttempts))
+    if mapHeaderCandidateAddr == chosen then
+      mapHeaderCandidateFrames = mapHeaderCandidateFrames + 1
     else
-      console:log(string.format("[HAL] gMapHeader detected at 0x%08X (attempt %d)", mapHeaderAddr, mapHeaderScanAttempts))
+      mapHeaderCandidateAddr = chosen
+      mapHeaderCandidateFrames = 1
     end
-    return mapHeaderAddr
+
+    if mapHeaderCandidateFrames >= MAP_HEADER_CONFIRM_FRAMES then
+      mapHeaderAddr = chosen
+      mapHeaderCandidateAddr = nil
+      mapHeaderCandidateFrames = 0
+
+      if configured and scanned and configured ~= scanned and chosen == scanned then
+        console:log(string.format("[HAL] gMapHeader override: config 0x%08X -> scan 0x%08X (attempt %d)",
+          configured, scanned, mapHeaderScanAttempts))
+      else
+        console:log(string.format("[HAL] gMapHeader detected at 0x%08X (attempt %d)", mapHeaderAddr, mapHeaderScanAttempts))
+      end
+      return mapHeaderAddr
+    end
+
+    if mapHeaderScanAttempts <= 3 or mapHeaderScanAttempts % 120 == 0 then
+      console:log(string.format(
+        "[HAL] gMapHeader candidate 0x%08X (%d/%d)",
+        chosen,
+        mapHeaderCandidateFrames,
+        MAP_HEADER_CONFIRM_FRAMES
+      ))
+    end
+  else
+    mapHeaderCandidateAddr = nil
+    mapHeaderCandidateFrames = 0
   end
 
   mapHeaderAddr = nil

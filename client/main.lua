@@ -62,10 +62,17 @@ local MAX_MESSAGES_PER_FRAME = 10 -- Limit messages processed per frame
 local ENABLE_DEBUG = true
 local POSITION_HEARTBEAT_IDLE = 60 -- Force a periodic idle position refresh (~1/sec)
 local SPRITE_HEARTBEAT = 120        -- Force sprite refresh (~2/sec) if packets were missed
+local ENABLE_REMOTE_POS_DEBUG = true   -- Draw remote Target/Current/Projected/Screen every frame
+local REMOTE_POS_DEBUG_CONSOLE = true  -- Optional per-frame console log (very verbose)
 
 -- Early detection constants
 local INPUT_CAMERA_MAX_GAP = 3     -- Max frames between input and camera for validation
 local INPUT_TIMEOUT = 5            -- Frames before abandoning input without camera confirm
+local ENABLE_EARLY_PREDICTION = false -- Disable pre-send step prediction (causes start-of-step ghost kick)
+
+-- Map transition / metadata stability
+local META_STABLE_CONSEC_FRAMES = 3
+local MAP_SETTLE_MAX_FRAMES = 12
 
 -- Direction delta table (direction name -> tile offset)
 local DIR_DELTA = {
@@ -126,6 +133,19 @@ local State = {
   lastIdleHeartbeatFrame = 0,
   lastSpriteSendFrame = -SPRITE_HEARTBEAT,
   hadGameplayPosLastFrame = false,
+  remoteDebugLastConsoleLine = nil,
+  mapSync = {
+    mapRev = 0,
+    phase = "stable",          -- stable | transition_pending | transition_settling
+    currentMapKey = nil,
+    transitionFrame = 0,
+    justSettled = false,
+    metaStable = false,
+    metaStableFrames = 0,
+    lastMetaSig = nil,
+    lastStableHash = nil,
+    settleTimeoutLogged = false,
+  },
   -- Early movement detection
   earlyDetect = {
     inputDir = nil,         -- KEYINPUT direction ("up"/"down"/"left"/"right")
@@ -281,6 +301,179 @@ local function projectionMetaSignature(meta)
   return table.concat(parts, "|")
 end
 
+local function mapKeyFromPosition(pos)
+  if type(pos) ~= "table" then
+    return nil
+  end
+  if pos.mapGroup == nil or pos.mapId == nil then
+    return nil
+  end
+  return string.format("%d:%d", tonumber(pos.mapGroup) or -1, tonumber(pos.mapId) or -1)
+end
+
+local function positionHasConnectionToMap(sourcePos, targetPos)
+  if type(sourcePos) ~= "table" or type(targetPos) ~= "table" then
+    return false
+  end
+
+  local targetGroup = tonumber(targetPos.mapGroup)
+  local targetId = tonumber(targetPos.mapId)
+  if targetGroup == nil or targetId == nil then
+    return false
+  end
+
+  if type(sourcePos.connections) ~= "table" then
+    return false
+  end
+
+  for _, conn in ipairs(sourcePos.connections) do
+    local direction = tonumber(conn.direction)
+    local mapGroup = tonumber(conn.mapGroup)
+    local mapId = tonumber(conn.mapId)
+    if direction and direction >= 1 and direction <= 4
+      and mapGroup == targetGroup and mapId == targetId then
+      return true
+    end
+  end
+
+  return false
+end
+
+local function classifyMapTransition(previousPos, currentPos)
+  local previousKey = mapKeyFromPosition(previousPos)
+  local currentKey = mapKeyFromPosition(currentPos)
+  if previousKey == nil or currentKey == nil then
+    return "unknown"
+  end
+  if previousKey == currentKey then
+    return "same_map"
+  end
+
+  if positionHasConnectionToMap(previousPos, currentPos)
+    or positionHasConnectionToMap(currentPos, previousPos) then
+    return "seam_connected"
+  end
+
+  local prevX = tonumber(previousPos.x)
+  local prevY = tonumber(previousPos.y)
+  local currX = tonumber(currentPos.x)
+  local currY = tonumber(currentPos.y)
+  if prevX ~= nil and prevY ~= nil and currX ~= nil and currY ~= nil then
+    local dx = math.abs(currX - prevX)
+    local dy = math.abs(currY - prevY)
+    if dx <= 2 and dy <= 2 then
+      return "likely_seam"
+    end
+  end
+
+  return "warp_or_hard"
+end
+
+local function wouldPredictionCrossMapBoundary(pos, delta)
+  if type(pos) ~= "table" or type(delta) ~= "table" then
+    return false
+  end
+
+  local x = tonumber(pos.x)
+  local y = tonumber(pos.y)
+  local dx = tonumber(delta.dx)
+  local dy = tonumber(delta.dy)
+  local borderX = tonumber(pos.borderX)
+  local borderY = tonumber(pos.borderY)
+
+  if x == nil or y == nil or dx == nil or dy == nil then
+    return false
+  end
+  if borderX == nil or borderY == nil or borderX <= 0 or borderY <= 0 then
+    return false
+  end
+
+  local nextX = x + dx
+  local nextY = y + dy
+  return (nextX < 0) or (nextY < 0) or (nextX >= borderX) or (nextY >= borderY)
+end
+
+local function getLocalPositionEnvelope()
+  local sync = State.mapSync or {}
+  local mapRev = tonumber(sync.mapRev) or 0
+  local metaStable = sync.metaStable == true
+  local metaHash = metaStable and sync.lastStableHash or nil
+  return mapRev, metaStable, metaHash
+end
+
+local clonePosition
+
+local function buildPositionMessage(position, durationHint, transitionContext)
+  local mapRev, metaStable, metaHash = getLocalPositionEnvelope()
+  local data = position
+  if transitionContext and type(transitionContext) == "table" and type(transitionContext.from) == "table" then
+    data = clonePosition(position) or {}
+    local fromPos = transitionContext.from
+    data.transitionFromMapGroup = tonumber(fromPos.mapGroup)
+    data.transitionFromMapId = tonumber(fromPos.mapId)
+    data.transitionFromX = tonumber(fromPos.x)
+    data.transitionFromY = tonumber(fromPos.y)
+    data.transitionToken = transitionContext.token
+  end
+
+  local msg = {
+    type = "position",
+    data = data,
+    t = State.timeMs,
+    mapRev = mapRev,
+    metaStable = metaStable
+  }
+  if durationHint ~= nil then
+    msg.dur = durationHint
+  end
+  if metaHash then
+    msg.metaHash = metaHash
+  end
+  return msg
+end
+
+clonePosition = function(pos)
+  if type(pos) ~= "table" then
+    return nil
+  end
+  local out = {}
+  for k, v in pairs(pos) do
+    out[k] = v
+  end
+  return out
+end
+
+local function parseRemotePositionEnvelope(message)
+  local mapRev = tonumber(message and message.mapRev)
+  if mapRev == nil and message and type(message.data) == "table" then
+    mapRev = tonumber(message.data.mapRev)
+  end
+  if mapRev == nil then
+    mapRev = 0
+  end
+
+  local metaStable = false
+  if message and message.metaStable == true then
+    metaStable = true
+  elseif message and type(message.data) == "table" and message.data.metaStable == true then
+    metaStable = true
+  end
+
+  local metaHash = nil
+  if message then
+    metaHash = message.metaHash
+    if not metaHash and type(message.data) == "table" then
+      metaHash = message.data.metaHash
+    end
+  end
+
+  return {
+    mapRev = mapRev,
+    metaStable = metaStable,
+    metaHash = metaHash
+  }
+end
+
 -- Forward declarations
 local readPlayerPosition
 local readCharacterName
@@ -382,11 +575,7 @@ local function initialize()
     -- Send initial position so other players see us immediately
     local initPos = readPlayerPosition()
     if initPos then
-      Network.send({
-        type = "position",
-        data = initPos,
-        t = State.timeMs
-      })
+      Network.send(buildPositionMessage(initPos))
       State.lastPosition = initPos
       State.lastSentPosition = initPos
     end
@@ -441,11 +630,38 @@ readPlayerPosition = function()
     return nil
   end
 
-  local mapKey = string.format("%d:%d", pos.mapGroup, pos.mapId)
+  local mapKey = mapKeyFromPosition(pos)
+  local mapSync = State.mapSync
+  if mapSync and mapKey and mapSync.currentMapKey ~= mapKey then
+    local previousKey = mapSync.currentMapKey
+    if previousKey ~= nil then
+      mapSync.mapRev = (tonumber(mapSync.mapRev) or 0) + 1
+      if ENABLE_DEBUG then
+        log(string.format(
+          "Map transition start %s -> %s (rev=%d, frame=%d)",
+          previousKey,
+          mapKey,
+          mapSync.mapRev,
+          State.frameCounter
+        ))
+      end
+    end
+    mapSync.currentMapKey = mapKey
+    mapSync.phase = "transition_pending"
+    mapSync.transitionFrame = State.frameCounter
+    mapSync.justSettled = false
+    mapSync.metaStable = false
+    mapSync.metaStableFrames = 0
+    mapSync.lastMetaSig = nil
+    mapSync.lastStableHash = nil
+    mapSync.settleTimeoutLogged = false
+    localMapMetaPending[mapKey] = nil
+  end
+
   local freshMeta = HAL.readMapProjectionMeta(pos.x, pos.y)
   local hasFresh = isValidProjectionMeta(freshMeta)
   if hasFresh then
-    -- Require two consecutive identical snapshots before caching.
+    -- Require consecutive identical snapshots before caching.
     -- This prevents storing one-frame stale metadata under a new map key.
     local sig = projectionMetaSignature(freshMeta)
     local pending = localMapMetaPending[mapKey]
@@ -461,15 +677,83 @@ readPlayerPosition = function()
       localMapMetaPending[mapKey] = pending
     end
 
-    if pending.frames >= 2 then
+    if pending.frames >= META_STABLE_CONSEC_FRAMES then
       localMapMetaCache[mapKey] = pending.meta
     end
   end
 
-  local selectedMeta = localMapMetaCache[mapKey]
-  if not selectedMeta and hasFresh then
-    -- First stable frame: use immediately for local rendering/send, but don't cache yet.
+  local pending = localMapMetaPending[mapKey]
+  local pendingStable = pending and pending.frames >= META_STABLE_CONSEC_FRAMES
+
+  -- Runtime projection should use the freshest valid metadata, matching
+  -- GBAPK behavior. Stable cache is kept for envelope hash/trust logic.
+  local selectedMeta = nil
+  if hasFresh then
     selectedMeta = freshMeta
+  else
+    selectedMeta = localMapMetaCache[mapKey]
+    if pendingStable and pending.meta then
+      selectedMeta = pending.meta
+    end
+  end
+
+  if mapSync then
+    if mapSync.phase == "transition_pending" and not pendingStable then
+      mapSync.phase = "transition_settling"
+    end
+
+    if pendingStable and selectedMeta then
+      local stableSig = pending.signature or projectionMetaSignature(selectedMeta)
+      if mapSync.lastMetaSig == stableSig then
+        mapSync.metaStableFrames = mapSync.metaStableFrames + 1
+      else
+        mapSync.lastMetaSig = stableSig
+        mapSync.metaStableFrames = 1
+      end
+
+      local settledFromTransition = (mapSync.phase ~= "stable")
+      mapSync.metaStable = true
+      mapSync.phase = "stable"
+      mapSync.justSettled = settledFromTransition
+      mapSync.lastStableHash = stableSig
+      mapSync.settleTimeoutLogged = false
+
+      if ENABLE_DEBUG and settledFromTransition then
+        log(string.format(
+          "Map transition settled %s (rev=%d, frame=%d, header=0x%08X)",
+          mapKey or "unknown",
+          tonumber(mapSync.mapRev) or 0,
+          State.frameCounter,
+          tonumber(selectedMeta.mapHeaderAddr) or 0
+        ))
+      end
+    elseif mapSync.phase ~= "stable" then
+      mapSync.justSettled = false
+      mapSync.metaStable = false
+      mapSync.metaStableFrames = 0
+      mapSync.lastMetaSig = nil
+
+      if (not mapSync.settleTimeoutLogged)
+        and (State.frameCounter - (mapSync.transitionFrame or 0)) >= MAP_SETTLE_MAX_FRAMES then
+        mapSync.settleTimeoutLogged = true
+        if ENABLE_DEBUG then
+          log(string.format(
+            "Map transition settling timeout on %s (rev=%d, frame=%d)",
+            mapKey or "unknown",
+            tonumber(mapSync.mapRev) or 0,
+            State.frameCounter
+          ))
+        end
+      end
+    else
+      mapSync.justSettled = false
+      mapSync.metaStable = selectedMeta ~= nil
+      if selectedMeta then
+        mapSync.lastStableHash = projectionMetaSignature(selectedMeta)
+      else
+        mapSync.lastStableHash = nil
+      end
+    end
   end
 
   if selectedMeta then
@@ -478,6 +762,11 @@ readPlayerPosition = function()
     pos.connectionCount = selectedMeta.connectionCount
     pos.connections = selectedMeta.connections
   end
+
+  local mapRev, metaStable, metaHash = getLocalPositionEnvelope()
+  pos.mapRev = mapRev
+  pos.metaStable = metaStable
+  pos.metaHash = metaHash
 
   return pos
 end
@@ -532,21 +821,16 @@ local function positionChanged(pos1, pos2)
   return pos1.x ~= pos2.x or
          pos1.y ~= pos2.y or
          pos1.mapId ~= pos2.mapId or
-         pos1.mapGroup ~= pos2.mapGroup or
-         pos1.facing ~= pos2.facing
+         pos1.mapGroup ~= pos2.mapGroup
 end
 
 --[[
   Send position update to server
 ]]
-local function sendPositionUpdate(position)
+local function sendPositionUpdate(position, durationHint, transitionContext)
   -- Send position to server if connected
   if State.connected then
-    Network.send({
-      type = "position",
-      data = position,
-      t = State.timeMs
-    })
+    Network.send(buildPositionMessage(position, durationHint, transitionContext))
   end
 
   -- Debug log occasionally
@@ -584,6 +868,134 @@ local function initOverlay()
 
   log("Overlay initialized!")
   return true
+end
+
+local function formatDebugNumber(value)
+  local n = tonumber(value)
+  if n == nil then
+    return "nil"
+  end
+  return string.format("%.3f", n)
+end
+
+local function formatDebugMap(pos)
+  if type(pos) ~= "table" then
+    return "nil"
+  end
+  local mapGroup = tonumber(pos.mapGroup)
+  local mapId = tonumber(pos.mapId)
+  if mapGroup == nil or mapId == nil then
+    return "nil"
+  end
+  return string.format("%d:%d", mapGroup, mapId)
+end
+
+local function formatDebugPos(pos)
+  if type(pos) ~= "table" then
+    return "nil"
+  end
+  return string.format("%s,%s @%s",
+    formatDebugNumber(pos.x),
+    formatDebugNumber(pos.y),
+    formatDebugMap(pos)
+  )
+end
+
+local function formatDebugScreen(pos)
+  if type(pos) ~= "table" then
+    return "nil"
+  end
+  local x = tonumber(pos.x)
+  local y = tonumber(pos.y)
+  if x == nil or y == nil then
+    return "nil"
+  end
+  return string.format("%d,%d", math.floor(x), math.floor(y))
+end
+
+local function buildRemotePositionDebugSnapshot(currentPos)
+  if not ENABLE_REMOTE_POS_DEBUG or not currentPos then
+    return nil
+  end
+
+  local ids = {}
+  for playerId in pairs(State.otherPlayers) do
+    ids[#ids + 1] = playerId
+  end
+  if #ids == 0 then
+    State.remoteDebugLastConsoleLine = nil
+    return nil
+  end
+
+  table.sort(ids)
+  local remotePlayerId = ids[1]
+  local targetPos = State.otherPlayers[remotePlayerId]
+  if type(targetPos) ~= "table" then
+    State.remoteDebugLastConsoleLine = nil
+    return nil
+  end
+
+  local currentRemotePos = Interpolate.getPosition(remotePlayerId) or targetPos
+  local projection = Render.getDebugProjectionSnapshot and
+    Render.getDebugProjectionSnapshot(currentPos, currentRemotePos, remotePlayerId) or nil
+
+  local snapshot = {
+    playerId = remotePlayerId,
+    target = targetPos,
+    current = currentRemotePos,
+    projected = projection and projection.projected or nil,
+    screen = projection and projection.screen or nil,
+    crossMap = projection and projection.crossMap == true or false,
+    subTileX = projection and projection.subTileX or 0,
+    subTileY = projection and projection.subTileY or 0,
+  }
+
+  if REMOTE_POS_DEBUG_CONSOLE then
+    local line = string.format(
+      "RemotePos[%s] T=%s | C=%s | P=%s | S=%s | XM:%s | ST:%s,%s",
+      remotePlayerId,
+      formatDebugPos(snapshot.target),
+      formatDebugPos(snapshot.current),
+      formatDebugPos(snapshot.projected),
+      formatDebugScreen(snapshot.screen),
+      snapshot.crossMap and "1" or "0",
+      formatDebugNumber(snapshot.subTileX),
+      formatDebugNumber(snapshot.subTileY)
+    )
+    if line ~= State.remoteDebugLastConsoleLine then
+      log(line)
+      State.remoteDebugLastConsoleLine = line
+    end
+  end
+
+  return snapshot
+end
+
+local function drawRemotePositionDebug(snapshot)
+  if not ENABLE_REMOTE_POS_DEBUG or not painter or not snapshot then
+    return
+  end
+
+  local boxY = 14
+  local boxH = 54
+  local textX = 4
+
+  painter:setFillColor(0xA0000000)
+  painter:drawRectangle(0, boxY, W, boxH)
+
+  painter:setFillColor(0xFFFFFF00)
+  painter:drawText("RemoteDBG: " .. string.sub(snapshot.playerId, 1, 18), textX, boxY + 1)
+
+  painter:setFillColor(0xFFFFFFFF)
+  painter:drawText("T: " .. formatDebugPos(snapshot.target), textX, boxY + 11)
+  painter:drawText("C: " .. formatDebugPos(snapshot.current), textX, boxY + 21)
+  painter:drawText("P: " .. formatDebugPos(snapshot.projected), textX, boxY + 31)
+  painter:drawText(string.format("S: %s  XM:%s  ST:%s,%s",
+    formatDebugScreen(snapshot.screen),
+    snapshot.crossMap and "1" or "0",
+    formatDebugNumber(snapshot.subTileX),
+    formatDebugNumber(snapshot.subTileY)
+  ), textX, boxY + 41)
 end
 
 --[[
@@ -653,6 +1065,11 @@ local function drawOverlay(currentPos)
     Render.drawAllGhosts(painter, overlay.image, interpolatedPlayers, currentPos)
   else
     Render.hideGhosts()
+  end
+
+  if ENABLE_REMOTE_POS_DEBUG and currentPos then
+    local remoteDebug = buildRemotePositionDebugSnapshot(currentPos)
+    drawRemotePositionDebug(remoteDebug)
   end
 
   -- Draw duel UI (fallback overlay — only when native textbox is not active)
@@ -1028,7 +1445,7 @@ local function update()
       -- Send current position immediately so other players see us
       local pos = readPlayerPosition()
       if pos then
-        Network.send({ type = "position", data = pos, t = State.timeMs })
+        Network.send(buildPositionMessage(pos))
         State.lastPosition = pos
         State.lastSentPosition = pos
       end
@@ -1047,10 +1464,16 @@ local function update()
 
       -- Handle different message types
       if message.type == "position" then
+        local envelope = parseRemotePositionEnvelope(message)
+        local rawPosition = clonePosition(message.data) or {}
+        rawPosition.mapRev = envelope.mapRev
+        rawPosition.metaStable = envelope.metaStable
+        rawPosition.metaHash = envelope.metaHash
+
         -- Feed interpolation buffer with timestamp + duration hint
-        Interpolate.update(message.playerId, message.data, message.t, message.dur)
+        Interpolate.update(message.playerId, rawPosition, message.t, message.dur, envelope)
         -- Store raw data as backup + update last seen
-        State.otherPlayers[message.playerId] = message.data
+        State.otherPlayers[message.playerId] = rawPosition
         -- Store character name if provided (for duel textbox display)
         if message.characterName then
           State.playerNames[message.playerId] = message.characterName
@@ -1398,6 +1821,25 @@ local function update()
     local cameraX = HAL.readCameraX()
     local cameraY = HAL.readCameraY()
 
+    -- Critical: once map metadata settles after a seam transition, push an
+    -- immediate corrective packet so peers don't keep transition-frame metadata
+    -- until the idle heartbeat.
+    if State.connected and State.mapSync and State.mapSync.justSettled then
+      sendPositionUpdate(currentPos)
+      State.lastSentPosition = currentPos
+      State.lastIdleHeartbeatFrame = State.frameCounter
+      State.mapSync.justSettled = false
+      if ENABLE_DEBUG then
+        log(string.format(
+          "Map transition settle sync sent %d:%d (rev=%d, frame=%d)",
+          tonumber(currentPos.mapGroup) or -1,
+          tonumber(currentPos.mapId) or -1,
+          tonumber(State.mapSync.mapRev) or 0,
+          State.frameCounter
+        ))
+      end
+    end
+
     if regainedGameplayPos and State.connected then
       sendPositionUpdate(currentPos)
       State.lastSentPosition = currentPos
@@ -1414,25 +1856,69 @@ local function update()
         local oldMapId = State.lastPosition.mapId
         local dx = math.abs(currentPos.x - State.lastPosition.x)
         local dy = math.abs(currentPos.y - State.lastPosition.y)
+        local transitionType = classifyMapTransition(State.lastPosition, currentPos)
+        local dropProjectionState = transitionType == "warp_or_hard"
+        local cameraDebugBefore = Render.getCameraDebugState and Render.getCameraDebugState() or nil
+        local calibrationApplied, calibTx, calibTy, calibVotes, calibSamples = false, nil, nil, nil, nil
+        if Render.recordMapTransitionSample then
+          calibrationApplied, calibTx, calibTy, calibVotes, calibSamples = Render.recordMapTransitionSample(
+            State.lastPosition,
+            currentPos,
+            transitionType
+          )
+        end
         if ENABLE_DEBUG then
-          log(string.format("Map change %d:%d -> %d:%d (dx=%d dy=%d)",
-            oldMapGroup, oldMapId, currentPos.mapGroup, currentPos.mapId, dx, dy))
+          log(string.format("Map change %d:%d -> %d:%d (dx=%d dy=%d, type=%s)",
+            oldMapGroup, oldMapId, currentPos.mapGroup, currentPos.mapId, dx, dy, transitionType))
+          if calibrationApplied then
+            log(string.format(
+              "Map seam calibration %d:%d <- %d:%d = (%d,%d) votes=%d/%d",
+              oldMapGroup,
+              oldMapId,
+              currentPos.mapGroup,
+              currentPos.mapId,
+              tonumber(calibTx) or 0,
+              tonumber(calibTy) or 0,
+              tonumber(calibVotes) or 0,
+              tonumber(calibSamples) or 0
+            ))
+          end
         end
 
-        sendPositionUpdate(currentPos)
+        sendPositionUpdate(currentPos, nil, {
+          from = State.lastPosition,
+          token = tonumber(State.frameCounter) or 0
+        })
         State.lastPosition = currentPos
         State.lastSentPosition = currentPos
         State.sendCooldown = SEND_RATE_MOVING
         State.lastIdleHeartbeatFrame = State.frameCounter
-        -- Keep camera continuity across connected-map seams (GBAPK-like behavior),
-        -- but reset injected OAM/projection allocations.
-        Render.clearGhostCache({ preserveCamera = true })
+        -- Always reset camera tracking on map change to avoid stale +/-16px offsets.
+        -- Keep projection trust across seams to avoid disappearing cross-map ghosts.
+        Render.clearGhostCache({
+          resetCameraTracking = true,
+          dropProjectionState = dropProjectionState
+        })
+        if ENABLE_DEBUG then
+          local cameraDebugAfter = Render.getCameraDebugState and Render.getCameraDebugState() or nil
+          local beforeSubX = math.floor(tonumber(cameraDebugBefore and cameraDebugBefore.subTileX) or 0)
+          local beforeSubY = math.floor(tonumber(cameraDebugBefore and cameraDebugBefore.subTileY) or 0)
+          local afterSubX = math.floor(tonumber(cameraDebugAfter and cameraDebugAfter.subTileX) or 0)
+          local afterSubY = math.floor(tonumber(cameraDebugAfter and cameraDebugAfter.subTileY) or 0)
+          local warmup = math.floor(tonumber(cameraDebugAfter and cameraDebugAfter.warmupFrames) or 0)
+          log(string.format(
+            "Map transition camera reset (dropProjection=%s, subTile %d,%d -> %d,%d, warmup=%d)",
+            tostring(dropProjectionState), beforeSubX, beforeSubY, afterSubX, afterSubY, warmup
+          ))
+        end
         Duel.reset()
         -- Scan for sWarpData after natural map change (calibrates warp system)
         HAL.findSWarpData()
         -- Reset early detection on map change
         State.earlyDetect.inputDir = nil
         State.earlyDetect.predictedPos = nil
+        State.earlyDetect.prevCameraX = nil
+        State.earlyDetect.prevCameraY = nil
       end
 
       State.isMoving = true
@@ -1446,6 +1932,13 @@ local function update()
     -- === Early movement detection (KEYINPUT + camera delta double validation) ===
     local ed = State.earlyDetect
     local inputDir = HAL.readKeyInput()
+
+    if not ENABLE_EARLY_PREDICTION then
+      ed.inputDir = nil
+      ed.inputFrame = 0
+      ed.predictedPos = nil
+      ed.predictedFrame = 0
+    end
 
     -- Track input direction (only when no prediction pending)
     if inputDir and not ed.predictedPos then
@@ -1472,35 +1965,50 @@ local function update()
     ed.prevCameraY = cameraY
 
     -- Double validation: input + camera agree on direction, gap <= INPUT_CAMERA_MAX_GAP
-    if ed.inputDir and cameraDir and not ed.predictedPos then
+    if ENABLE_EARLY_PREDICTION and ed.inputDir and cameraDir and not ed.predictedPos then
       if ed.inputDir == cameraDir then
         local gap = State.frameCounter - ed.inputFrame
         if gap <= INPUT_CAMERA_MAX_GAP then
           -- CONFIRMED: compute destination and send immediately
           local delta = DIR_DELTA[ed.inputDir]
           if delta then
-            ed.predictedPos = {
-              x = currentPos.x + delta.dx,
-              y = currentPos.y + delta.dy,
-              mapId = currentPos.mapId,
-              mapGroup = currentPos.mapGroup,
-              facing = currentPos.facing
-            }
-            ed.predictedFrame = State.frameCounter
+            -- Do not predict map-crossing steps. On border transitions, a
+            -- pre-sent out-of-map tile (e.g. y=-1) produces a 1-tile ghost
+            -- offset until the real map-change packet arrives.
+            if wouldPredictionCrossMapBoundary(currentPos, delta) then
+              if ENABLE_DEBUG then
+                local borderX = tonumber(currentPos.borderX) or -1
+                local borderY = tonumber(currentPos.borderY) or -1
+                log(string.format(
+                  "Skipping prediction at map boundary (%d:%d x=%d y=%d dx=%d dy=%d border=%d,%d)",
+                  tonumber(currentPos.mapGroup) or -1,
+                  tonumber(currentPos.mapId) or -1,
+                  tonumber(currentPos.x) or -1,
+                  tonumber(currentPos.y) or -1,
+                  tonumber(delta.dx) or 0,
+                  tonumber(delta.dy) or 0,
+                  borderX,
+                  borderY
+                ))
+              end
+            else
+              ed.predictedPos = {
+                x = currentPos.x + delta.dx,
+                y = currentPos.y + delta.dy,
+                mapId = currentPos.mapId,
+                mapGroup = currentPos.mapGroup,
+                facing = currentPos.facing
+              }
+              ed.predictedFrame = State.frameCounter
 
-            if State.connected then
-              -- Estimate step duration from camera scroll rate:
-              -- pixels/frame → frames to cross 1 tile (16px) → ms
-              local pxPerFrame = math.max(1, math.abs(cameraDX ~= 0 and cameraDX or cameraDY))
-              local estimatedDur = math.floor((16 / pxPerFrame) * 16.67)
-
-              Network.send({
-                type = "position",
-                data = ed.predictedPos,
-                t = State.timeMs,
-                dur = estimatedDur
-              })
-              State.lastSentPosition = ed.predictedPos
+              if State.connected then
+                -- Estimate step duration from camera scroll rate:
+                -- pixels/frame → frames to cross 1 tile (16px) → ms
+                local pxPerFrame = math.max(1, math.abs(cameraDX ~= 0 and cameraDX or cameraDY))
+                local estimatedDur = math.floor((16 / pxPerFrame) * 16.67)
+                sendPositionUpdate(ed.predictedPos, estimatedDur)
+                State.lastSentPosition = ed.predictedPos
+              end
             end
           end
         end
@@ -1516,7 +2024,7 @@ local function update()
     end
 
     -- === Tile confirmation + adaptive send ===
-    if ed.predictedPos and positionChanged(currentPos, State.lastPosition) then
+    if ENABLE_EARLY_PREDICTION and ed.predictedPos and positionChanged(currentPos, State.lastPosition) then
       -- Tile changed while prediction active: check match
       if currentPos.x == ed.predictedPos.x
         and currentPos.y == ed.predictedPos.y
@@ -1568,7 +2076,14 @@ local function update()
     State.sendCooldown = math.max(0, State.sendCooldown - 1)
 
     -- Update sub-tile camera tracking for smooth ghost scrolling
-    Render.updateCamera(currentPos.x, currentPos.y, cameraX, cameraY)
+    Render.updateCamera(
+      currentPos.x,
+      currentPos.y,
+      cameraX,
+      cameraY,
+      currentPos.mapGroup,
+      currentPos.mapId
+    )
 
   end
 
