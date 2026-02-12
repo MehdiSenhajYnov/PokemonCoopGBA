@@ -16,9 +16,24 @@ This file summarizes only the key addresses that are actively used by client/ser
 Run & Bun profile exposes a render block used by `HAL`/`render.lua`:
 
 ```lua
-render.gMainAddr      = 0x030022C0
-render.oamBufferOffset = 0x38
-render.oamBaseIndex    = 110
+render.gMainAddr                        = 0x030022C0
+render.oamBufferOffset                  = 0x38
+render.oamBaseIndex                     = 110
+render.oamStrategy                      = "fixed"
+render.oamReservedCount                 = 6
+render.oamPriorityBack                  = 2
+render.oamPriorityFront                 = 1
+render.vramRefreshIntervalFrames        = 8
+render.projectionCacheTTLFrames         = 10
+render.projectionSettleGraceFrames      = 12
+render.oamMissGraceFrames               = 10
+render.enableRemoteConnectionFallback   = true
+render.preferNativePalBank              = true
+render.forceOverlayFront                = true
+render.forceOverlayFrontConfirmFrames   = 2
+render.forceOverlayFrontReleaseGraceFrames = 6
+render.spriteCaptureConfidenceMin       = 0.35
+render.spriteBroadcastConfidenceMin     = 0.35
 ```
 
 Runtime renderer then reserves 6 ghost sprite slots in OBJ resources:
@@ -26,8 +41,10 @@ Runtime renderer then reserves 6 ghost sprite slots in OBJ resources:
 - OBJ VRAM slots: 6 blocks of `0x600` bytes (descending from `0x06013C00`)
 
 Depth handling in current code:
-- fixed OAM priority (`2`) for injected ghosts,
-- overlap-front correction via overlay fallback when needed.
+- OAM sprites are rendered continuously (base stable path),
+- back/front OAM priorities are split (`2` / `1`),
+- overlap-front correction uses overlay with hysteresis (no hard pipeline toggling),
+- projection/OAM grace windows reduce one-frame flash.
 
 ## Core Overworld Offsets
 

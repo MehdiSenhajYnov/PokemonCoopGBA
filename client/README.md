@@ -16,9 +16,12 @@ Lua runtime loaded by mGBA (`client/main.lua`).
 - `interpolate.lua`: waypoint queue interpolation with seam-transition support.
 - `sprite.lua`: local sprite capture from OAM/VRAM/palette + remote sprite cache.
 - `render.lua`: hybrid ghost renderer (OAM injection + overlay labels/fallback).
-  - OAM priority stays fixed for stability.
-  - If a ghost overlaps local player and should be visually in front, it is
-    forced through overlay fallback for that frame.
+  - Fixed reserved OAM slots by default (`oamStrategy = "fixed"`).
+  - OAM sprites stay active each frame (anti-flash baseline path).
+  - Optional overlap-front correction draws a front overlay layer with
+    hysteresis (`forceOverlayFront*`) to avoid frame-to-frame toggling.
+  - Projection/OAM grace windows (`projectionCacheTTLFrames`,
+    `oamMissGraceFrames`) keep ghosts stable during transient misses.
 - `duel.lua`: duel request/accept state machine.
 - `textbox.lua`: native Pokemon textbox flow via script injection.
 - `battle.lua`: PvP synchronization logic (buffer relay, ROM patch lifecycle).
@@ -33,8 +36,24 @@ local SEND_RATE_MOVING = 1
 local SEND_RATE_IDLE = 30
 local POSITION_HEARTBEAT_IDLE = 60
 local SPRITE_HEARTBEAT = 120
+local SPRITE_MIN_BROADCAST_CONFIDENCE = 0.35
 local ENABLE_DEBUG = true
 ```
+
+## Render Tuning (`config/*.lua` -> `render`)
+
+Common keys used by current client:
+
+- `oamStrategy`, `oamReservedCount`, `oamBaseIndex`
+- `oamPriorityBack`, `oamPriorityFront`
+- `vramRefreshIntervalFrames`
+- `projectionCacheTTLFrames`, `projectionSettleGraceFrames`
+- `oamMissGraceFrames`
+- `forceOverlayFront`, `forceOverlayFrontConfirmFrames`,
+  `forceOverlayFrontReleaseGraceFrames`
+- `preferNativePalBank`
+- `spriteCandidateMaxDist`, `spriteCandidateStabilityFrames`,
+  `spriteCaptureConfidenceMin`, `spriteBroadcastConfidenceMin`
 
 ## Message Flow (Client Side)
 

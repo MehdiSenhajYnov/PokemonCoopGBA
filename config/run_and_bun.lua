@@ -27,6 +27,24 @@ return {
     gMainAddr = 0x030022C0,
     oamBufferOffset = 0x38,
     oamBaseIndex = 110, -- GBAPK-style high OAM reservation to avoid engine churn
+    oamStrategy = "fixed", -- Stable fixed reservation (dynamic can cause runtime slot churn)
+    oamReservedCount = 6,
+    oamPriorityBack = 2, -- Visible and generally behind local without dropping behind map layers
+    oamPriorityFront = 1, -- Bring forward when overlap front state is active
+    vramRefreshIntervalFrames = 8, -- Periodic OBJ VRAM refresh to resist DMA churn
+    projectionCacheTTLFrames = 10,
+    projectionSettleGraceFrames = 12,
+    oamMissGraceFrames = 10,
+    enableRemoteConnectionFallback = true,
+    preferNativePalBank = true, -- Use sender native palBank first for maximum visual stability
+    forceOverlayFront = true, -- Correct Y-order when ghost overlaps local player
+    forceOverlayFrontConfirmFrames = 2, -- Hysteresis: require stable front intent
+    forceOverlayFrontReleaseGraceFrames = 6, -- Keep front ordering a few frames to avoid flicker
+    spriteCandidateMaxDist = 40,
+    spriteCandidateStabilityFrames = 2,
+    spriteCandidateSwitchMargin = 6,
+    spriteCaptureConfidenceMin = 0.35,
+    spriteBroadcastConfidenceMin = 0.35,
   },
 
   offsets = {

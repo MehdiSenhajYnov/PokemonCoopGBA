@@ -22,6 +22,14 @@ local SIZE_TABLE = {
 
 -- Ghost opacity (0x00=invisible, 0xFF=opaque). Applied to remote sprites only.
 local GHOST_ALPHA = 0xFF  -- Fully opaque
+local DEFAULT_PLAYER_CANDIDATE_MAX_DIST = 40
+local DEFAULT_PLAYER_CANDIDATE_STABILITY_FRAMES = 2
+local DEFAULT_PLAYER_SWITCH_DISTANCE_MARGIN = 6
+local DEFAULT_PLAYER_CAPTURE_CONFIDENCE_MIN = 0.35
+local PLAYER_CANDIDATE_MAX_DIST = DEFAULT_PLAYER_CANDIDATE_MAX_DIST
+local PLAYER_CANDIDATE_STABILITY_FRAMES = DEFAULT_PLAYER_CANDIDATE_STABILITY_FRAMES
+local PLAYER_SWITCH_DISTANCE_MARGIN = DEFAULT_PLAYER_SWITCH_DISTANCE_MARGIN
+local PLAYER_CAPTURE_CONFIDENCE_MIN = DEFAULT_PLAYER_CAPTURE_CONFIDENCE_MIN
 
 -- Cache for local player sprite
 local localCache = {
@@ -37,6 +45,9 @@ local localCache = {
   paletteBgr = nil,  -- palette array (16 BGR555 values)
   changed = false,
   revision = 0,
+  candidateSignature = nil,
+  candidateStableFrames = 0,
+  captureConfidence = 0,
 }
 
 -- Cache for remote player sprites:
@@ -99,6 +110,65 @@ local function makeSpriteHash(tileBytes, paletteBgr, width, height, hFlip, vFlip
   return spriteHash, tileHash, paletteHash
 end
 
+local function clampInt(value, minValue, maxValue, fallback)
+  local n = math.floor(tonumber(value) or fallback or 0)
+  if n < minValue then n = minValue end
+  if n > maxValue then n = maxValue end
+  return n
+end
+
+local function clampNumber(value, minValue, maxValue, fallback)
+  local n = tonumber(value) or fallback or 0
+  if n < minValue then n = minValue end
+  if n > maxValue then n = maxValue end
+  return n
+end
+
+local function candidateSignature(entry)
+  return string.format("%d:%d:%d:%d:%d",
+    tonumber(entry and entry.tileIndex) or -1,
+    tonumber(entry and entry.palBank) or -1,
+    tonumber(entry and entry.width) or 0,
+    tonumber(entry and entry.height) or 0,
+    tonumber(entry and entry.priority) or -1
+  )
+end
+
+local function evaluateCandidateConfidence(candidates, chosen)
+  if not chosen then
+    return 0
+  end
+
+  local maxDist = math.max(1, PLAYER_CANDIDATE_MAX_DIST)
+  local distScore = 1 - (math.min(chosen._dist or maxDist, maxDist) / maxDist)
+  local confidence = 0.45 + (distScore * 0.45)
+
+  local second = candidates[2]
+  if not second then
+    confidence = confidence + 0.1
+  else
+    local tileGap = math.abs((second.tileIndex or 0) - (chosen.tileIndex or 0))
+    local distGap = math.abs((second._dist or maxDist) - (chosen._dist or maxDist))
+
+    if tileGap == 0 and distGap <= 2 and (second.priority or 0) == (chosen.priority or 0) then
+      confidence = confidence - 0.35
+    elseif tileGap == 0 and distGap <= 4 then
+      confidence = confidence - 0.2
+    elseif tileGap <= 1 and distGap <= 4 then
+      confidence = confidence - 0.1
+    else
+      confidence = confidence + 0.05
+    end
+  end
+
+  local stableFrames = tonumber(localCache.candidateStableFrames) or 0
+  local required = math.max(1, PLAYER_CANDIDATE_STABILITY_FRAMES)
+  local stability = math.min(1, stableFrames / required)
+  confidence = confidence * (0.6 + 0.4 * stability)
+
+  return clampNumber(confidence, 0, 1, 0)
+end
+
 --[[
   Parse a single OAM entry from raw data.
   Returns table with parsed fields, or nil if entry is disabled/empty.
@@ -158,23 +228,14 @@ end
   Find the OAM entry for the local player.
   Scans all 128 OAM entries every call (indices shuffle each frame).
 
-  Identification strategy:
-  - Player is always a 16x32 tall sprite (shape=2, sizeCode=2)
-  - Player tiles are always first loaded in VRAM → lowest tileIndex
-  - Positioned at screen center: top-left ~(112, 72)
-
-  Sort-based approach (no hysteresis):
-  Among all 16x32 sprites within 40px of center, pick the one with:
-  1. Lowest tileIndex (player is always first in VRAM)
-  2. Lowest OAM priority (player pri=2 beats reflection pri=3)
-  3. Closest to center (tiebreaker)
-
-  Works instantly for all player states (walk, run, bike, surf).
-  Returns the parsed entry table (not an index), or nil.
+  Strategy:
+  - Keep same selection criteria (tileIndex, priority, center distance)
+  - Add candidate hysteresis to avoid one-frame mis-selection bursts
+  - Emit confidence used by sender-side gating
 ]]
 local function findPlayerOAM()
-  -- Collect all 16x32 candidates near screen center
   local candidates = {}
+
   for i = 0, 127 do
     if not (HAL.isGhostReservedOAMIndex and HAL.isGhostReservedOAMIndex(i)) then
       local attr0, attr1, attr2 = HAL.readOAMEntry(i)
@@ -189,7 +250,7 @@ local function findPlayerOAM()
         local cy = ey + entry.height / 2           -- expected ~88
         local dist = math.abs(cx - 120) + math.abs(cy - 88)
 
-        if dist <= 40 then
+        if dist <= PLAYER_CANDIDATE_MAX_DIST then
           entry.oamIndex = i
           entry._dist = dist
           candidates[#candidates + 1] = entry
@@ -198,7 +259,12 @@ local function findPlayerOAM()
     end
   end
 
-  if #candidates == 0 then return nil end
+  if #candidates == 0 then
+    localCache.candidateSignature = nil
+    localCache.candidateStableFrames = 0
+    localCache.captureConfidence = 0
+    return nil
+  end
 
   -- Sort: lowest tileIndex (player first in VRAM),
   -- then lowest priority (player pri=2 beats reflection pri=3),
@@ -214,6 +280,16 @@ local function findPlayerOAM()
   end)
 
   local chosen = candidates[1]
+
+  local chosenSignature = candidateSignature(chosen)
+  if chosenSignature == localCache.candidateSignature then
+    localCache.candidateStableFrames = (localCache.candidateStableFrames or 0) + 1
+  else
+    localCache.candidateSignature = chosenSignature
+    localCache.candidateStableFrames = 1
+  end
+  localCache.captureConfidence = evaluateCandidateConfidence(candidates, chosen)
+
   chosen._dist = nil
   return chosen
 end
@@ -301,7 +377,27 @@ end
 --[[
   Initialize the sprite module.
 ]]
-function Sprite.init()
+function Sprite.init(config)
+  local renderConfig = (type(config) == "table" and type(config.render) == "table") and config.render or {}
+
+  PLAYER_CANDIDATE_MAX_DIST = DEFAULT_PLAYER_CANDIDATE_MAX_DIST
+  PLAYER_CANDIDATE_STABILITY_FRAMES = DEFAULT_PLAYER_CANDIDATE_STABILITY_FRAMES
+  PLAYER_SWITCH_DISTANCE_MARGIN = DEFAULT_PLAYER_SWITCH_DISTANCE_MARGIN
+  PLAYER_CAPTURE_CONFIDENCE_MIN = DEFAULT_PLAYER_CAPTURE_CONFIDENCE_MIN
+
+  if renderConfig.spriteCandidateMaxDist ~= nil then
+    PLAYER_CANDIDATE_MAX_DIST = clampInt(renderConfig.spriteCandidateMaxDist, 8, 120, DEFAULT_PLAYER_CANDIDATE_MAX_DIST)
+  end
+  if renderConfig.spriteCandidateStabilityFrames ~= nil then
+    PLAYER_CANDIDATE_STABILITY_FRAMES = clampInt(renderConfig.spriteCandidateStabilityFrames, 1, 10, DEFAULT_PLAYER_CANDIDATE_STABILITY_FRAMES)
+  end
+  if renderConfig.spriteCandidateSwitchMargin ~= nil then
+    PLAYER_SWITCH_DISTANCE_MARGIN = clampInt(renderConfig.spriteCandidateSwitchMargin, 0, 32, DEFAULT_PLAYER_SWITCH_DISTANCE_MARGIN)
+  end
+  if renderConfig.spriteCaptureConfidenceMin ~= nil then
+    PLAYER_CAPTURE_CONFIDENCE_MIN = clampNumber(renderConfig.spriteCaptureConfidenceMin, 0, 1, DEFAULT_PLAYER_CAPTURE_CONFIDENCE_MIN)
+  end
+
   localCache.tileIndex = nil
   localCache.palBank = nil
   localCache.img = nil
@@ -314,6 +410,9 @@ function Sprite.init()
   localCache.width = 0
   localCache.height = 0
   localCache.revision = 0
+  localCache.candidateSignature = nil
+  localCache.candidateStableFrames = 0
+  localCache.captureConfidence = 0
   remoteCache = {}
 end
 
@@ -326,6 +425,16 @@ function Sprite.captureLocalPlayer()
   -- Find player OAM entry (rescan every call — OAM indices shuffle each frame)
   local entry = findPlayerOAM()
   if not entry then
+    localCache.changed = false
+    return
+  end
+
+  if (localCache.candidateStableFrames or 0) < PLAYER_CANDIDATE_STABILITY_FRAMES then
+    localCache.changed = false
+    return
+  end
+
+  if (localCache.captureConfidence or 0) < PLAYER_CAPTURE_CONFIDENCE_MIN then
     localCache.changed = false
     return
   end
@@ -394,6 +503,10 @@ end
 ]]
 function Sprite.hasChanged()
   return localCache.changed
+end
+
+function Sprite.getLocalCaptureConfidence()
+  return clampNumber(localCache.captureConfidence, 0, 1, 0)
 end
 
 --[[

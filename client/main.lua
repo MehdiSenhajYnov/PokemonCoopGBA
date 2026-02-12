@@ -137,6 +137,7 @@ local MAX_MESSAGES_PER_FRAME = 10 -- Limit messages processed per frame
 local ENABLE_DEBUG = true
 local POSITION_HEARTBEAT_IDLE = 60 -- Force a periodic idle position refresh (~1/sec)
 local SPRITE_HEARTBEAT = 120        -- Force sprite refresh (~2/sec) if packets were missed
+local SPRITE_MIN_BROADCAST_CONFIDENCE = 0.35
 local ENABLE_REMOTE_POS_DEBUG = true   -- Build remote debug snapshot state
 local SHOW_LOCAL_POS_DEBUG_OVERLAY = false  -- Draw local X/Y/map debug in top bar
 local SHOW_REMOTE_POS_DEBUG_OVERLAY = false -- Draw remote Target/Current/Projected/Screen on overlay
@@ -166,6 +167,19 @@ local function cameraDeltaToDir(dcx, dcy)
   if dcx < 0 then return "left" end
   if dcx > 0 then return "right" end
   return nil
+end
+
+local function clampNumber(value, minValue, maxValue, fallback)
+  local n = tonumber(value)
+  if n == nil then
+    n = fallback
+  end
+  if n == nil then
+    n = minValue
+  end
+  if n < minValue then n = minValue end
+  if n > maxValue then n = maxValue end
+  return n
 end
 
 -- State
@@ -577,6 +591,17 @@ local function initialize()
   localMapMetaCache = {}
   localMapMetaPending = {}
 
+  local renderConfig = (type(detectedConfig) == "table" and type(detectedConfig.render) == "table") and detectedConfig.render or nil
+  if renderConfig then
+    local minSpriteConfidence = renderConfig.spriteBroadcastConfidenceMin
+    if minSpriteConfidence == nil then
+      minSpriteConfidence = renderConfig.spriteCaptureConfidenceMin
+    end
+    if minSpriteConfidence ~= nil then
+      SPRITE_MIN_BROADCAST_CONFIDENCE = clampNumber(minSpriteConfidence, 0, 1, SPRITE_MIN_BROADCAST_CONFIDENCE)
+    end
+  end
+
   -- Initialize HAL with detected config
   HAL.init(detectedConfig)
   log("Using config: " .. (detectedConfig.name or "Unknown"))
@@ -586,7 +611,7 @@ local function initialize()
 
   -- Initialize rendering and sprite extraction
   Render.init(detectedConfig)
-  Sprite.init()
+  Sprite.init(detectedConfig)
   Render.setSprite(Sprite)
 
   -- Initialize textbox module (native GBA textboxes for duel UI)
@@ -1913,8 +1938,11 @@ local function update()
     end
   end
 
-  -- Send sprite update when local capture reports a meaningful change.
-  if Sprite.hasChanged() and State.connected then
+  -- Send sprite update only when local capture confidence is high enough.
+  local spriteCaptureConfidence = Sprite.getLocalCaptureConfidence and Sprite.getLocalCaptureConfidence() or 1
+  local canSendSpriteNow = spriteCaptureConfidence >= SPRITE_MIN_BROADCAST_CONFIDENCE
+
+  if Sprite.hasChanged() and State.connected and canSendSpriteNow then
     local spriteData = Sprite.getLocalSpriteData()
     if spriteData then
       Network.send({
@@ -1923,7 +1951,9 @@ local function update()
       })
       State.lastSpriteSendFrame = State.frameCounter
     end
-  elseif State.connected and (State.frameCounter - State.lastSpriteSendFrame) >= SPRITE_HEARTBEAT then
+  elseif State.connected
+    and canSendSpriteNow
+    and (State.frameCounter - State.lastSpriteSendFrame) >= SPRITE_HEARTBEAT then
     local spriteData = Sprite.getLocalSpriteData()
     if spriteData then
       Network.send({

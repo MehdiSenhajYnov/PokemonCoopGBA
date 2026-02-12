@@ -4,7 +4,7 @@
 
   Hybrid OAM renderer:
   - Ghost sprites are injected directly into OBJ VRAM + OAM
-  - Painter overlay is used only for labels and fallback debug rectangles
+  - Painter overlay is used only for fallback debug rectangles
 ]]
 
 local HAL = require("hal")
@@ -16,11 +16,21 @@ local Render = {}
 -- Configuration
 local TILE_SIZE = 16
 local GHOST_SIZE = 14 -- fallback rectangle size when no sprite data/OAM slot
-local OAM_PRIORITY = 2
+local OAM_PRIORITY_BACK = 2
+local OAM_PRIORITY_FRONT = 1
 local MAX_GHOSTS = HAL.getGhostMaxSlots() or 6
+local ACTIVE_GHOST_SLOTS = MAX_GHOSTS
+local OAM_STRATEGY = "fixed"
 local USE_REMOTE_CONNECTION_FALLBACK = false
 local META_HASH_MISMATCH_THRESHOLD = 2
 local CAMERA_WARMUP_FRAMES = 2
+local VRAM_REFRESH_INTERVAL_FRAMES = 8
+local PROJECTION_SETTLE_GRACE_FRAMES = 12
+local OAM_MISS_GRACE_FRAMES = 10
+local PREFER_NATIVE_PALBANK = true
+local ENABLE_FORCE_OVERLAY_FRONT = true
+local OVERLAY_FRONT_ENABLE_CONFIRM_FRAMES = 2
+local OVERLAY_FRONT_RELEASE_GRACE_FRAMES = 6
 local FORCE_ZERO_SUBTILE_OFFSET = false -- Test mode: keep ST fixed to 0,0
 
 local RESERVED_PALETTE_SLOTS = { 13, 14, 15 }
@@ -36,9 +46,6 @@ local STATE_OUTLINES = {
     interpolating = 0xFF00CC00,
     idle = 0xFF00CC00,
 }
-
-local TEXT_COLOR = 0xFFFFFFFF
-local TEXT_BG_COLOR = 0xA0000000
 
 local SCREEN_WIDTH = 240
 local SCREEN_HEIGHT = 160
@@ -75,8 +82,14 @@ local cameraWarmupFrames = 0
 local slotByPlayer = {}                -- playerId -> vram slot
 local ownerBySlot = {}                 -- vram slot -> playerId
 local slotSpriteHash = {}              -- vram slot -> sprite hash
+local slotLastVRAMWriteTick = {}       -- vram slot -> last write tick
 local paletteHashBySlot = {}           -- palette slot -> hash
 local previousOAM = {}                 -- OAM indices written during previous frame
+local ownedGhostOAM = {}               -- oamIndex -> true (only slots written by us)
+local oamLastWriteTick = {}            -- oamIndex -> renderTick of last successful write
+local activeGhostOAMIndices = {}       -- slot+1 -> oamIndex (dynamic/fixed strategy)
+local lastRenderedGhostByPlayer = {}   -- playerId -> last successful ghost render snapshot
+local overlayFrontTracker = {}         -- playerId -> {isFront, desiredCount, releaseTick}
 local projectionMetaState = {}         -- playerId -> {lastRev, lastHash, mismatchCount, ignoreRev}
 local transitionProjectionOffsets = {} -- legacy debug cache (kept for compatibility)
 local projectedPosCache = {}           -- playerId -> {x, y, crossMap, tick}
@@ -114,6 +127,66 @@ local function resetCameraTrackingState(warmupFrames)
     stepDirX, stepDirY = 0, 0
     lastCameraMapKey = nil
     cameraWarmupFrames = math.max(0, tonumber(warmupFrames) or 0)
+end
+
+local function clampInt(value, minValue, maxValue, fallback)
+    local n = math.floor(tonumber(value) or fallback or 0)
+    if n < minValue then n = minValue end
+    if n > maxValue then n = maxValue end
+    return n
+end
+
+local function setActiveGhostOAMIndices(indices)
+    activeGhostOAMIndices = {}
+    if type(indices) ~= "table" then
+        return
+    end
+    for i = 1, #indices do
+        local idx = tonumber(indices[i])
+        if idx and idx >= 0 and idx <= 127 then
+            activeGhostOAMIndices[#activeGhostOAMIndices + 1] = idx
+        end
+    end
+end
+
+local function loadFixedGhostOAMIndices()
+    local fixed = {}
+    for slot = 0, ACTIVE_GHOST_SLOTS - 1 do
+        local idx = HAL.getGhostOAMIndexForSlot and HAL.getGhostOAMIndexForSlot(slot) or nil
+        if idx ~= nil then
+            fixed[#fixed + 1] = idx
+        end
+    end
+    setActiveGhostOAMIndices(fixed)
+end
+
+local function ensureGhostOAMReservation(forceReallocate)
+    if OAM_STRATEGY == "dynamic" and HAL.allocateGhostOAMSlots then
+        if forceReallocate or #activeGhostOAMIndices ~= ACTIVE_GHOST_SLOTS then
+            local allocated = HAL.allocateGhostOAMSlots(ACTIVE_GHOST_SLOTS)
+            setActiveGhostOAMIndices(allocated)
+        end
+
+        if HAL.validateGhostOAMSlots and not HAL.validateGhostOAMSlots(activeGhostOAMIndices) then
+            local reallocated = HAL.allocateGhostOAMSlots(ACTIVE_GHOST_SLOTS)
+            setActiveGhostOAMIndices(reallocated)
+        end
+    end
+
+    if #activeGhostOAMIndices == 0 then
+        loadFixedGhostOAMIndices()
+    end
+end
+
+local function getReservedOAMIndexForSlot(slot)
+    local idx = activeGhostOAMIndices[slot + 1]
+    if idx ~= nil then
+        return idx
+    end
+    if OAM_STRATEGY ~= "dynamic" then
+        return HAL.getGhostOAMIndexForSlot and HAL.getGhostOAMIndexForSlot(slot) or nil
+    end
+    return nil
 end
 
 local function normalizeConnection(conn)
@@ -447,10 +520,14 @@ local function resolveProjectedGhostTilePosition(localPos, remotePos, playerId)
             end
         end
 
-        -- Anti-flash fallback: keep last projected position for a couple frames
-        -- when metadata/projection briefly drops during map settle.
+        -- Anti-flash fallback: keep last projected position while metadata is
+        -- settling or seam interpolation is still in flight.
+        local holdFrames = PROJECTED_POS_CACHE_TTL
+        if (t ~= nil and t < 1) or (remotePos and remotePos.metaStable ~= true) then
+            holdFrames = math.max(holdFrames, PROJECTION_SETTLE_GRACE_FRAMES)
+        end
         local cached = playerId and projectedPosCache[playerId] or nil
-        if cached and tonumber(cached.tick) and (renderTick - cached.tick) <= PROJECTED_POS_CACHE_TTL then
+        if cached and tonumber(cached.tick) and (renderTick - cached.tick) <= holdFrames then
             return cached.x, cached.y, cached.crossMap == true
         end
         return nil, nil, nil
@@ -578,24 +655,69 @@ end
 local function clearPreviousInjectedOAM()
     for _, oamIndex in ipairs(previousOAM) do
         HAL.hideOAMEntry(oamIndex)
+        ownedGhostOAM[oamIndex] = nil
+        oamLastWriteTick[oamIndex] = nil
     end
     previousOAM = {}
 end
 
 local function hideReservedGhostOAM()
-    for slot = 0, MAX_GHOSTS - 1 do
-        local idx = HAL.getGhostOAMIndexForSlot and HAL.getGhostOAMIndexForSlot(slot) or nil
-        if idx ~= nil then
-            HAL.hideOAMEntry(idx)
+    local hidden = {}
+    for _, oamIndex in ipairs(previousOAM) do
+        if oamIndex ~= nil and not hidden[oamIndex] then
+            HAL.hideOAMEntry(oamIndex)
+            hidden[oamIndex] = true
         end
     end
+    previousOAM = {}
+
+    for oamIndex, _ in pairs(ownedGhostOAM) do
+        if oamIndex ~= nil and not hidden[oamIndex] then
+            HAL.hideOAMEntry(oamIndex)
+            hidden[oamIndex] = true
+        end
+        oamLastWriteTick[oamIndex] = nil
+    end
+    ownedGhostOAM = {}
+end
+
+local function rebuildPreviousOAMFromOwned()
+    previousOAM = {}
+    for oamIndex, _ in pairs(ownedGhostOAM) do
+        previousOAM[#previousOAM + 1] = oamIndex
+    end
+end
+
+local function reconcileGhostOAMVisibility(currentFrameOAM)
+    local keepOwned = {}
+    for i = 1, #activeGhostOAMIndices do
+        local oamIndex = activeGhostOAMIndices[i]
+        if oamIndex ~= nil then
+            if currentFrameOAM[oamIndex] then
+                keepOwned[oamIndex] = true
+            else
+                local lastTick = tonumber(oamLastWriteTick[oamIndex]) or -9999
+                if (renderTick - lastTick) <= OAM_MISS_GRACE_FRAMES then
+                    keepOwned[oamIndex] = true
+                else
+                    HAL.hideOAMEntry(oamIndex)
+                    oamLastWriteTick[oamIndex] = nil
+                end
+            end
+        end
+    end
+    ownedGhostOAM = keepOwned
+    rebuildPreviousOAMFromOwned()
 end
 
 local function clearSlotAssignments()
     slotByPlayer = {}
     ownerBySlot = {}
     slotSpriteHash = {}
+    slotLastVRAMWriteTick = {}
     paletteHashBySlot = {}
+    lastRenderedGhostByPlayer = {}
+    overlayFrontTracker = {}
 end
 
 local function releaseInactiveSlots(activePlayers)
@@ -605,6 +727,8 @@ local function releaseInactiveSlots(activePlayers)
             if ownerBySlot[slot] == playerId then
                 ownerBySlot[slot] = nil
             end
+            slotSpriteHash[slot] = nil
+            slotLastVRAMWriteTick[slot] = nil
         end
     end
 end
@@ -617,8 +741,12 @@ local function allocateVramSlot(playerId, usedSlots)
         return existing
     end
 
-    for slot = 0, MAX_GHOSTS - 1 do
+    for slot = 0, ACTIVE_GHOST_SLOTS - 1 do
         if not usedSlots[slot] and (ownerBySlot[slot] == nil or ownerBySlot[slot] == playerId) then
+            if ownerBySlot[slot] ~= playerId then
+                slotSpriteHash[slot] = nil
+                slotLastVRAMWriteTick[slot] = nil
+            end
             slotByPlayer[playerId] = slot
             ownerBySlot[slot] = playerId
             usedSlots[slot] = true
@@ -635,7 +763,10 @@ local function assignPaletteSlots(ghosts)
     for _, ghost in ipairs(ghosts) do
         local renderData = ghost.renderData
         local palBank = renderData and tonumber(renderData.palBank) or nil
-        if palBank and palBank >= 0 and palBank <= 15 then
+        local hasNativePalBank = palBank and palBank >= 0 and palBank <= 15
+        local allowNativePalBank = hasNativePalBank and (PREFER_NATIVE_PALBANK or not (renderData and renderData.paletteHash))
+
+        if allowNativePalBank then
             ghost.nativePalBank = palBank
             ghost.paletteSlot = nil
         else
@@ -658,21 +789,163 @@ local function assignPaletteSlots(ghosts)
     end
 end
 
-local function drawFallbackGhost(painter, overlayImage, ghost)
-    if overlayImage and Sprite and Sprite.getImageForPlayer then
-        local spriteImg, spriteW, spriteH = Sprite.getImageForPlayer(ghost.playerId)
-        if spriteImg and spriteW and spriteH and spriteW > 0 and spriteH > 0 then
-            local drawX = ghost.screenX - math.floor((spriteW - TILE_SIZE) / 2)
-            local drawY = ghost.screenY - (spriteH - TILE_SIZE)
-            local drawOk = pcall(overlayImage.drawImage, overlayImage, spriteImg, drawX, drawY)
-            if drawOk then
-                ghost.drawX = drawX
-                ghost.drawY = drawY
-                ghost.width = spriteW
-                ghost.height = spriteH
-                return
+local function rememberRenderedGhost(ghost)
+    if not ghost or not ghost.playerId then
+        return
+    end
+    lastRenderedGhostByPlayer[ghost.playerId] = {
+        playerId = ghost.playerId,
+        drawX = ghost.drawX,
+        drawY = ghost.drawY,
+        screenX = ghost.screenX,
+        screenY = ghost.screenY,
+        width = ghost.width,
+        height = ghost.height,
+        y = ghost.y,
+        state = ghost.state,
+        crossMap = ghost.crossMap == true,
+        forceOverlayFront = ghost.forceOverlayFront == true,
+        oamPriority = ghost.oamPriority,
+        vramSlot = ghost.vramSlot,
+        nativePalBank = ghost.nativePalBank,
+        paletteSlot = ghost.paletteSlot,
+        renderData = ghost.renderData,
+        tick = renderTick,
+    }
+end
+
+local function appendStaleGhosts(ghosts, otherPlayers)
+    if type(ghosts) ~= "table" or type(otherPlayers) ~= "table" then
+        return
+    end
+
+    local present = {}
+    for i = 1, #ghosts do
+        local playerId = ghosts[i] and ghosts[i].playerId
+        if playerId ~= nil then
+            present[playerId] = true
+        end
+    end
+
+    for playerId, _ in pairs(otherPlayers) do
+        if not present[playerId] then
+            local snapshot = lastRenderedGhostByPlayer[playerId]
+            local lastTick = snapshot and tonumber(snapshot.tick) or nil
+            if lastTick ~= nil and (renderTick - lastTick) <= OAM_MISS_GRACE_FRAMES then
+                local staleData = (Sprite and Sprite.getGhostRenderData and Sprite.getGhostRenderData(playerId))
+                    or snapshot.renderData
+
+                ghosts[#ghosts + 1] = {
+                    playerId = playerId,
+                    state = snapshot.state or "idle",
+                    crossMap = snapshot.crossMap and true or false,
+                    renderData = staleData,
+                    screenX = snapshot.screenX,
+                    screenY = snapshot.screenY,
+                    drawX = snapshot.drawX,
+                    drawY = snapshot.drawY,
+                    width = snapshot.width,
+                    height = snapshot.height,
+                    y = snapshot.y or 0,
+                    distance = 9999,
+                    forceOverlayFront = snapshot.forceOverlayFront == true,
+                    oamPriority = snapshot.oamPriority,
+                    stale = true,
+                }
             end
         end
+    end
+end
+
+local function pruneStaleGhostSnapshots(otherPlayers)
+    if type(otherPlayers) ~= "table" then
+        lastRenderedGhostByPlayer = {}
+        return
+    end
+
+    for playerId, snapshot in pairs(lastRenderedGhostByPlayer) do
+        if otherPlayers[playerId] == nil then
+            lastRenderedGhostByPlayer[playerId] = nil
+        else
+            local lastTick = tonumber(snapshot and snapshot.tick) or -9999
+            if (renderTick - lastTick) > (OAM_MISS_GRACE_FRAMES + 4) then
+                lastRenderedGhostByPlayer[playerId] = nil
+            end
+        end
+    end
+end
+
+local function resolveForceOverlayFront(playerId, desiredFront)
+    if not ENABLE_FORCE_OVERLAY_FRONT or playerId == nil then
+        return false
+    end
+
+    local tracker = overlayFrontTracker[playerId]
+    if not tracker then
+        tracker = {
+            isFront = false,
+            desiredCount = 0,
+            releaseTick = -9999,
+        }
+        overlayFrontTracker[playerId] = tracker
+    end
+
+    if desiredFront then
+        if tracker.isFront then
+            tracker.desiredCount = OVERLAY_FRONT_ENABLE_CONFIRM_FRAMES
+            tracker.releaseTick = renderTick + OVERLAY_FRONT_RELEASE_GRACE_FRAMES
+            return true
+        end
+
+        tracker.desiredCount = (tracker.desiredCount or 0) + 1
+        if tracker.desiredCount >= OVERLAY_FRONT_ENABLE_CONFIRM_FRAMES then
+            tracker.isFront = true
+            tracker.desiredCount = OVERLAY_FRONT_ENABLE_CONFIRM_FRAMES
+            tracker.releaseTick = renderTick + OVERLAY_FRONT_RELEASE_GRACE_FRAMES
+            return true
+        end
+        return false
+    end
+
+    tracker.desiredCount = 0
+    if tracker.isFront and renderTick <= (tracker.releaseTick or -9999) then
+        return true
+    end
+
+    tracker.isFront = false
+    return false
+end
+
+local function drawGhostOverlayImage(overlayImage, ghost)
+    if not overlayImage or not ghost or not ghost.playerId then
+        return false
+    end
+    if not Sprite or not Sprite.getImageForPlayer then
+        return false
+    end
+
+    local imgOk, spriteImg, spriteW, spriteH = pcall(Sprite.getImageForPlayer, ghost.playerId)
+    if not imgOk or not spriteImg or not spriteW or not spriteH or spriteW <= 0 or spriteH <= 0 then
+        return false
+    end
+
+    local drawX = ghost.screenX - math.floor((spriteW - TILE_SIZE) / 2)
+    local drawY = ghost.screenY - (spriteH - TILE_SIZE)
+    local drawOk = pcall(overlayImage.drawImage, overlayImage, spriteImg, drawX, drawY)
+    if not drawOk then
+        return false
+    end
+
+    ghost.drawX = drawX
+    ghost.drawY = drawY
+    ghost.width = spriteW
+    ghost.height = spriteH
+    return true
+end
+
+local function drawFallbackGhost(painter, overlayImage, ghost)
+    if drawGhostOverlayImage(overlayImage, ghost) then
+        return
     end
 
     local fillColor = (ghost.state and STATE_COLORS[ghost.state]) or GHOST_COLOR
@@ -689,14 +962,6 @@ local function drawFallbackGhost(painter, overlayImage, ghost)
     painter:drawRectangle(ghost.screenX + 1, ghost.screenY + 1, GHOST_SIZE, GHOST_SIZE)
     painter:setFill(true)
     painter:setStrokeWidth(0)
-end
-
-local function drawGhostLabel(painter, playerId, drawX, drawY)
-    local label = string.sub(playerId, 1, 10)
-    painter:setFillColor(TEXT_BG_COLOR)
-    painter:drawRectangle(drawX - 2, drawY - 10, #label * 6 + 4, 10)
-    painter:setFillColor(TEXT_COLOR)
-    painter:drawText(label, drawX, drawY - 10)
 end
 
 local function writeGhostOAMEntry(ghost, oamIndex)
@@ -721,7 +986,13 @@ local function writeGhostOAMEntry(ghost, oamIndex)
     if ghost.renderData.vFlip then attr1 = attr1 | (1 << 13) end
 
     local palBank = ghost.nativePalBank or ghost.paletteSlot or RESERVED_PALETTE_SLOTS[1]
-    local attr2 = (tileIndex & 0x3FF) | ((OAM_PRIORITY & 0x3) << 10) | ((palBank & 0xF) << 12)
+    local priority = tonumber(ghost and ghost.oamPriority)
+    if priority == nil then
+        priority = OAM_PRIORITY_BACK
+    end
+    if priority < 0 then priority = 0 end
+    if priority > 3 then priority = 3 end
+    local attr2 = (tileIndex & 0x3FF) | ((priority & 0x3) << 10) | ((palBank & 0xF) << 12)
 
     return HAL.writeOAMEntry(oamIndex, attr0, attr1, attr2)
 end
@@ -782,7 +1053,8 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
                     drawX, drawY, width, height,
                     localDrawX, localDrawY, localW, localH
                 )
-                local forceOverlayFront = overlapsLocal and (projectedY > playerPos.y)
+                local desiredOverlayFront = overlapsLocal and (projectedY > playerPos.y)
+                local forceOverlayFront = resolveForceOverlayFront(playerId, desiredOverlayFront)
                 ghostList[#ghostList + 1] = {
                     playerId = playerId,
                     position = position,
@@ -798,6 +1070,7 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
                     y = projectedY,
                     distance = math.abs(dx) + math.abs(dy),
                     forceOverlayFront = forceOverlayFront,
+                    oamPriority = forceOverlayFront and OAM_PRIORITY_FRONT or OAM_PRIORITY_BACK,
                 }
             end
         end
@@ -813,6 +1086,11 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
             projectedPosCache[trackedId] = nil
         end
     end
+    for trackedId, _ in pairs(overlayFrontTracker) do
+        if otherPlayers[trackedId] == nil then
+            overlayFrontTracker[trackedId] = nil
+        end
+    end
 
     table.sort(ghostList, function(a, b)
         if a.distance ~= b.distance then
@@ -821,9 +1099,9 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
         return a.y < b.y
     end)
 
-    if #ghostList > MAX_GHOSTS then
+    if #ghostList > ACTIVE_GHOST_SLOTS then
         local trimmed = {}
-        for i = 1, MAX_GHOSTS do
+        for i = 1, ACTIVE_GHOST_SLOTS do
             trimmed[i] = ghostList[i]
         end
         ghostList = trimmed
@@ -834,12 +1112,70 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
 end
 
 function Render.init(config)
+    local renderConfig = (type(config) == "table" and type(config.render) == "table") and config.render or {}
+    MAX_GHOSTS = HAL.getGhostMaxSlots() or MAX_GHOSTS or 6
+
+    local configuredSlots = HAL.getGhostOAMSlotCount and HAL.getGhostOAMSlotCount() or nil
+    if configuredSlots == nil then
+        configuredSlots = renderConfig.oamReservedCount
+    end
+    ACTIVE_GHOST_SLOTS = clampInt(configuredSlots, 1, MAX_GHOSTS, MAX_GHOSTS)
+
+    if HAL.getGhostOAMStrategy then
+        OAM_STRATEGY = HAL.getGhostOAMStrategy() or "fixed"
+    elseif renderConfig.oamStrategy == "dynamic" then
+        OAM_STRATEGY = "dynamic"
+    else
+        OAM_STRATEGY = "fixed"
+    end
+
+    if renderConfig.enableRemoteConnectionFallback ~= nil then
+        USE_REMOTE_CONNECTION_FALLBACK = renderConfig.enableRemoteConnectionFallback == true
+    end
+
+    if renderConfig.vramRefreshIntervalFrames ~= nil then
+        VRAM_REFRESH_INTERVAL_FRAMES = clampInt(renderConfig.vramRefreshIntervalFrames, 0, 600, VRAM_REFRESH_INTERVAL_FRAMES)
+    end
+    if renderConfig.oamPriorityBack ~= nil then
+        OAM_PRIORITY_BACK = clampInt(renderConfig.oamPriorityBack, 0, 3, OAM_PRIORITY_BACK)
+    end
+    if renderConfig.oamPriorityFront ~= nil then
+        OAM_PRIORITY_FRONT = clampInt(renderConfig.oamPriorityFront, 0, 3, OAM_PRIORITY_FRONT)
+    end
+    if renderConfig.projectionCacheTTLFrames ~= nil then
+        PROJECTED_POS_CACHE_TTL = clampInt(renderConfig.projectionCacheTTLFrames, 1, 60, PROJECTED_POS_CACHE_TTL)
+    end
+    if renderConfig.projectionSettleGraceFrames ~= nil then
+        PROJECTION_SETTLE_GRACE_FRAMES = clampInt(renderConfig.projectionSettleGraceFrames, 1, 120, PROJECTION_SETTLE_GRACE_FRAMES)
+    end
+    if renderConfig.oamMissGraceFrames ~= nil then
+        OAM_MISS_GRACE_FRAMES = clampInt(renderConfig.oamMissGraceFrames, 0, 30, OAM_MISS_GRACE_FRAMES)
+    end
+    if renderConfig.preferNativePalBank ~= nil then
+        PREFER_NATIVE_PALBANK = renderConfig.preferNativePalBank == true
+    end
+    if renderConfig.forceOverlayFront ~= nil then
+        ENABLE_FORCE_OVERLAY_FRONT = renderConfig.forceOverlayFront == true
+    end
+    if renderConfig.forceOverlayFrontConfirmFrames ~= nil then
+        OVERLAY_FRONT_ENABLE_CONFIRM_FRAMES = clampInt(renderConfig.forceOverlayFrontConfirmFrames, 1, 8, OVERLAY_FRONT_ENABLE_CONFIRM_FRAMES)
+    end
+    if renderConfig.forceOverlayFrontReleaseGraceFrames ~= nil then
+        OVERLAY_FRONT_RELEASE_GRACE_FRAMES = clampInt(renderConfig.forceOverlayFrontReleaseGraceFrames, 0, 30, OVERLAY_FRONT_RELEASE_GRACE_FRAMES)
+    end
+
     resetCameraTrackingState(0)
     projectionMetaState = {}
     projectedPosCache = {}
     renderTick = 0
+    ownedGhostOAM = {}
+    activeGhostOAMIndices = {}
+    slotLastVRAMWriteTick = {}
+    oamLastWriteTick = {}
     clearPreviousInjectedOAM()
+    hideReservedGhostOAM()
     clearSlotAssignments()
+    ensureGhostOAMReservation(true)
 end
 
 --[[
@@ -1018,6 +1354,7 @@ function Render.clearGhostCache(options)
     clearPreviousInjectedOAM()
     hideReservedGhostOAM()
     clearSlotAssignments()
+    ensureGhostOAMReservation(OAM_STRATEGY == "dynamic")
     if dropProjectionState then
         projectionMetaState = {}
         projectedPosCache = {}
@@ -1084,6 +1421,8 @@ end
 function Render.hideGhosts()
     clearPreviousInjectedOAM()
     hideReservedGhostOAM()
+    lastRenderedGhostByPlayer = {}
+    ensureGhostOAMReservation(OAM_STRATEGY == "dynamic")
     projectionMetaState = {}
     projectedPosCache = {}
 end
@@ -1102,7 +1441,6 @@ end
   Draw all ghost players:
   - write remote sprites to OBJ VRAM/palette if changed
   - write OAM entries each frame
-  - draw labels on painter overlay
 ]]
 function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
     if not otherPlayers or not painter or not playerPos then
@@ -1110,11 +1448,18 @@ function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
     end
 
     renderTick = renderTick + 1
+    pruneStaleGhostSnapshots(otherPlayers)
 
-    clearPreviousInjectedOAM()
+    ensureGhostOAMReservation(false)
 
     local ghosts = collectVisibleGhosts(otherPlayers, playerPos)
+    appendStaleGhosts(ghosts, otherPlayers)
+    table.sort(ghosts, function(a, b)
+        return (a.y or 0) < (b.y or 0)
+    end)
+    local currentFrameOAM = {}
     if #ghosts == 0 then
+        reconcileGhostOAMVisibility(currentFrameOAM)
         return 0
     end
 
@@ -1143,19 +1488,29 @@ function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
         local rendered = false
         local data = ghost.renderData
 
-        if (not ghost.forceOverlayFront) and data and ghost.vramSlot ~= nil then
+        if data and ghost.vramSlot ~= nil then
             local spriteKey = data.spriteHash or tostring(data.revision or 0)
-            if slotSpriteHash[ghost.vramSlot] ~= spriteKey then
+            local needsVramWrite = slotSpriteHash[ghost.vramSlot] ~= spriteKey
+            if not needsVramWrite and VRAM_REFRESH_INTERVAL_FRAMES > 0 then
+                local lastWriteTick = slotLastVRAMWriteTick[ghost.vramSlot]
+                if not lastWriteTick or (renderTick - lastWriteTick) >= VRAM_REFRESH_INTERVAL_FRAMES then
+                    needsVramWrite = true
+                end
+            end
+
+            if needsVramWrite then
                 if HAL.writeGhostTilesToVRAM(ghost.vramSlot, data.tileBytes) then
                     slotSpriteHash[ghost.vramSlot] = spriteKey
+                    slotLastVRAMWriteTick[ghost.vramSlot] = renderTick
                 else
+                    slotLastVRAMWriteTick[ghost.vramSlot] = nil
                     ghost.vramSlot = nil
                 end
             end
 
             if ghost.vramSlot ~= nil then
-                -- Prefer native palBank captured from sender OAM.
-                -- If unavailable, fall back to our reserved OBJ palette slots.
+                -- Palette selection is precomputed in assignPaletteSlots():
+                -- either a native sender palBank, or one of our reserved slots.
                 if not ghost.nativePalBank then
                     local paletteSlot = ghost.paletteSlot
                     if paletteSlot and data.paletteBgr then
@@ -1173,22 +1528,39 @@ function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
                     end
                 end
 
-                local oamIndex = HAL.getGhostOAMIndexForSlot(ghost.vramSlot)
+                local oamIndex = getReservedOAMIndexForSlot(ghost.vramSlot)
                 if ghost.vramSlot ~= nil and oamIndex and writeGhostOAMEntry(ghost, oamIndex) then
-                    previousOAM[#previousOAM + 1] = oamIndex
+                    currentFrameOAM[oamIndex] = true
+                    ownedGhostOAM[oamIndex] = true
+                    oamLastWriteTick[oamIndex] = renderTick
+                    rememberRenderedGhost(ghost)
                     rendered = true
                     renderedCount = renderedCount + 1
                 end
             end
         end
 
-        if not rendered then
-            drawFallbackGhost(painter, overlayImage, ghost)
+        if ghost.forceOverlayFront then
+            if drawGhostOverlayImage(overlayImage, ghost) then
+                rendered = true
+            end
         end
 
-        drawGhostLabel(painter, ghost.playerId, ghost.drawX, ghost.drawY)
+        if not rendered and not ghost.stale then
+            local keepStaleOAM = false
+            if ghost.vramSlot ~= nil then
+                local stickyOAMIndex = getReservedOAMIndexForSlot(ghost.vramSlot)
+                local stickyLastTick = stickyOAMIndex and tonumber(oamLastWriteTick[stickyOAMIndex]) or nil
+                keepStaleOAM = stickyLastTick ~= nil and (renderTick - stickyLastTick) <= OAM_MISS_GRACE_FRAMES
+            end
+            if not keepStaleOAM then
+                drawFallbackGhost(painter, overlayImage, ghost)
+            end
+        end
+
     end
 
+    reconcileGhostOAMVisibility(currentFrameOAM)
     return renderedCount
 end
 

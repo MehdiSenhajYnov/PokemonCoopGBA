@@ -64,9 +64,24 @@ Expected:
 - each sees the other ghost
 - movement interpolation is smooth
 - sprite updates propagate (`sprite_update`)
+- no one-frame ghost flash during idle, walk, or close overlap transitions
 - overlap depth is coherent:
   - if remote ghost is below local player on Y and sprites overlap, remote should render in front
   - if remote ghost is above local player on Y, local should stay in front
+
+## 4B) Ghost Stability / Depth Cohabitation
+
+1. Place both players on same map near each other.
+2. Alternate quickly between:
+   - standing still,
+   - 1-tile steps,
+   - overlap crossings (one passes above/below the other).
+3. Repeat while camera moves slightly (walk back/forth near same spot).
+
+Expected:
+- no intermittent blink/flicker of remote ghost
+- remote remains visible (not hidden behind map layer unexpectedly)
+- front/back ordering remains coherent during overlap crossings
 
 ## 5) Reconnect Behavior
 
@@ -143,3 +158,4 @@ Server error `EADDRINUSE`:
 - mGBA Lua logs
 - reproduction steps
 - screenshot/video when visual sync is involved
+- include active `render` block from profile (`config/run_and_bun.lua` or `config/emerald_us.lua`)

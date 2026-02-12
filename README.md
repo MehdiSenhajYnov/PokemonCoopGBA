@@ -13,10 +13,11 @@ Status: experimental alpha. Primary target ROM is Run & Bun.
 - Hybrid ghost rendering:
   - direct OAM/VRAM injection for sprites,
   - overlay fallback + labels.
-- Ghost depth handling:
-  - fixed OAM priority for stable engine compatibility,
-  - front-forced overlay fallback only when a ghost overlaps the local player
-    and is lower on Y (prevents wrong overlap in close contact).
+- Ghost depth + anti-flash stability:
+  - fixed reserved OAM slots (`oamStrategy = "fixed"` by default profiles),
+  - OAM render path remains active every frame (no hard OAM/overlay toggle),
+  - optional front-overlay correction on overlap (with hysteresis),
+  - projection/OAM grace windows to hide transient one-frame blinks.
 - Seam/cross-map projection using map metadata envelopes (`mapRev`, `metaStable`, `metaHash`).
 - Auto reconnect with exponential backoff on the client.
 - Duel flow with native in-game textboxes.
@@ -86,4 +87,7 @@ See `server/README.md` for the detailed message reference.
 ## Notes
 
 - `config/run_and_bun.lua` is the source of truth for Run & Bun addresses.
+- Render behavior is mostly tuned from `config/*.lua` under the `render` block
+  (`oamPriorityBack/front`, `projectionCacheTTLFrames`, `oamMissGraceFrames`,
+  `forceOverlayFront*`, sprite confidence thresholds).
 - The in-client banner still prints `v0.2.0` in `client/main.lua`; feature set is newer than that banner string.

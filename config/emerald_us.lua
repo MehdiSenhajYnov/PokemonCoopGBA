@@ -14,6 +14,31 @@ return {
   gameId = "BPEE",
   version = "1.0",
 
+  -- Renderer metadata
+  render = {
+    gMainAddr = 0x030022C0,
+    oamBufferOffset = 0x38,
+    oamBaseIndex = 110,
+    oamStrategy = "fixed",
+    oamReservedCount = 6,
+    oamPriorityBack = 2,
+    oamPriorityFront = 1,
+    vramRefreshIntervalFrames = 8,
+    projectionCacheTTLFrames = 10,
+    projectionSettleGraceFrames = 12,
+    oamMissGraceFrames = 10,
+    enableRemoteConnectionFallback = true,
+    preferNativePalBank = true,
+    forceOverlayFront = true,
+    forceOverlayFrontConfirmFrames = 2,
+    forceOverlayFrontReleaseGraceFrames = 6,
+    spriteCandidateMaxDist = 40,
+    spriteCandidateStabilityFrames = 2,
+    spriteCandidateSwitchMargin = 6,
+    spriteCaptureConfidenceMin = 0.35,
+    spriteBroadcastConfidenceMin = 0.35,
+  },
+
   -- Memory offsets
   offsets = {
     -- Player coordinates (16-bit values)

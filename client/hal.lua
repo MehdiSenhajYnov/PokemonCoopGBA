@@ -32,10 +32,40 @@ local ROM_END = 0x0A000000
 local config = nil
 local oamBufferAddr = nil
 local ghostOamBaseIndex = GHOST_OAM_BASE_DEFAULT
+local ghostOamStrategy = "fixed"
+local ghostOamSlotCount = GHOST_OBJ_MAX_SLOTS
+local dynamicGhostOAMIndices = nil
+local dynamicOAMFallbackWarned = false
 local mapHeaderAddr = nil
 local mapHeaderScanAttempts = 0
 local mapHeaderCandidateAddr = nil
 local mapHeaderCandidateFrames = 0
+
+local function clampGhostSlotCount(count)
+  local n = math.floor(tonumber(count) or GHOST_OBJ_MAX_SLOTS)
+  if n < 1 then n = 1 end
+  if n > GHOST_OBJ_MAX_SLOTS then n = GHOST_OBJ_MAX_SLOTS end
+  return n
+end
+
+local function copyArray(values)
+  if type(values) ~= "table" then
+    return nil
+  end
+  local out = {}
+  for i = 1, #values do
+    out[i] = values[i]
+  end
+  return out
+end
+
+local function fixedGhostOAMIndex(slot)
+  local idx = ghostOamBaseIndex + slot
+  if idx < 0 or idx > 127 then
+    return nil
+  end
+  return idx
+end
 
 local function resolveOAMBufferAddress(gameConfig)
   if not gameConfig then
@@ -78,14 +108,24 @@ function HAL.init(gameConfig)
   mapHeaderScanAttempts = 0
   mapHeaderCandidateAddr = nil
   mapHeaderCandidateFrames = 0
+
+  local renderConfig = gameConfig and gameConfig.render or nil
+  ghostOamStrategy = "fixed"
+  if renderConfig and renderConfig.oamStrategy == "dynamic" then
+    ghostOamStrategy = "dynamic"
+  end
+  ghostOamSlotCount = clampGhostSlotCount(renderConfig and renderConfig.oamReservedCount)
+  dynamicGhostOAMIndices = nil
+  dynamicOAMFallbackWarned = false
+
   ghostOamBaseIndex = GHOST_OAM_BASE_DEFAULT
-  if gameConfig and gameConfig.render and type(gameConfig.render.oamBaseIndex) == "number" then
-    ghostOamBaseIndex = math.floor(gameConfig.render.oamBaseIndex)
+  if renderConfig and type(renderConfig.oamBaseIndex) == "number" then
+    ghostOamBaseIndex = math.floor(renderConfig.oamBaseIndex)
   end
   if ghostOamBaseIndex < 0 then ghostOamBaseIndex = 0 end
   if ghostOamBaseIndex > 127 then ghostOamBaseIndex = 127 end
-  if ghostOamBaseIndex + GHOST_OBJ_MAX_SLOTS - 1 > 127 then
-    ghostOamBaseIndex = 128 - GHOST_OBJ_MAX_SLOTS
+  if ghostOamBaseIndex + ghostOamSlotCount - 1 > 127 then
+    ghostOamBaseIndex = 128 - ghostOamSlotCount
   end
   console:log("[HAL] Initialized with config: " .. (gameConfig.name or "Unknown"))
   if oamBufferAddr then
@@ -93,8 +133,12 @@ function HAL.init(gameConfig)
   else
     console:log("[HAL] Engine OAM buffer unknown (hardware OAM writes only)")
   end
-  console:log(string.format("[HAL] Ghost OAM reserve: [%d..%d]",
-    ghostOamBaseIndex, ghostOamBaseIndex + GHOST_OBJ_MAX_SLOTS - 1))
+  if ghostOamStrategy == "dynamic" then
+    console:log(string.format("[HAL] Ghost OAM strategy: dynamic (%d slots)", ghostOamSlotCount))
+  else
+    console:log(string.format("[HAL] Ghost OAM reserve: [%d..%d]",
+      ghostOamBaseIndex, ghostOamBaseIndex + ghostOamSlotCount - 1))
+  end
   if config.warp then
     console:log(string.format("[HAL] Warp config OK: callback2=0x%08X cb2LoadMap=0x%08X",
       config.warp.callback2Addr, config.warp.cb2LoadMap))
@@ -123,6 +167,29 @@ function HAL.getGhostOAMBaseIndex()
   return ghostOamBaseIndex
 end
 
+function HAL.getGhostOAMStrategy()
+  return ghostOamStrategy
+end
+
+function HAL.getGhostOAMSlotCount()
+  return ghostOamSlotCount
+end
+
+function HAL.getActiveGhostOAMIndices()
+  if ghostOamStrategy == "dynamic" then
+    return copyArray(dynamicGhostOAMIndices) or {}
+  end
+
+  local out = {}
+  for slot = 0, ghostOamSlotCount - 1 do
+    local idx = fixedGhostOAMIndex(slot)
+    if idx ~= nil then
+      out[#out + 1] = idx
+    end
+  end
+  return out
+end
+
 --[[
   Get reserved OAM index for a ghost slot.
   @param ghostSlot number Slot index (0..GHOST_OBJ_MAX_SLOTS-1)
@@ -130,14 +197,17 @@ end
 ]]
 function HAL.getGhostOAMIndexForSlot(ghostSlot)
   local slot = tonumber(ghostSlot)
-  if not slot or slot < 0 or slot >= GHOST_OBJ_MAX_SLOTS then
+  if not slot or slot < 0 or slot >= ghostOamSlotCount then
     return nil
   end
-  local idx = ghostOamBaseIndex + slot
-  if idx < 0 or idx > 127 then
-    return nil
+  if ghostOamStrategy == "dynamic" then
+    if not dynamicGhostOAMIndices then
+      return nil
+    end
+    return dynamicGhostOAMIndices[slot + 1]
   end
-  return idx
+
+  return fixedGhostOAMIndex(slot)
 end
 
 --[[
@@ -150,7 +220,20 @@ function HAL.isGhostReservedOAMIndex(index)
   if not i or i < 0 or i > 127 then
     return false
   end
-  return i >= ghostOamBaseIndex and i < (ghostOamBaseIndex + GHOST_OBJ_MAX_SLOTS)
+
+  if ghostOamStrategy == "dynamic" then
+    if not dynamicGhostOAMIndices then
+      return false
+    end
+    for slot = 1, #dynamicGhostOAMIndices do
+      if dynamicGhostOAMIndices[slot] == i then
+        return true
+      end
+    end
+    return false
+  end
+
+  return i >= ghostOamBaseIndex and i < (ghostOamBaseIndex + ghostOamSlotCount)
 end
 
 --[[
@@ -2227,6 +2310,22 @@ function HAL.isOverworld()
 end
 
 --[[
+  Check whether an OAM entry looks free for ghost injection.
+]]
+local function isLikelyFreeOAMIndex(index)
+  local attr0, _, attr2 = HAL.readOAMEntry(index)
+  if attr0 == nil then
+    -- Read failure: treat as not free to avoid clobbering unknown slots.
+    return false
+  end
+
+  local y = attr0 & 0xFF
+  local affineMode = (attr0 >> 8) & 0x3
+  local tileIndex = attr2 and (attr2 & 0x3FF) or 0
+  return affineMode == 2 or y >= 160 or (y == 0 and tileIndex == 0)
+end
+
+--[[
   Find up to N likely free OAM entries, prioritizing high indices to reduce
   conflicts with engine-managed sprite slots.
   @param count number Number of slots requested
@@ -2239,36 +2338,96 @@ function HAL.findFreeOAMSlots(count)
   end
 
   local free = {}
-  local used = {}
   for i = 127, 0, -1 do
-    local attr0, _, attr2 = HAL.readOAMEntry(i)
-    if attr0 ~= nil then
-      local y = attr0 & 0xFF
-      local affineMode = (attr0 >> 8) & 0x3
-      local tileIndex = attr2 and (attr2 & 0x3FF) or 0
-      if affineMode == 2 or y >= 160 or (y == 0 and tileIndex == 0) then
-        free[#free + 1] = i
-        used[i] = true
-        if #free >= needed then
-          break
-        end
-      end
-    end
-  end
-
-  -- Fallback: reserve high OAM indices if scan did not find enough hidden slots.
-  if #free < needed then
-    for i = 127, 0, -1 do
-      if not used[i] then
-        free[#free + 1] = i
-        if #free >= needed then
-          break
-        end
+    if isLikelyFreeOAMIndex(i) then
+      free[#free + 1] = i
+      if #free >= needed then
+        break
       end
     end
   end
 
   return free
+end
+
+--[[
+  Allocate ghost OAM slots based on the configured strategy.
+  Dynamic strategy scans free high OAM entries; fixed strategy returns the
+  configured contiguous range.
+
+  @param count number|nil Requested slot count (defaults to configured count)
+  @return table Array of OAM indices (possibly empty on failure)
+]]
+function HAL.allocateGhostOAMSlots(count)
+  local requested = clampGhostSlotCount(count or ghostOamSlotCount)
+  ghostOamSlotCount = requested
+
+  if ghostOamBaseIndex + ghostOamSlotCount - 1 > 127 then
+    ghostOamBaseIndex = 128 - ghostOamSlotCount
+  end
+
+  if ghostOamStrategy ~= "dynamic" then
+    dynamicGhostOAMIndices = nil
+    return HAL.getActiveGhostOAMIndices()
+  end
+
+  local free = HAL.findFreeOAMSlots(requested)
+  if #free >= requested then
+    dynamicGhostOAMIndices = {}
+    for i = 1, requested do
+      dynamicGhostOAMIndices[i] = free[i]
+    end
+    dynamicOAMFallbackWarned = false
+    return copyArray(dynamicGhostOAMIndices)
+  end
+
+  -- Fallback: keep ghosts alive using fixed reserved range when dynamic scan fails.
+  local fallback = {}
+  for slot = 0, requested - 1 do
+    local idx = fixedGhostOAMIndex(slot)
+    if idx ~= nil then
+      fallback[#fallback + 1] = idx
+    end
+  end
+  dynamicGhostOAMIndices = fallback
+  if not dynamicOAMFallbackWarned then
+    console:log("[HAL] WARNING: dynamic ghost OAM allocation failed; using fixed fallback range")
+    dynamicOAMFallbackWarned = true
+  end
+  return copyArray(dynamicGhostOAMIndices)
+end
+
+--[[
+  Validate whether all provided OAM indices are currently free-ish.
+  Use this after clearing previous ghost entries to detect runtime collisions.
+
+  @param indices table|nil Optional indices list (defaults to active ghost list)
+  @return boolean
+]]
+function HAL.validateGhostOAMSlots(indices)
+  local slots = indices
+  if type(slots) ~= "table" then
+    slots = HAL.getActiveGhostOAMIndices()
+  end
+  if type(slots) ~= "table" or #slots == 0 then
+    return false
+  end
+
+  local seen = {}
+  for i = 1, #slots do
+    local idx = tonumber(slots[i])
+    if idx == nil or idx < 0 or idx > 127 then
+      return false
+    end
+    if seen[idx] then
+      return false
+    end
+    seen[idx] = true
+    if not isLikelyFreeOAMIndex(idx) then
+      return false
+    end
+  end
+  return true
 end
 
 --[[

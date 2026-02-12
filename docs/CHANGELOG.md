@@ -7,12 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Ghost Render Depth Fix - Local Overlap Front (2026-02-12)
-- **client/render.lua**: replaced unstable dynamic OAM-priority switching with overlap-scoped front fallback.
-  - OAM priority for injected ghosts remains fixed (`OAM_PRIORITY = 2`).
-  - New overlap check (`rectsOverlap`) compares ghost draw rect with local player rect.
-  - Only when overlap is true and remote Y is below local Y, ghost is forced to overlay path (`forceOverlayFront=true`).
-  - This prevents global ordering regressions while preserving expected close-contact depth behavior.
+### Ghost Render Stability + Depth Cohabitation (2026-02-12)
+- **client/render.lua**: renderer now favors a stable always-on OAM baseline plus controlled front overlay correction.
+  - Added split OAM priorities: `OAM_PRIORITY_BACK=2`, `OAM_PRIORITY_FRONT=1`.
+  - Added overlap-front hysteresis tracker:
+    - `forceOverlayFrontConfirmFrames`
+    - `forceOverlayFrontReleaseGraceFrames`
+  - Added stale-frame protections to suppress transient blink:
+    - projection cache grace (`projectionCacheTTLFrames`)
+    - OAM miss grace (`oamMissGraceFrames`)
+    - per-player last rendered snapshot reuse
+  - Removed hard per-frame OAM/overlay toggling behavior that caused flicker.
+- **config/run_and_bun.lua** and **config/emerald_us.lua**:
+  - synced render defaults with the new cohabitation model
+  - added/updated `oamPriorityBack/front`, `forceOverlayFront*`,
+    `projectionCacheTTLFrames`, `oamMissGraceFrames`, and sprite confidence keys.
+- **client/main.lua** + **client/sprite.lua**:
+  - sprite broadcast now gated by capture confidence to avoid propagating bad local captures.
 
 ### Documentation Sync (2026-02-12)
 - Updated active docs to match current code paths and defaults:
