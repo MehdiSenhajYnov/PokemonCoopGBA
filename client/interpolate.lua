@@ -88,6 +88,9 @@ local function copyPos(pos)
     transitionFromX = pos.transitionFromX,
     transitionFromY = pos.transitionFromY,
     transitionToken = pos.transitionToken,
+    transitionKind = pos.transitionKind,
+    crossMapSeam = pos.crossMapSeam == true,
+    transitionProgress = tonumber(pos.transitionProgress),
   }
 end
 
@@ -222,6 +225,71 @@ local function lastQueuedPos(player)
   return player.current
 end
 
+local function parseTransitionFrom(pos)
+  if type(pos) ~= "table" then
+    return nil
+  end
+
+  local mapGroup = tonumber(pos.transitionFromMapGroup)
+  local mapId = tonumber(pos.transitionFromMapId)
+  local x = tonumber(pos.transitionFromX)
+  local y = tonumber(pos.transitionFromY)
+  if mapGroup == nil or mapId == nil or x == nil or y == nil then
+    return nil
+  end
+
+  return {
+    mapGroup = mapGroup,
+    mapId = mapId,
+    x = x,
+    y = y,
+    kind = pos.transitionKind,
+  }
+end
+
+local function copyRuntimeFields(dst, src)
+  if type(dst) ~= "table" or type(src) ~= "table" then
+    return
+  end
+  dst.x = src.x
+  dst.y = src.y
+  dst.mapId = src.mapId
+  dst.mapGroup = src.mapGroup
+  dst.facing = src.facing or dst.facing
+  dst.mapRev = src.mapRev or dst.mapRev or 0
+  dst.metaStable = src.metaStable == true
+  dst.metaHash = src.metaHash
+  dst.borderX = src.borderX
+  dst.borderY = src.borderY
+  dst.connectionCount = src.connectionCount
+  dst.connections = copyConnections(src.connections)
+  if src.transitionFromMapGroup ~= nil then dst.transitionFromMapGroup = src.transitionFromMapGroup end
+  if src.transitionFromMapId ~= nil then dst.transitionFromMapId = src.transitionFromMapId end
+  if src.transitionFromX ~= nil then dst.transitionFromX = src.transitionFromX end
+  if src.transitionFromY ~= nil then dst.transitionFromY = src.transitionFromY end
+  if src.transitionToken ~= nil then dst.transitionToken = src.transitionToken end
+  if src.transitionKind ~= nil then dst.transitionKind = src.transitionKind end
+end
+
+local function isOutOfBoundsOnKnownMap(pos)
+  if type(pos) ~= "table" then
+    return false
+  end
+
+  local x = tonumber(pos.x)
+  local y = tonumber(pos.y)
+  local borderX = tonumber(pos.borderX)
+  local borderY = tonumber(pos.borderY)
+  if x == nil or y == nil or borderX == nil or borderY == nil then
+    return false
+  end
+  if borderX <= 0 or borderY <= 0 then
+    return false
+  end
+
+  return (x < 0) or (y < 0) or (x >= borderX) or (y >= borderY)
+end
+
 --[[
   Update target position for a player.
   Called when a new network update arrives.
@@ -260,10 +328,26 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint, enve
   end
   local normalizedPos = normalizePositionForPlayer(player, newPosition, envelope)
   local ref = lastQueuedPos(player)
+  local transitionFrom = parseTransitionFrom(normalizedPos)
+  local changedMap = not isSameMap(ref, normalizedPos)
+  local seamTransition = false
+  if changedMap and transitionFrom then
+    local kind = tostring(transitionFrom.kind or "")
+    local seamKind = (kind == "seam_connected" or kind == "likely_seam")
+    if seamKind then
+      seamTransition = true
+    else
+      -- Backward compatibility when sender doesn't provide transitionKind.
+      local sameFromMap = (transitionFrom.mapId == ref.mapId and transitionFrom.mapGroup == ref.mapGroup)
+      if sameFromMap and distance(ref, transitionFrom) <= 2 then
+        seamTransition = true
+      end
+    end
+  end
 
   -- Teleport detection: map change or large distance jump
-  if not isSameMap(ref, normalizedPos)
-    or distance(ref, normalizedPos) > TELEPORT_THRESHOLD then
+  if (changedMap and not seamTransition)
+    or ((not changedMap) and distance(ref, normalizedPos) > TELEPORT_THRESHOLD) then
     -- Flush queue and snap
     player.current = copyPos(normalizedPos)
     player.queue = {}
@@ -288,6 +372,9 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint, enve
       player.current.transitionFromX = normalizedPos.transitionFromX
       player.current.transitionFromY = normalizedPos.transitionFromY
       player.current.transitionToken = normalizedPos.transitionToken
+      player.current.transitionKind = normalizedPos.transitionKind
+      player.current.transitionProgress = nil
+      player.current.crossMapSeam = nil
       if normalizedPos.metaHash ~= nil then
         player.current.metaHash = normalizedPos.metaHash
       elseif not player.current.metaStable then
@@ -340,9 +427,42 @@ function Interpolate.update(playerId, newPosition, timestamp, durationHint, enve
     player.lastMoveTimestamp = timestamp
   end
 
+  -- Seam continuation fusion:
+  -- Some border crossings can emit:
+  --   1) seam map-change waypoint to destination edge tile (e.g. y=20),
+  --   2) immediate same-map correction tile (e.g. y=19) a few ms later.
+  -- Rendering this as two segments causes a visible "hold then catch-up".
+  -- Instead, update the pending seam waypoint target in-place.
+  local tail = player.queue[#player.queue]
+  -- Only fuse when correcting an invalid seam endpoint (out-of-bounds -> in-bounds).
+  -- Never retarget a valid seam step, otherwise a normal next-tile packet can
+  -- collapse the current segment and visually skip tiles.
+  local tailOutOfBounds = (tail ~= nil) and isOutOfBoundsOnKnownMap(tail)
+  local normalizedOutOfBounds = (tail ~= nil) and isOutOfBoundsOnKnownMap(normalizedPos)
+  local canFuseTail = tailOutOfBounds and not normalizedOutOfBounds
+  if tail
+    and canFuseTail
+    and tail.crossMapSeam == true
+    and isSameMap(tail, normalizedPos)
+    and distance(tail, normalizedPos) <= 2 then
+    copyRuntimeFields(tail, normalizedPos)
+    if duration and duration > 0 then
+      tail.duration = math.max(tonumber(tail.duration) or 0, duration)
+    end
+    return
+  end
+
   -- Enqueue waypoint with duration
   local wp = copyPos(normalizedPos)
   wp.duration = duration
+  if seamTransition then
+    wp.crossMapSeam = true
+    wp.transitionFromMapGroup = transitionFrom.mapGroup
+    wp.transitionFromMapId = transitionFrom.mapId
+    wp.transitionFromX = transitionFrom.x
+    wp.transitionFromY = transitionFrom.y
+    wp.transitionKind = transitionFrom.kind
+  end
   table.insert(player.queue, wp)
 
   -- Queue overflow safety: flush and snap to latest
@@ -372,6 +492,10 @@ function Interpolate.step(dt)
       player.state = "idle"
       player.animFrom = nil
       player.animProgress = 0
+      if player.current then
+        player.current.transitionProgress = nil
+        player.current.crossMapSeam = nil
+      end
     else
       player.state = "interpolating"
       local remaining = dt
@@ -384,9 +508,18 @@ function Interpolate.step(dt)
 
         -- Adaptive duration: per-waypoint base, inversely proportional to queue size
         local wpDuration = player.queue[1].duration or DEFAULT_DURATION
-        -- Fix 5: Softer catch-up curve — halves the acceleration per queue element
-        -- Queue 1→/1, 2→/1.5, 3→/2, 5→/3, 10→/5.5 (instead of linear /N)
-        local segDuration = wpDuration / math.max(1, 1 + 0.5 * (#player.queue - 1))
+        local currentTarget = player.queue[1]
+        local seamSegment = currentTarget and currentTarget.crossMapSeam == true
+        -- Keep seam crossing duration stable (no queue catch-up acceleration).
+        -- This preserves the same visual step speed as normal tile movement.
+        local segDuration
+        if seamSegment then
+          segDuration = wpDuration
+        else
+          -- Fix 5: Softer catch-up curve — halves the acceleration per queue element
+          -- Queue 1→/1, 2→/1.5, 3→/2, 5→/3, 10→/5.5 (instead of linear /N)
+          segDuration = wpDuration / math.max(1, 1 + 0.5 * (#player.queue - 1))
+        end
 
         -- Time left to finish this segment
         local timeLeftInSegment = (1 - player.animProgress) * segDuration
@@ -398,6 +531,8 @@ function Interpolate.step(dt)
           -- Snap to waypoint target
           local target = player.queue[1]
           player.current = copyPos(target)
+          player.current.transitionProgress = nil
+          player.current.crossMapSeam = nil
 
           -- Pop consumed waypoint
           table.remove(player.queue, 1)
@@ -411,8 +546,21 @@ function Interpolate.step(dt)
 
           local t = player.animProgress
           local target = player.queue[1]
-          player.current.x = lerp(player.animFrom.x, target.x, t)
-          player.current.y = lerp(player.animFrom.y, target.y, t)
+          local seamInterpolating = (target.crossMapSeam == true and target.transitionFromMapGroup ~= nil and target.transitionFromMapId ~= nil
+            and target.transitionFromX ~= nil and target.transitionFromY ~= nil)
+          if seamInterpolating then
+            -- For border map crossings, render interpolation is done after map
+            -- projection (render.lua) to avoid mixing tile spaces from two maps.
+            player.current.x = target.x
+            player.current.y = target.y
+            player.current.transitionProgress = t
+            player.current.crossMapSeam = true
+          else
+            player.current.x = lerp(player.animFrom.x, target.x, t)
+            player.current.y = lerp(player.animFrom.y, target.y, t)
+            player.current.transitionProgress = nil
+            player.current.crossMapSeam = nil
+          end
           player.current.mapId = target.mapId
           player.current.mapGroup = target.mapGroup
           player.current.mapRev = target.mapRev or player.current.mapRev or 0
@@ -427,6 +575,7 @@ function Interpolate.step(dt)
           player.current.transitionFromX = target.transitionFromX
           player.current.transitionFromY = target.transitionFromY
           player.current.transitionToken = target.transitionToken
+          player.current.transitionKind = target.transitionKind
 
           -- Switch facing at halfway point
           if t >= 0.5 then

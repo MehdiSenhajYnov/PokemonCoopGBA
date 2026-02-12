@@ -36,6 +36,81 @@ for _, mod in ipairs(modulesToUnload) do
   package.loaded[mod] = nil
 end
 
+-- Install timestamp prefix on console logs once per mGBA session.
+-- This timestamps logs from all modules ([HAL], [Battle], [PokéCoop], ...).
+local function installTimestampedConsoleLogging()
+  if not console then
+    return
+  end
+
+  -- Keep the original mGBA console object. Avoid assigning fields on it
+  -- directly (userdata may reject writes with "Invalid key").
+  if _G.__pokecoopConsoleRaw == nil then
+    if type(console) == "table" and console.__pokecoop_raw_console ~= nil then
+      _G.__pokecoopConsoleRaw = console.__pokecoop_raw_console
+    else
+      _G.__pokecoopConsoleRaw = console
+    end
+  end
+  local rawConsole = _G.__pokecoopConsoleRaw
+  if not rawConsole or type(rawConsole.log) ~= "function" then
+    return
+  end
+
+  _G.__pokecoopLogStartClock = os.clock()
+  _G.__pokecoopLogStartWallSec = os.time()
+
+  if _G.__pokecoopConsoleWrapper == nil then
+    local wrapper = {
+      __pokecoop_raw_console = rawConsole,
+    }
+
+    function wrapper:log(...)
+      local clockNow = os.clock()
+      local elapsedMs = math.floor((clockNow - (_G.__pokecoopLogStartClock or clockNow)) * 1000 + 0.5)
+      if elapsedMs < 0 then
+        elapsedMs = 0
+      end
+      local wallSec = (_G.__pokecoopLogStartWallSec or os.time()) + math.floor(elapsedMs / 1000)
+      local wall = os.date("*t", wallSec)
+      local ms = elapsedMs % 1000
+      local prefix = string.format("[%02d:%02d:%02d.%03d +%dms]", wall.hour, wall.min, wall.sec, ms, elapsedMs)
+
+      local parts = {}
+      local argCount = select("#", ...)
+      for i = 1, argCount do
+        parts[#parts + 1] = tostring(select(i, ...))
+      end
+      local payload = table.concat(parts, " ")
+
+      rawConsole:log(prefix .. " " .. payload)
+    end
+
+    setmetatable(wrapper, {
+      __index = function(_, key)
+        if key == "log" then
+          return wrapper.log
+        end
+        local value = rawConsole[key]
+        if type(value) == "function" then
+          -- Preserve method semantics for other console functions.
+          return function(_, ...)
+            return value(rawConsole, ...)
+          end
+        end
+        return value
+      end
+    })
+
+    _G.__pokecoopConsoleWrapper = wrapper
+  end
+
+  -- Redirect global console reference to wrapper.
+  console = _G.__pokecoopConsoleWrapper
+end
+
+installTimestampedConsoleLogging()
+
 -- Load modules
 local HAL = require("hal")
 local Network = require("network")
@@ -134,6 +209,7 @@ local State = {
   lastSpriteSendFrame = -SPRITE_HEARTBEAT,
   hadGameplayPosLastFrame = false,
   remoteDebugLastConsoleLine = nil,
+  remoteDebugTrackedPlayerId = nil,
   mapSync = {
     mapRev = 0,
     phase = "stable",          -- stable | transition_pending | transition_settling
@@ -414,6 +490,7 @@ local function buildPositionMessage(position, durationHint, transitionContext)
     data.transitionFromX = tonumber(fromPos.x)
     data.transitionFromY = tonumber(fromPos.y)
     data.transitionToken = transitionContext.token
+    data.transitionKind = transitionContext.kind
   end
 
   local msg = {
@@ -924,11 +1001,45 @@ local function buildRemotePositionDebugSnapshot(currentPos)
   end
   if #ids == 0 then
     State.remoteDebugLastConsoleLine = nil
+    State.remoteDebugTrackedPlayerId = nil
     return nil
   end
 
   table.sort(ids)
-  local remotePlayerId = ids[1]
+  local remotePlayerId = State.remoteDebugTrackedPlayerId
+  if not remotePlayerId or State.otherPlayers[remotePlayerId] == nil then
+    remotePlayerId = ids[1]
+  end
+
+  local function candidateScore(candidateId)
+    local candidateTarget = State.otherPlayers[candidateId]
+    local candidateCurrent = Interpolate.getPosition(candidateId) or candidateTarget
+    local score = 0
+    if type(candidateCurrent) == "table" then
+      if tonumber(candidateCurrent.transitionProgress) then
+        score = score + 100
+      end
+      local tx = tonumber(candidateTarget and candidateTarget.x)
+      local ty = tonumber(candidateTarget and candidateTarget.y)
+      local cx = tonumber(candidateCurrent.x)
+      local cy = tonumber(candidateCurrent.y)
+      if tx ~= nil and ty ~= nil and cx ~= nil and cy ~= nil then
+        score = score + math.abs(tx - cx) + math.abs(ty - cy)
+      end
+    end
+    return score
+  end
+
+  local bestScore = candidateScore(remotePlayerId)
+  for _, candidateId in ipairs(ids) do
+    local score = candidateScore(candidateId)
+    if score > bestScore + 0.01 then
+      bestScore = score
+      remotePlayerId = candidateId
+    end
+  end
+  State.remoteDebugTrackedPlayerId = remotePlayerId
+
   local targetPos = State.otherPlayers[remotePlayerId]
   if type(targetPos) ~= "table" then
     State.remoteDebugLastConsoleLine = nil
@@ -948,11 +1059,12 @@ local function buildRemotePositionDebugSnapshot(currentPos)
     crossMap = projection and projection.crossMap == true or false,
     subTileX = projection and projection.subTileX or 0,
     subTileY = projection and projection.subTileY or 0,
+    transitionProgress = tonumber(currentRemotePos and currentRemotePos.transitionProgress) or nil,
   }
 
   if REMOTE_POS_DEBUG_CONSOLE then
     local line = string.format(
-      "RemotePos[%s] T=%s | C=%s | P=%s | S=%s | XM:%s | ST:%s,%s",
+      "RemotePos[%s] T=%s | C=%s | P=%s | S=%s | XM:%s | ST:%s,%s | TP:%s",
       remotePlayerId,
       formatDebugPos(snapshot.target),
       formatDebugPos(snapshot.current),
@@ -960,7 +1072,8 @@ local function buildRemotePositionDebugSnapshot(currentPos)
       formatDebugScreen(snapshot.screen),
       snapshot.crossMap and "1" or "0",
       formatDebugNumber(snapshot.subTileX),
-      formatDebugNumber(snapshot.subTileY)
+      formatDebugNumber(snapshot.subTileY),
+      formatDebugNumber(snapshot.transitionProgress)
     )
     if line ~= State.remoteDebugLastConsoleLine then
       log(line)
@@ -990,11 +1103,12 @@ local function drawRemotePositionDebug(snapshot)
   painter:drawText("T: " .. formatDebugPos(snapshot.target), textX, boxY + 11)
   painter:drawText("C: " .. formatDebugPos(snapshot.current), textX, boxY + 21)
   painter:drawText("P: " .. formatDebugPos(snapshot.projected), textX, boxY + 31)
-  painter:drawText(string.format("S: %s  XM:%s  ST:%s,%s",
+  painter:drawText(string.format("S: %s  XM:%s  ST:%s,%s  TP:%s",
     formatDebugScreen(snapshot.screen),
     snapshot.crossMap and "1" or "0",
     formatDebugNumber(snapshot.subTileX),
-    formatDebugNumber(snapshot.subTileY)
+    formatDebugNumber(snapshot.subTileY),
+    formatDebugNumber(snapshot.transitionProgress)
   ), textX, boxY + 41)
 end
 
@@ -1821,29 +1935,46 @@ local function update()
     local cameraX = HAL.readCameraX()
     local cameraY = HAL.readCameraY()
 
+    local mapChangedAgainstLast = (currentPos.mapId ~= State.lastPosition.mapId)
+      or (currentPos.mapGroup ~= State.lastPosition.mapGroup)
+
     -- Critical: once map metadata settles after a seam transition, push an
     -- immediate corrective packet so peers don't keep transition-frame metadata
     -- until the idle heartbeat.
+    -- IMPORTANT: never send this before map-change handling, otherwise a
+    -- map-changed packet without transition context can be broadcast first
+    -- and force a snap on peers.
     if State.connected and State.mapSync and State.mapSync.justSettled then
-      sendPositionUpdate(currentPos)
-      State.lastSentPosition = currentPos
-      State.lastIdleHeartbeatFrame = State.frameCounter
-      State.mapSync.justSettled = false
-      if ENABLE_DEBUG then
-        log(string.format(
-          "Map transition settle sync sent %d:%d (rev=%d, frame=%d)",
-          tonumber(currentPos.mapGroup) or -1,
-          tonumber(currentPos.mapId) or -1,
-          tonumber(State.mapSync.mapRev) or 0,
-          State.frameCounter
-        ))
+      if not mapChangedAgainstLast then
+        sendPositionUpdate(currentPos)
+        State.lastSentPosition = currentPos
+        State.lastIdleHeartbeatFrame = State.frameCounter
+        State.mapSync.justSettled = false
+        if ENABLE_DEBUG then
+          log(string.format(
+            "Map transition settle sync sent %d:%d (rev=%d, frame=%d)",
+            tonumber(currentPos.mapGroup) or -1,
+            tonumber(currentPos.mapId) or -1,
+            tonumber(State.mapSync.mapRev) or 0,
+            State.frameCounter
+          ))
+        end
+      elseif ENABLE_DEBUG then
+        log("Map transition settle sync deferred (map change packet pending)")
       end
     end
 
     if regainedGameplayPos and State.connected then
-      sendPositionUpdate(currentPos)
-      State.lastSentPosition = currentPos
-      State.lastIdleHeartbeatFrame = State.frameCounter
+      -- Do not emit a regain packet on the same frame as a map change.
+      -- The map-change path below must be the first packet so transitionFrom
+      -- metadata is preserved for seam interpolation on peers.
+      if not mapChangedAgainstLast then
+        sendPositionUpdate(currentPos)
+        State.lastSentPosition = currentPos
+        State.lastIdleHeartbeatFrame = State.frameCounter
+      elseif ENABLE_DEBUG then
+        log("Regained gameplay position on map change frame: skipping pre-transition sync")
+      end
     end
 
     -- Detect movement state
@@ -1887,7 +2018,8 @@ local function update()
 
         sendPositionUpdate(currentPos, nil, {
           from = State.lastPosition,
-          token = tonumber(State.frameCounter) or 0
+          token = tonumber(State.frameCounter) or 0,
+          kind = transitionType
         })
         State.lastPosition = currentPos
         State.lastSentPosition = currentPos
@@ -1897,10 +2029,13 @@ local function update()
         -- For seam-connected route<->town transitions, keep camera tracking so
         -- sub-tile offset (ST) continues through the crossing step.
         local shouldResetCameraTracking = transitionType == "warp_or_hard"
-        Render.clearGhostCache({
-          resetCameraTracking = shouldResetCameraTracking,
-          dropProjectionState = dropProjectionState
-        })
+        local shouldClearGhostCache = transitionType == "warp_or_hard"
+        if shouldClearGhostCache then
+          Render.clearGhostCache({
+            resetCameraTracking = shouldResetCameraTracking,
+            dropProjectionState = dropProjectionState
+          })
+        end
         if ENABLE_DEBUG then
           local cameraDebugAfter = Render.getCameraDebugState and Render.getCameraDebugState() or nil
           local beforeSubX = math.floor(tonumber(cameraDebugBefore and cameraDebugBefore.subTileX) or 0)
@@ -1909,8 +2044,8 @@ local function update()
           local afterSubY = math.floor(tonumber(cameraDebugAfter and cameraDebugAfter.subTileY) or 0)
           local warmup = math.floor(tonumber(cameraDebugAfter and cameraDebugAfter.warmupFrames) or 0)
           log(string.format(
-            "Map transition camera reset (dropProjection=%s, subTile %d,%d -> %d,%d, warmup=%d)",
-            tostring(dropProjectionState), beforeSubX, beforeSubY, afterSubX, afterSubY, warmup
+            "Map transition camera reset (clearGhostCache=%s, dropProjection=%s, subTile %d,%d -> %d,%d, warmup=%d)",
+            tostring(shouldClearGhostCache), tostring(dropProjectionState), beforeSubX, beforeSubY, afterSubX, afterSubY, warmup
           ))
         end
         Duel.reset()

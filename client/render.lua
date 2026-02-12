@@ -79,6 +79,9 @@ local paletteHashBySlot = {}           -- palette slot -> hash
 local previousOAM = {}                 -- OAM indices written during previous frame
 local projectionMetaState = {}         -- playerId -> {lastRev, lastHash, mismatchCount, ignoreRev}
 local transitionProjectionOffsets = {} -- legacy debug cache (kept for compatibility)
+local projectedPosCache = {}           -- playerId -> {x, y, crossMap, tick}
+local renderTick = 0
+local PROJECTED_POS_CACHE_TTL = 2      -- frames, anti-flash fallback when projection blips
 
 local function oamShapeSizeForDimensions(width, height)
     return SHAPE_SIZE_LOOKUP[string.format("%dx%d", width, height)]
@@ -356,6 +359,199 @@ local function projectGhostTilePosition(localPos, remotePos, playerId)
     return nil, nil, nil
 end
 
+local function connectionDirectionToDelta(direction)
+    if direction == 1 then
+        return 0, 1
+    elseif direction == 2 then
+        return 0, -1
+    elseif direction == 3 then
+        return -1, 0
+    elseif direction == 4 then
+        return 1, 0
+    end
+    return nil, nil
+end
+
+local function seamStepDeltaForLocalMap(localPos, fromMapGroup, fromMapId, toMapGroup, toMapId)
+    if type(localPos) ~= "table" then
+        return nil, nil
+    end
+
+    local localGroup = tonumber(localPos.mapGroup)
+    local localId = tonumber(localPos.mapId)
+    if localGroup == nil or localId == nil then
+        return nil, nil
+    end
+
+    -- Local map is destination map: movement is opposite of "destination -> from".
+    if localGroup == toMapGroup and localId == toMapId then
+        local connToFrom = findConnectionToMap(localPos.connections, {
+            mapGroup = fromMapGroup,
+            mapId = fromMapId,
+        })
+        if connToFrom then
+            local dx, dy = connectionDirectionToDelta(connToFrom.direction)
+            if dx ~= nil and dy ~= nil then
+                return -dx, -dy
+            end
+        end
+    end
+
+    -- Local map is source map: movement follows "source -> destination".
+    if localGroup == fromMapGroup and localId == fromMapId then
+        local connToTo = findConnectionToMap(localPos.connections, {
+            mapGroup = toMapGroup,
+            mapId = toMapId,
+        })
+        if connToTo then
+            return connectionDirectionToDelta(connToTo.direction)
+        end
+    end
+
+    return nil, nil
+end
+
+local function resolveProjectedGhostTilePosition(localPos, remotePos, playerId)
+    local projectedToX, projectedToY, isCrossMap = projectGhostTilePosition(localPos, remotePos, playerId)
+    local t = tonumber(remotePos and remotePos.transitionProgress)
+    if projectedToX == nil or projectedToY == nil then
+        -- Graceful fallback during seam interpolation: keep endpoint "from" visible
+        -- if "to" projection is temporarily unavailable (prevents one-frame flash).
+        if t ~= nil and t < 1 then
+            local fromMapGroup = tonumber(remotePos and remotePos.transitionFromMapGroup)
+            local fromMapId = tonumber(remotePos and remotePos.transitionFromMapId)
+            local transitionFromX = tonumber(remotePos and remotePos.transitionFromX)
+            local transitionFromY = tonumber(remotePos and remotePos.transitionFromY)
+            if fromMapGroup ~= nil and fromMapId ~= nil and transitionFromX ~= nil and transitionFromY ~= nil then
+                local fromPos = {
+                    x = transitionFromX,
+                    y = transitionFromY,
+                    mapGroup = fromMapGroup,
+                    mapId = fromMapId,
+                    mapRev = remotePos.mapRev,
+                    metaStable = remotePos.metaStable,
+                    metaHash = remotePos.metaHash,
+                }
+                local fallbackX, fallbackY = projectGhostTilePosition(localPos, fromPos, playerId)
+                if fallbackX ~= nil and fallbackY ~= nil then
+                    if playerId ~= nil then
+                        projectedPosCache[playerId] = {
+                            x = fallbackX,
+                            y = fallbackY,
+                            crossMap = true,
+                            tick = renderTick,
+                        }
+                    end
+                    return fallbackX, fallbackY, true
+                end
+            end
+        end
+
+        -- Anti-flash fallback: keep last projected position for a couple frames
+        -- when metadata/projection briefly drops during map settle.
+        local cached = playerId and projectedPosCache[playerId] or nil
+        if cached and tonumber(cached.tick) and (renderTick - cached.tick) <= PROJECTED_POS_CACHE_TTL then
+            return cached.x, cached.y, cached.crossMap == true
+        end
+        return nil, nil, nil
+    end
+
+    -- Optional seam interpolation payload (produced by interpolate.lua):
+    -- blend in projected/local space to avoid mixing coordinates from two maps.
+    if t == nil or t <= 0 or t >= 1 then
+        if playerId ~= nil then
+            projectedPosCache[playerId] = {
+                x = projectedToX,
+                y = projectedToY,
+                crossMap = isCrossMap == true,
+                tick = renderTick,
+            }
+        end
+        return projectedToX, projectedToY, isCrossMap
+    end
+
+    local fromMapGroup = tonumber(remotePos.transitionFromMapGroup)
+    local fromMapId = tonumber(remotePos.transitionFromMapId)
+    local toMapGroup = tonumber(remotePos.mapGroup)
+    local toMapId = tonumber(remotePos.mapId)
+    if fromMapGroup == nil or fromMapId == nil or toMapGroup == nil or toMapId == nil then
+        if playerId ~= nil then
+            projectedPosCache[playerId] = {
+                x = projectedToX,
+                y = projectedToY,
+                crossMap = isCrossMap == true,
+                tick = renderTick,
+            }
+        end
+        return projectedToX, projectedToY, isCrossMap
+    end
+    if fromMapGroup == toMapGroup and fromMapId == toMapId then
+        if playerId ~= nil then
+            projectedPosCache[playerId] = {
+                x = projectedToX,
+                y = projectedToY,
+                crossMap = isCrossMap == true,
+                tick = renderTick,
+            }
+        end
+        return projectedToX, projectedToY, isCrossMap
+    end
+
+    local projectedFromX, projectedFromY = nil, nil
+
+    -- First try direct projection of transitionFrom endpoint.
+    local transitionFromX = tonumber(remotePos.transitionFromX)
+    local transitionFromY = tonumber(remotePos.transitionFromY)
+    if transitionFromX ~= nil and transitionFromY ~= nil then
+        local fromPos = {
+            x = transitionFromX,
+            y = transitionFromY,
+            mapGroup = fromMapGroup,
+            mapId = fromMapId,
+            mapRev = remotePos.mapRev,
+            metaStable = remotePos.metaStable,
+            metaHash = remotePos.metaHash,
+        }
+        projectedFromX, projectedFromY = projectGhostTilePosition(localPos, fromPos, playerId)
+    end
+
+    -- If metadata is not enough to project from-map endpoint, derive it from
+    -- the known seam direction: fromProjected = toProjected - 1 tile along movement.
+    if projectedFromX == nil or projectedFromY == nil then
+        local stepDx, stepDy = seamStepDeltaForLocalMap(localPos, fromMapGroup, fromMapId, toMapGroup, toMapId)
+        if stepDx ~= nil and stepDy ~= nil then
+            projectedFromX = projectedToX - stepDx
+            projectedFromY = projectedToY - stepDy
+        end
+    end
+
+    if projectedFromX == nil or projectedFromY == nil then
+        if playerId ~= nil then
+            projectedPosCache[playerId] = {
+                x = projectedToX,
+                y = projectedToY,
+                crossMap = isCrossMap == true,
+                tick = renderTick,
+            }
+        end
+        return projectedToX, projectedToY, isCrossMap
+    end
+
+    if t < 0 then t = 0 end
+    if t > 1 then t = 1 end
+    local blendedX = projectedFromX + (projectedToX - projectedFromX) * t
+    local blendedY = projectedFromY + (projectedToY - projectedFromY) * t
+    if playerId ~= nil then
+        projectedPosCache[playerId] = {
+            x = blendedX,
+            y = blendedY,
+            crossMap = true,
+            tick = renderTick,
+        }
+    end
+    return blendedX, blendedY, true
+end
+
 local function ghostToScreen(ghostX, ghostY, playerX, playerY, useSubTile)
     local sx = 0
     local sy = 0
@@ -535,7 +731,7 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
             position = data
         end
 
-        local projectedX, projectedY, isCrossMap = projectGhostTilePosition(playerPos, position, playerId)
+        local projectedX, projectedY, isCrossMap = resolveProjectedGhostTilePosition(playerPos, position, playerId)
         if projectedX ~= nil and projectedY ~= nil then
             local screenX, screenY = ghostToScreen(
                 projectedX,
@@ -587,6 +783,11 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
             projectionMetaState[trackedId] = nil
         end
     end
+    for trackedId, _ in pairs(projectedPosCache) do
+        if otherPlayers[trackedId] == nil then
+            projectedPosCache[trackedId] = nil
+        end
+    end
 
     table.sort(ghostList, function(a, b)
         if a.distance ~= b.distance then
@@ -610,6 +811,8 @@ end
 function Render.init(config)
     resetCameraTrackingState(0)
     projectionMetaState = {}
+    projectedPosCache = {}
+    renderTick = 0
     clearPreviousInjectedOAM()
     clearSlotAssignments()
 end
@@ -792,6 +995,7 @@ function Render.clearGhostCache(options)
     clearSlotAssignments()
     if dropProjectionState then
         projectionMetaState = {}
+        projectedPosCache = {}
     end
     if resetCameraTracking then
         resetCameraTrackingState(CAMERA_WARMUP_FRAMES)
@@ -830,7 +1034,7 @@ function Render.getDebugProjectionSnapshot(localPos, remotePos, playerId)
         screen = nil,
     }
 
-    local projectedX, projectedY, isCrossMap = projectGhostTilePosition(localPos, remotePos, playerId)
+    local projectedX, projectedY, isCrossMap = resolveProjectedGhostTilePosition(localPos, remotePos, playerId)
     snapshot.crossMap = (isCrossMap == true)
     if projectedX == nil or projectedY == nil then
         return snapshot
@@ -856,6 +1060,7 @@ function Render.hideGhosts()
     clearPreviousInjectedOAM()
     hideReservedGhostOAM()
     projectionMetaState = {}
+    projectedPosCache = {}
 end
 
 --[[
@@ -878,6 +1083,8 @@ function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
     if not otherPlayers or not painter or not playerPos then
         return 0
     end
+
+    renderTick = renderTick + 1
 
     clearPreviousInjectedOAM()
 
