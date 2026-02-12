@@ -1,27 +1,36 @@
-# Pokémon Unified Co-op Framework
+# Pokemon Unified Co-op Framework
 
-**Seamless multiplayer for Pokémon GBA ROMs using mGBA + Lua + TCP**
+Co-op ghost sync and PvP battle synchronization for Pokemon GBA ROMs, using:
+- `client/`: mGBA Lua runtime
+- `server/`: Node.js TCP relay
+- `config/`: ROM-specific memory/address profiles
 
-![Status](https://img.shields.io/badge/status-alpha-orange)
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
-![Platform](https://img.shields.io/badge/platform-mGBA-green)
+Status: experimental alpha. Primary target ROM is Run & Bun.
 
-## Features
+## Current Capabilities
 
-- **Ghosting**: See other players in real-time on your map
-- **Duel Warp**: Synchronized teleportation to Link Battle room
-- **Generic Architecture**: Multi-ROM support via config profiles
-- **Safe Memory Access**: Protected HAL with crash prevention
-- **TCP Sync**: Low-latency position updates via raw TCP sockets
+- Real-time ghost sync (position + facing + sprite data).
+- Hybrid ghost rendering:
+  - direct OAM/VRAM injection for sprites,
+  - overlay fallback + labels.
+- Ghost depth handling:
+  - fixed OAM priority for stable engine compatibility,
+  - front-forced overlay fallback only when a ghost overlaps the local player
+    and is lower on Y (prevents wrong overlap in close contact).
+- Seam/cross-map projection using map metadata envelopes (`mapRev`, `metaStable`, `metaHash`).
+- Auto reconnect with exponential backoff on the client.
+- Duel flow with native in-game textboxes.
+- PvP battle sync using buffer relay (GBA-PK style, no physical teleport warp).
 
 ## Quick Start
 
-### Prerequisites
-- [Node.js 18+](https://nodejs.org/)
-- [mGBA 0.10.0+](https://mgba.io/downloads.html)
-- Pokémon Run & Bun ROM (primary target)
+### Requirements
 
-### Step 1: Start the Server
+- Node.js 18+
+- mGBA dev build with Lua scripting + socket/canvas support
+- Supported ROM profile (`config/run_and_bun.lua` or `config/emerald_us.lua`)
+
+### 1) Start server
 
 ```bash
 cd server
@@ -29,130 +38,52 @@ npm install
 npm start
 ```
 
-You should see:
-```
-╔═══════════════════════════════════════════════════════╗
-║   Pokémon Co-op Framework - TCP Server               ║
-╚═══════════════════════════════════════════════════════╝
-[Server] Listening on port 8080
-```
+Default port is `3333` (override with `PORT` env var).
 
-### Step 2: Load the Lua Script
+### 2) Start client in mGBA
 
-1. Open mGBA
-2. Load your Pokémon ROM
-3. Go to **Tools → Scripting**
-4. Click **File → Load Script...**
-5. Navigate to `client/main.lua` and load it
+1. Load ROM in mGBA
+2. Open `Tools > Scripting`
+3. Load `client/main.lua`
 
-### Step 3: Verify
+### 3) Verify
 
-You should see in the mGBA console:
-```
-======================================
-Pokémon Co-op Framework v0.1.0
-======================================
-[PokéCoop] Initializing...
-[PokéCoop] Detected ROM: [ROM_ID]
-[PokéCoop] Player ID: player_xxxxx
-[PokéCoop] Initialization complete!
+- Server logs show register/join/position traffic.
+- Overlay shows connection status and player count.
+- With 2 instances, each player sees the other ghost.
+
+## Repo Structure
+
+```text
+client/      mGBA Lua runtime modules (main loop, HAL, render, duel, battle)
+server/      TCP relay server (Node.js net)
+config/      ROM profiles (addresses, flags, battle link patches)
+docs/        Testing and reverse-engineering docs
+scripts/     Scanners, diagnostics, tooling helpers
+Tasks/       Backlog/history notes
 ```
 
-In-game overlay will show your coordinates and map info.
+## Protocol Summary
 
-## Documentation
+- Transport: raw TCP
+- Framing: JSON line-delimited (`\n`)
+- Core messages: `register`, `join`, `position`, `sprite_update`, `ping/pong`
+- Duel/PvP messages: `duel_request`, `duel_accept`, `duel_decline`, `duel_cancel`,
+  `duel_party`, `duel_player_info`, `duel_ready`, `duel_stage`, `duel_buffer*`, `duel_end`
 
-- **[CLAUDE.md](CLAUDE.md)** - Complete project documentation and instructions
-- **[client/README.md](client/README.md)** - Lua client API reference
-- **[server/README.md](server/README.md)** - TCP server protocol
-- **[docs/TESTING.md](docs/TESTING.md)** - Testing procedures
-- **[docs/MEMORY_GUIDE.md](docs/MEMORY_GUIDE.md)** - Memory offset scanning guide
-- **[docs/CHANGELOG.md](docs/CHANGELOG.md)** - Version history
+See `server/README.md` for the detailed message reference.
 
-## Project Structure
+## Main Docs
 
-```
-PokemonCoop/
-├── CLAUDE.md              # Full project specs & instructions
-├── server/                # TCP relay server (Node.js)
-│   ├── server.js
-│   └── README.md
-├── client/                # mGBA Lua scripts
-│   ├── main.lua           # Main entry point
-│   ├── hal.lua            # Hardware abstraction layer
-│   └── README.md
-├── config/                # ROM-specific profiles
-│   └── emerald_us.lua     # Pokémon Emerald US config
-└── docs/                  # Additional documentation
-```
+- `QUICKSTART.md`
+- `client/README.md`
+- `server/README.md`
+- `docs/TESTING.md`
+- `docs/MEMORY_GUIDE.md`
+- `docs/RUN_AND_BUN.md`
+- `docs/CHANGELOG.md`
 
-## Current Status
+## Notes
 
-**Phase 1: Foundation** (In Progress)
-- ✅ TCP server skeleton
-- ✅ Lua HAL with safe memory access
-- ✅ Position reading (Emerald reference)
-- ⏳ Run & Bun offset discovery (CRITICAL - see docs/MEMORY_GUIDE.md)
-- ⏳ TCP client integration
-
-**Phase 2: Ghosting** (Planned)
-- Position synchronization
-- Ghost rendering overlay
-- Movement interpolation
-
-**Phase 3: Duel Warp** (Planned)
-- Trigger system
-- Synchronized teleportation
-- Battle initiation
-
-## Tech Stack
-
-- **Client**: Lua (mGBA scripting API with socket.tcp())
-- **Server**: Node.js + TCP (net library)
-- **Communication**: JSON over raw TCP sockets
-- **Target**: Game Boy Advance ROMs
-
-**Note**: TCP used instead of WebSocket because mGBA Lua only supports `socket.tcp()`
-
-## Troubleshooting
-
-### Script won't load
-- Ensure mGBA has Lua scripting support
-- Check file paths are correct
-- Verify directory structure is intact
-
-### No position data
-- Verify ROM is supported (Emerald US currently)
-- Try walking around to trigger position updates
-- Check console for error messages
-
-### Server won't start
-- Check if port 8080 is in use
-- Try changing PORT in server.js
-
-For detailed troubleshooting, see [docs/TESTING.md](docs/TESTING.md)
-
-## Contributing
-
-This is an early-stage project. Areas needing help:
-- Memory offset discovery for Run & Bun
-- Lua TCP client optimization
-- Additional ROM profiles
-- Ghost sprite rendering
-
-## Resources
-
-- [mGBA Scripting Documentation](https://mgba.io/docs/scripting.html)
-- [Pokémon Emerald Decomp](https://github.com/pret/pokeemerald) (reference for base engine)
-- [Node.js TCP/Net](https://nodejs.org/api/net.html)
-- [GBA Memory Map](https://problemkaputt.de/gbatek.htm)
-
-## License
-
-MIT License - See LICENSE file for details
-
----
-
-**For complete documentation, see [CLAUDE.md](CLAUDE.md)**
-
-Built with ❤️ for the Pokémon ROM hacking community
+- `config/run_and_bun.lua` is the source of truth for Run & Bun addresses.
+- The in-client banner still prints `v0.2.0` in `client/main.lua`; feature set is newer than that banner string.

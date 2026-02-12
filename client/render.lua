@@ -568,6 +568,13 @@ local function rectOnScreen(x, y, w, h)
     return x < SCREEN_WIDTH and y < SCREEN_HEIGHT and (x + w) > 0 and (y + h) > 0
 end
 
+local function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh)
+    return ax < (bx + bw)
+        and ay < (by + bh)
+        and (ax + aw) > bx
+        and (ay + ah) > by
+end
+
 local function clearPreviousInjectedOAM()
     for _, oamIndex in ipairs(previousOAM) do
         HAL.hideOAMEntry(oamIndex)
@@ -721,6 +728,18 @@ end
 
 local function collectVisibleGhosts(otherPlayers, playerPos)
     local ghostList = {}
+    local localW, localH = TILE_SIZE, (TILE_SIZE * 2)
+    if Sprite and Sprite.getLocalImage then
+        local _, w, h = Sprite.getLocalImage()
+        if w and w > 0 then
+            localW = w
+        end
+        if h and h > 0 then
+            localH = h
+        end
+    end
+    local localDrawX = PLAYER_SCREEN_X - math.floor((localW - TILE_SIZE) / 2)
+    local localDrawY = PLAYER_SCREEN_Y - (localH - TILE_SIZE)
 
     for playerId, data in pairs(otherPlayers) do
         local position, state
@@ -759,6 +778,11 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
             if rectOnScreen(drawX, drawY, width, height) then
                 local dx = projectedX - playerPos.x
                 local dy = projectedY - playerPos.y
+                local overlapsLocal = rectsOverlap(
+                    drawX, drawY, width, height,
+                    localDrawX, localDrawY, localW, localH
+                )
+                local forceOverlayFront = overlapsLocal and (projectedY > playerPos.y)
                 ghostList[#ghostList + 1] = {
                     playerId = playerId,
                     position = position,
@@ -773,6 +797,7 @@ local function collectVisibleGhosts(otherPlayers, playerPos)
                     height = height,
                     y = projectedY,
                     distance = math.abs(dx) + math.abs(dy),
+                    forceOverlayFront = forceOverlayFront,
                 }
             end
         end
@@ -1118,7 +1143,7 @@ function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
         local rendered = false
         local data = ghost.renderData
 
-        if data and ghost.vramSlot ~= nil then
+        if (not ghost.forceOverlayFront) and data and ghost.vramSlot ~= nil then
             local spriteKey = data.spriteHash or tostring(data.revision or 0)
             if slotSpriteHash[ghost.vramSlot] ~= spriteKey then
                 if HAL.writeGhostTilesToVRAM(ghost.vramSlot, data.tileBytes) then

@@ -2,98 +2,75 @@
 
 ## Prerequis
 
-- mGBA development build (0.11+ avec support canvas/scripting)
-- Node.js installe
-- ROM Pokemon Emeraude US (BPEE) ou Run & Bun
-
----
+- Node.js 18+
+- mGBA dev build avec Lua scripting + sockets TCP + canvas/Painter
+- ROM supportee (`Run & Bun` prioritaire, `Emerald US` en fallback)
 
 ## Lancer le systeme (1 joueur)
 
-### Etape 1 : Demarrer le serveur
+### 1) Demarrer le serveur TCP
 
 ```bash
 cd server
-node server.js
+npm install
+npm start
 ```
 
-### Etape 2 : Lancer mGBA avec le script
+Port par defaut: `3333` (modifiable via variable d'environnement `PORT`).
 
-1. Lance mGBA (version development build)
-2. Charge ta ROM Pokemon
-3. Ouvre la console Lua : `Tools > Scripting...`
-4. Charge le script : `File > Load script...` -> `client/main.lua`
+### 2) Charger le client Lua
 
-Tu devrais voir a l'ecran :
-- Une barre noire semi-transparente en haut
-- "Players: 1" en vert
-- "ONLINE" si connecte
-- Ta position (X, Y, Map) si DEBUG active
+1. Ouvre mGBA et charge la ROM
+2. `Tools > Scripting`
+3. `File > Load Script...`
+4. Selectionne `client/main.lua`
 
----
+### 3) Verifier
 
-## Tester avec 2 joueurs
+- Console mGBA: logs `[PokéCoop]` (init, ROM detectee, connexion serveur)
+- Overlay: `Players: <n>` + statut (`ONLINE` / `RECONNECTING` / `OFFLINE`)
+- Console serveur: messages `register`, `join`, `position`
 
-### Setup
+## Test 2 joueurs
 
-```
-Terminal:    node server/server.js
-mGBA 1:     charger client/main.lua
-mGBA 2:     charger client/main.lua
-```
+1. Laisse le serveur tourne
+2. Lance 2 instances mGBA
+3. Charge `client/main.lua` dans les 2
 
-C'est tout. Chaque instance genere un player ID unique automatiquement et se connecte directement au serveur TCP via le socket integre de mGBA. Pas de proxy, pas de copie de dossier.
+Resultat attendu:
+- `Players: 2` (ou plus) dans l'overlay
+- Ghost visible entre les deux clients
+- Synchronisation fluide des deplacements
+- En overlap vertical (un joueur juste en dessous de l'autre), l'ordre visuel reste coherent
 
-### Resultat attendu
+## Test auto-duel (optionnel)
 
-- Chaque mGBA affiche "Players: 2"
-- Un carre vert semi-transparent apparait a la position de l'autre joueur
-- Le mouvement du ghost est fluide (interpolation)
+Wrappers disponibles:
+- `client/auto_duel_requester.lua`
+- `client/auto_duel_accepter.lua`
+- `client/auto_duel_requester_ss.lua`
+- `client/auto_duel_accepter_ss.lua`
 
----
+Ces wrappers utilisent des chemins absolus locaux (a adapter selon ta machine).
 
-## Depannage
-
-### "Failed to connect to server"
-- Verifie que le serveur tourne
-- Verifie que le port 8080 n'est pas bloque
-
-### "Failed to read player position"
-- Verifie que tu as charge une ROM
-- Verifie que tu utilises Pokemon Emeraude US (BPEE) ou Run & Bun
-- Essaye de demarrer une nouvelle partie
-
-### Pas d'overlay a l'ecran
-- Verifie que tu utilises la version **development build** de mGBA
-- La version stable 0.10 n'a pas l'API canvas
-
----
-
-## Configuration
-
-### Changer le taux d'envoi
-
-Dans `client/main.lua` :
-```lua
-local UPDATE_RATE = 60  -- Frames entre chaque envoi (60 = 1x/sec a 60fps)
-```
-
-### Activer/desactiver le debug
-
-```lua
-local ENABLE_DEBUG = true  -- false pour desactiver les logs
-```
-
-### Changer le serveur
+## Parametres utiles (`client/main.lua`)
 
 ```lua
 local SERVER_HOST = "127.0.0.1"
-local SERVER_PORT = 8080
+local SERVER_PORT = 3333
+local SEND_RATE_MOVING = 1
+local SEND_RATE_IDLE = 30
+local ENABLE_DEBUG = true
 ```
 
----
+## Depannage rapide
 
-## Documentation
+- `Failed to connect`: verifier que le serveur tourne bien sur `127.0.0.1:3333`
+- Pas de ghost: verifier que les deux clients sont dans la meme room/map
+- Pas d'overlay: utiliser un build mGBA avec les APIs de scripting/canvas
 
-- `CLAUDE.md` - Architecture complete du projet
-- `Tasks/README.md` - Liste des taches et progression
+## Suite
+
+- `docs/TESTING.md` pour les scenarios de validation
+- `server/README.md` pour le protocole TCP
+- `docs/RUN_AND_BUN.md` pour les offsets Run & Bun

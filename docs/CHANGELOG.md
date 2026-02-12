@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Ghost Render Depth Fix - Local Overlap Front (2026-02-12)
+- **client/render.lua**: replaced unstable dynamic OAM-priority switching with overlap-scoped front fallback.
+  - OAM priority for injected ghosts remains fixed (`OAM_PRIORITY = 2`).
+  - New overlap check (`rectsOverlap`) compares ghost draw rect with local player rect.
+  - Only when overlap is true and remote Y is below local Y, ghost is forced to overlay path (`forceOverlayFront=true`).
+  - This prevents global ordering regressions while preserving expected close-contact depth behavior.
+
+### Documentation Sync (2026-02-12)
+- Updated active docs to match current code paths and defaults:
+  - `README.md`
+  - `QUICKSTART.md`
+  - `client/README.md`
+  - `server/README.md`
+  - `scripts/README.md`
+  - `docs/TESTING.md`
+  - `docs/MEMORY_GUIDE.md`
+  - `docs/RUN_AND_BUN.md`
+  - `Tasks/README.md`
+- Corrected port references to default `3333` and refreshed protocol/runtime notes.
+- Clarified that `config/*.lua` is the source of truth for runtime addresses.
+
 ### Phase 3B - PvP Battle System: Remove InitBtlControllersInternal NOP — CLIENT slave path (2026-02-11)
 - **ROOT CAUSE**: CLIENT had same battler→controller mapping as HOST (both followed master path)
   - The NOP patch (0x46C0) at ROM 0x032ACE replaced a BEQ (0xD01D) that tests `gBattleTypeFlags & IS_MASTER`

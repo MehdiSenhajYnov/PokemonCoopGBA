@@ -1,49 +1,36 @@
-# Scripts — Pokémon Co-op Framework
+# Scripts - Pokemon Co-op Framework
 
-Outils de diagnostic et utilitaires pour mGBA.
+Collection de scripts de debug, reverse et tests.
 
-## Structure
+## Arborescence utile
 
-```
+```text
 scripts/
-├── ghost_diagnostic.lua   # Diagnostic position des ghosts (ACTIF)
-├── start-server.bat       # Lancer le serveur (Windows)
-├── start-server.sh        # Lancer le serveur (Linux/Mac)
-├── test-server.bat        # Tester la connexion serveur
-├── README.md              # Ce fichier
-└── archive/               # Scripts terminés (Phase 0 + caméra)
-    ├── scan_vanilla_offsets.lua
-    ├── scan_wram.lua
-    ├── find_saveblock_pointers.lua
-    ├── validate_offsets.lua
-    ├── scan_camera_auto.lua
-    └── verify_camera.lua
+  README.md
+  start-server.bat
+  start-server.sh
+  test-server.bat
+  interactive_play.lua
+  diag_textbox.lua
+  test_textbox.lua
+  testing/       # runner + suites
+  scanners/      # scanners Lua orientés offsets/adresses
+  debug/         # scripts de diagnostic runtime
+  discovery/     # scripts de recherche mémoire/fonctions
+  ghidra/        # scripts Python orientés analyse ROM
+  ToUse/         # scripts en cours d'usage
+  archive/       # historique / superseded
 ```
 
-## Scripts actifs
+## Entrypoints frequents
 
-### `ghost_diagnostic.lua`
+- `start-server.bat` / `start-server.sh`: lance le serveur Node (`server/server.js`).
+- `test-server.bat`: lance le smoke test TCP (`server/test-connection.js`).
+- `testing/run_all.lua`: point d'entree du framework de tests Lua.
+- `diag_textbox.lua` / `test_textbox.lua`: diagnostic du flux textbox natif.
 
-Diagnostic visuel pour vérifier la formule de positionnement des ghosts.
+## Notes
 
-**Usage:** `Tools > Scripting > Load Script > scripts/ghost_diagnostic.lua`
-
-Affiche deux croix sur l'écran :
-- **Rouge** = formule `tile*16 + cam`
-- **Verte** = formule `tile*16 + 8 + cam`
-
-Celle qui est sur le personnage est la bonne formule.
-
-## Utilitaires serveur
-
-| Script | Description |
-|--------|-------------|
-| `start-server.bat` | Lance `node server/server.js` (Windows) |
-| `start-server.sh` | Lance `node server/server.js` (Linux/Mac) |
-| `test-server.bat` | Teste la connexion TCP au serveur |
-
-## Archive
-
-Scripts de Phase 0 (memory scanning) et Phase 2 (caméra) — terminés et archivés.
-Ces scripts ont été utilisés pour découvrir les offsets mémoire de Run & Bun.
-Voir `docs/MEMORY_GUIDE.md` pour la documentation complète.
+- Plusieurs scripts sont experimentaux et assumes pour un contexte local (chemins absolus possibles).
+- Certains anciens commentaires parlent encore de "WebSocket", mais le systeme actif utilise TCP brut.
+- Pour les offsets/profils ROM, la verite terrain est dans `config/*.lua` puis `docs/RUN_AND_BUN.md`.

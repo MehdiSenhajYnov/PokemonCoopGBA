@@ -1,130 +1,73 @@
-# Pokémon Co-op Client (Lua)
+# Pokemon Co-op Client (Lua)
 
-mGBA Lua script for the Pokémon Co-op Framework.
+Lua runtime loaded by mGBA (`client/main.lua`).
 
 ## Requirements
 
-- **mGBA 0.11+ dev build** (required for canvas overlay API + built-in TCP sockets)
-- Lua scripting enabled in mGBA
+- mGBA build with Lua scripting + TCP socket + canvas/Painter support
+- Server running (`server/server.js`)
+- ROM profile present in `config/`
 
-## Installation
+## Core Modules
 
-1. Place all `.lua` files in a directory accessible by mGBA
-2. Ensure the `config/` folder is in the same parent directory
-3. Start the Node.js server (`node server/server.js`)
-4. Load `main.lua` in mGBA via Tools > Scripting
+- `main.lua`: orchestrator (init, frame loop, network routing, duel/battle state).
+- `hal.lua`: safe low-level memory/hardware access (EWRAM/IWRAM/VRAM/OAM/IO).
+- `network.lua`: TCP JSON line protocol + reconnect backoff.
+- `interpolate.lua`: waypoint queue interpolation with seam-transition support.
+- `sprite.lua`: local sprite capture from OAM/VRAM/palette + remote sprite cache.
+- `render.lua`: hybrid ghost renderer (OAM injection + overlay labels/fallback).
+  - OAM priority stays fixed for stability.
+  - If a ghost overlaps local player and should be visually in front, it is
+    forced through overlay fallback for that frame.
+- `duel.lua`: duel request/accept state machine.
+- `textbox.lua`: native Pokemon textbox flow via script injection.
+- `battle.lua`: PvP synchronization logic (buffer relay, ROM patch lifecycle).
+- `occlusion.lua`: optional/experimental BG occlusion module (not wired by default in `main.lua`).
 
-## File Structure
-
-- `main.lua` - Main entry point and game loop
-- `hal.lua` - Hardware Abstraction Layer (WRAM, IWRAM, VRAM, OAM, Palette, BG I/O registers)
-- `network.lua` - Direct TCP client (mGBA built-in socket API, auto-reconnect with backoff)
-- `render.lua` - Ghost player rendering (Painter API, camera correction, occlusion integration)
-- `sprite.lua` - VRAM sprite extraction (OAM scan, 4bpp tile decode, palette, cache, network sync)
-- `occlusion.lua` - BG layer occlusion (reads BG1 tilemap, redraws cover tiles over ghosts via Painter)
-- `interpolate.lua` - Smooth ghost movement (animate-toward-target interpolation)
-- `duel.lua` - Duel system (proximity trigger, request/accept UI, A button edge detect)
-- `battle.lua` - PvP battle system (Link Battle Emulation: buffer relay with per-frame re-write, ROM patching, state machine)
-- `core.lua` - (Future) Core engine
-
-## Configuration
-
-Edit these values in `main.lua`:
+## Runtime Defaults (`main.lua`)
 
 ```lua
-local SERVER_HOST = "127.0.0.1"  -- TCP server address
-local SERVER_PORT = 8080          -- TCP server port
-local ENABLE_DEBUG = true         -- Show debug info overlay
+local SERVER_HOST = "127.0.0.1"
+local SERVER_PORT = 3333
+local SEND_RATE_MOVING = 1
+local SEND_RATE_IDLE = 30
+local POSITION_HEARTBEAT_IDLE = 60
+local SPRITE_HEARTBEAT = 120
+local ENABLE_DEBUG = true
 ```
 
-## Usage
+## Message Flow (Client Side)
 
-### Loading the Script
+Incoming:
+- `registered`, `joined`
+- `position`, `sprite_update`, `player_disconnected`
+- `ping/pong`
+- duel/battle messages (`duel_*`)
 
-In mGBA:
-1. Tools > Scripting
-2. File > Load Script...
-3. Select `main.lua`
+Outgoing:
+- `register`, `join`, `position`, `sprite_update`, `pong`
+- duel/battle messages (`duel_request`, `duel_accept`, `duel_party`, `duel_buffer*`, ...)
 
-### What Happens
+## ROM / Config Loading
 
-- ROM is auto-detected (Run & Bun / Emerald)
-- Connects to TCP server automatically
-- Other players appear as ghost sprites on screen
-- Ghosts are hidden behind buildings/trees (BG occlusion)
-- Auto-reconnects if server connection drops
+- `main.lua` detects ROM header/title and loads profile from `../config/`.
+- Primary path today defaults BPEE to `run_and_bun.lua`.
+- Fallback profile is `emerald_us.lua` if detection/loading fails.
 
-### Debug Overlay
+## Auto-Duel Wrappers
 
-When `ENABLE_DEBUG = true`, the top bar shows:
-- Player count
-- Connection status (ONLINE / RECONNECTING / OFFLINE)
-- Current tile coordinates and map ID
+- `auto_duel_requester.lua`
+- `auto_duel_accepter.lua`
+- `auto_duel_requester_diag.lua`
+- `auto_duel_accepter_diag.lua`
+- `auto_duel_requester_ss.lua`
+- `auto_duel_accepter_ss.lua`
 
-## Architecture
+These wrappers currently use local absolute paths and may need adaptation per machine.
 
-### HAL (Hardware Abstraction Layer)
+## Quick Troubleshooting
 
-Safe memory access with `pcall` protection:
-
-```lua
--- Player data (WRAM/EWRAM)
-HAL.readPlayerX()      -- Returns X tile coordinate
-HAL.readPlayerY()      -- Returns Y tile coordinate
-HAL.readMapId()        -- Returns map ID
-HAL.readMapGroup()     -- Returns map group
-HAL.readFacing()       -- Returns facing direction (1-4)
-
--- Camera (IWRAM)
-HAL.readCameraX()      -- gSpriteCoordOffsetX (signed s16)
-HAL.readCameraY()      -- gSpriteCoordOffsetY (signed s16)
-
--- OAM/VRAM/Palette (sprite extraction)
-HAL.readOAMEntry(index)              -- Read OAM entry (attr0, attr1, attr2)
-HAL.readSpriteTiles(tileIndex, n)    -- Read sprite tile data from VRAM
-HAL.readSpritePalette(bank)          -- Read 16-color sprite palette
-
--- BG layer I/O (occlusion)
-HAL.readIOReg16(offset)              -- Read 16-bit I/O register
-HAL.readBGControl(bgIndex)           -- Parse BGnCNT register
-HAL.readBGScroll(bgIndex)            -- Read BGnHOFS/VOFS
-HAL.readBGTilemapEntry(sb, tx, ty, size)  -- Read tilemap entry from VRAM
-HAL.readBGTileData(charBase, tileId) -- Read 4bpp tile pixel data
-HAL.readBGPalette(palBank)           -- Read 16-color BG palette
-```
-
-### Occlusion System
-
-The overlay canvas draws ON TOP of all GBA output. Without occlusion, ghosts appear above buildings/trees. The occlusion module fixes this:
-
-1. Each frame, reads BG1 control register + scroll offsets
-2. For each ghost, identifies BG1 tiles overlapping the ghost bounding box
-3. Decodes 4bpp tile pixel data + BG palette (BGR555 to ARGB)
-4. Redraws non-transparent cover pixels on the overlay using Painter API
-5. Result: ghosts are hidden behind rooftops, trees, and other foreground scenery
-
-Tile pixel data is cached (max 256 tiles, grouped by color for efficient Painter calls). Cache is cleared on map change.
-
-## Supported ROMs
-
-- **Pokémon Run & Bun** (primary target, Emerald engine)
-- **Pokémon Emerald US** (BPEE, vanilla reference)
-
-Planned:
-- Pokémon Radical Red
-- Pokémon Unbound
-
-## Troubleshooting
-
-### Script doesn't load
-- Ensure mGBA is a **dev build** (0.11+) — stable releases don't have canvas API
-- Check mGBA console for error messages
-
-### No ghost appears
-- Ensure both clients are connected to the same server
-- Check both players are on the same map
-- Verify server is running (`node server/server.js`)
-
-### "Connection lost" / OFFLINE
-- Server may have stopped — restart it
-- Auto-reconnection will attempt up to 10 times with exponential backoff
+- No connection: verify server on `127.0.0.1:3333`.
+- No ghosts: ensure both clients joined same room/map and are receiving `position`.
+- Battle issues: verify `config/run_and_bun.lua` battle + battle_link addresses/patches.
+- Health check helper in mGBA console: `HAL.testMemoryAccess()`.

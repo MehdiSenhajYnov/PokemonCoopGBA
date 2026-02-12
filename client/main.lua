@@ -137,7 +137,9 @@ local MAX_MESSAGES_PER_FRAME = 10 -- Limit messages processed per frame
 local ENABLE_DEBUG = true
 local POSITION_HEARTBEAT_IDLE = 60 -- Force a periodic idle position refresh (~1/sec)
 local SPRITE_HEARTBEAT = 120        -- Force sprite refresh (~2/sec) if packets were missed
-local ENABLE_REMOTE_POS_DEBUG = true   -- Draw remote Target/Current/Projected/Screen every frame
+local ENABLE_REMOTE_POS_DEBUG = true   -- Build remote debug snapshot state
+local SHOW_LOCAL_POS_DEBUG_OVERLAY = false  -- Draw local X/Y/map debug in top bar
+local SHOW_REMOTE_POS_DEBUG_OVERLAY = false -- Draw remote Target/Current/Projected/Screen on overlay
 local REMOTE_POS_DEBUG_CONSOLE = true  -- Optional per-frame console log (very verbose)
 
 -- Early detection constants
@@ -991,7 +993,12 @@ local function formatDebugScreen(pos)
 end
 
 local function buildRemotePositionDebugSnapshot(currentPos)
-  if not ENABLE_REMOTE_POS_DEBUG or not currentPos then
+  if not currentPos then
+    return nil
+  end
+  if not ENABLE_REMOTE_POS_DEBUG
+    and not SHOW_REMOTE_POS_DEBUG_OVERLAY
+    and not REMOTE_POS_DEBUG_CONSOLE then
     return nil
   end
 
@@ -1085,7 +1092,7 @@ local function buildRemotePositionDebugSnapshot(currentPos)
 end
 
 local function drawRemotePositionDebug(snapshot)
-  if not ENABLE_REMOTE_POS_DEBUG or not painter or not snapshot then
+  if not SHOW_REMOTE_POS_DEBUG_OVERLAY or not painter or not snapshot then
     return
   end
 
@@ -1155,7 +1162,7 @@ local function drawOverlay(currentPos)
     end
 
     -- Debug: Current position
-    if ENABLE_DEBUG and currentPos then
+    if ENABLE_DEBUG and SHOW_LOCAL_POS_DEBUG_OVERLAY and currentPos then
       painter:setFillColor(0xFFFFFFFF)
       painter:drawText(string.format("X:%d Y:%d M:%d:%d",
         currentPos.x, currentPos.y, currentPos.mapGroup, currentPos.mapId), 130, 1)
@@ -1181,7 +1188,7 @@ local function drawOverlay(currentPos)
     Render.hideGhosts()
   end
 
-  if ENABLE_REMOTE_POS_DEBUG and currentPos then
+  if currentPos and (ENABLE_REMOTE_POS_DEBUG or SHOW_REMOTE_POS_DEBUG_OVERLAY or REMOTE_POS_DEBUG_CONSOLE) then
     local remoteDebug = buildRemotePositionDebugSnapshot(currentPos)
     drawRemotePositionDebug(remoteDebug)
   end

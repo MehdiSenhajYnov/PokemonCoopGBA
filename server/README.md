@@ -1,114 +1,118 @@
-# Pokémon Co-op Server
+# Pokemon Co-op Server
 
-TCP relay server for synchronizing player positions between mGBA clients.
+Node.js TCP relay used by mGBA Lua clients.
 
-**Note**: Utilise TCP brut au lieu de WebSocket car mGBA Lua ne supporte que `socket.tcp()`
+- Transport: raw TCP (`net`)
+- Framing: one JSON payload per line (`\n`)
+- Default port: `3333`
 
-## Installation
+## Run
 
 ```bash
 npm install
-```
-
-## Usage
-
-```bash
 npm start
 ```
 
-The server will start on port 8080 by default.
+Dev/watch mode:
 
-## Environment Variables
+```bash
+npm run dev
+```
 
-- `PORT`: Server port (default: 8080)
+Smoke test (server must already be running):
 
-## TCP Protocol (JSON Line-Delimited)
+```bash
+npm test
+```
 
-Messages envoyés en JSON, un par ligne, terminés par `\n`
+## Environment
+
+- `PORT`: listening port (default `3333`)
+
+## Client Lifecycle
+
+1. Client connects via TCP
+2. Sends `register` (`playerId` optional, `characterName` optional)
+3. Sends `join` (`roomId`, defaults to `"default"`)
+4. Streams `position` and `sprite_update`
+5. Exchanges duel/battle messages when duel starts
+6. If duel request is pending too long, server expires it (`PENDING_DUEL_TTL_MS = 20000`)
+
+If requested `playerId` is already used, server reassigns a unique suffix.
+
+## Core Messages
 
 ### Client -> Server
 
-#### Register
-```json
-{
-  "type": "register",
-  "playerId": "optional-custom-id"
-}
-```
-
-#### Join Room
-```json
-{
-  "type": "join",
-  "roomId": "room-name"
-}
-```
-
-#### Position Update
-```json
-{
-  "type": "position",
-  "data": {
-    "x": 10,
-    "y": 15,
-    "mapId": 3,
-    "mapGroup": 0,
-    "facing": 1
-  }
-}
-```
-
-#### Duel Request
-```json
-{
-  "type": "duel_request",
-  "targetId": "player-id"
-}
-```
+- `register`
+- `join`
+- `position`
+- `sprite_update`
+- `ping` / `pong`
+- `duel_request`
+- `duel_accept`
+- `duel_decline`
+- `duel_cancel`
+- `duel_party`
+- `duel_player_info`
+- `duel_ready`
+- `duel_choice`
+- `duel_buffer`
+- `duel_buffer_cmd`
+- `duel_buffer_resp`
+- `duel_buffer_ack`
+- `duel_stage`
+- `duel_end`
 
 ### Server -> Client
 
-#### Registered
+- `registered`
+- `joined`
+- `position` (relayed with optional `t`, `dur`, `mapRev`, `metaStable`, `metaHash`, `characterName`)
+- `sprite_update`
+- `player_disconnected`
+- `ping` / `pong`
+- duel validation replies may include `duel_declined` with `reason` when request cannot proceed
+- duel relay messages:
+  - `duel_request`, `duel_declined`, `duel_cancelled`, `duel_warp`
+  - `duel_party`, `duel_player_info`, `duel_ready`, `duel_choice`
+  - `duel_buffer`, `duel_buffer_cmd`, `duel_buffer_resp`, `duel_buffer_ack`
+  - `duel_stage`, `duel_end`, `duel_opponent_disconnected`
+
+Note: `duel_warp` currently carries empty `coords` and starts battle flow without physical map warp.
+
+## Minimal Payload Examples
+
+Register:
+
+```json
+{"type":"register","playerId":"player_abc","characterName":"RED"}
+```
+
+Join:
+
+```json
+{"type":"join","roomId":"default"}
+```
+
+Position:
+
 ```json
 {
-  "type": "registered",
-  "playerId": "assigned-id"
+  "type":"position",
+  "data":{"x":10,"y":15,"mapGroup":0,"mapId":3,"facing":1},
+  "t":123456,
+  "dur":240,
+  "mapRev":4,
+  "metaStable":true,
+  "metaHash":"0:3@4"
 }
 ```
 
-#### Position Broadcast
-```json
-{
-  "type": "position",
-  "playerId": "sender-id",
-  "data": {
-    "x": 10,
-    "y": 15,
-    "mapId": 3,
-    "mapGroup": 0,
-    "facing": 1
-  }
-}
-```
+## Runtime Behavior
 
-## Features
-
-- Room-based multiplayer sessions
-- Automatic heartbeat/keepalive
-- Client disconnection handling
-- Position broadcast to room members
-- Duel request/accept system
-
-## Architecture
-
-- **Clients Map**: Stores all connected clients
-- **Rooms Map**: Organizes clients into game sessions
-- **Heartbeat**: 30s interval to detect dead connections
-
-## TCP vs WebSocket
-
-**Pourquoi TCP brut?**
-- mGBA Lua n'a pas de support WebSocket natif
-- `socket.tcp()` est la seule API réseau disponible
-- Protocol JSON simple, ligne par ligne (`\n` delimiter)
-- Plus facile à implémenter côté client Lua
+- Room-based broadcast (`rooms` map).
+- Per-client cached last position/sprite for late joiners.
+- Heartbeat every 30s (`ping` from server; inactive clients are dropped).
+  - Server marks a client alive on either `pong` or `ping`.
+- Disconnect cleanup includes duel cancellation and opponent notification.
