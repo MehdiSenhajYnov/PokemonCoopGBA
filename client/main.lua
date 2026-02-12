@@ -128,7 +128,7 @@ local localMapMetaCache = {}
 local localMapMetaPending = {}
 
 -- Configuration
-local SERVER_HOST = "127.0.0.1"
+local SERVER_HOST = "5.196.23.143"
 local SERVER_PORT = 3333
 local SEND_RATE_MOVING = 1     -- Send on exact frame position changes (tiles change ~once per walk anim)
 local SEND_RATE_IDLE = 30      -- Send every 30 frames (~2x/sec) in idle for correction

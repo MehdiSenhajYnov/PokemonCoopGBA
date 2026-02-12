@@ -1533,7 +1533,12 @@ function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
                     currentFrameOAM[oamIndex] = true
                     ownedGhostOAM[oamIndex] = true
                     oamLastWriteTick[oamIndex] = renderTick
-                    rememberRenderedGhost(ghost)
+                    -- Do not refresh stale snapshots with stale renders.
+                    -- Otherwise a ghost that is no longer projectable (e.g. interior vs exterior)
+                    -- can keep itself alive forever through appendStaleGhosts().
+                    if not ghost.stale then
+                        rememberRenderedGhost(ghost)
+                    end
                     rendered = true
                     renderedCount = renderedCount + 1
                 end

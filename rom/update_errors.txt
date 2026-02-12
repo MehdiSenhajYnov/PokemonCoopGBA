@@ -1,7 +1,7 @@
 [FATAL] update() error #1: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -9,7 +9,7 @@ stack traceback:
 [FATAL] update() error #2: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -17,7 +17,7 @@ stack traceback:
 [FATAL] update() error #3: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -25,7 +25,7 @@ stack traceback:
 [FATAL] update() error #4: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -33,7 +33,7 @@ stack traceback:
 [FATAL] update() error #5: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -41,7 +41,7 @@ stack traceback:
 [FATAL] update() error #6: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -49,7 +49,7 @@ stack traceback:
 [FATAL] update() error #7: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -57,7 +57,7 @@ stack traceback:
 [FATAL] update() error #8: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -65,7 +65,7 @@ stack traceback:
 [FATAL] update() error #9: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
@@ -73,7 +73,7 @@ stack traceback:
 [FATAL] update() error #10: Invalid object
 stack traceback:
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:934: in upvalue 'drawGhostOverlayImage'
-	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1544: in function 'render.drawAllGhosts'
+	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client/render.lua:1549: in function 'render.drawAllGhosts'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1211: in upvalue 'drawOverlay'
 	C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:2266: in function <C:\Users\mehdi\Desktop\Dev\PokemonCoopGBA\client\main.lua:1230>
 	[C]: in function 'pcall'
