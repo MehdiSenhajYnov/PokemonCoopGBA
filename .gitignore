@@ -47,6 +47,15 @@ test_*.txt
 scan_*_results.txt
 transition_to_mainloop.png
 
+# Root-local helper/notes files (not part of mod source)
+/AGENTS.md
+/CLAUDE.md
+/ExportBufferAandBexplication.txt
+/PROMPT_PVP_FIX.md
+/gbapk_client.lua
+/tcp_listener.js
+/*.ps1
+
 # -----------------------------------------------------------------------------
 # Emulator save/state artifacts
 # -----------------------------------------------------------------------------
