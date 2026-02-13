@@ -11,8 +11,9 @@ const net = require('net');
 
 // Configuration
 const PORT = process.env.PORT || 3333;
-const HEARTBEAT_INTERVAL = 30000; // 30s
+const HEARTBEAT_INTERVAL = Math.max(1000, Number(process.env.HEARTBEAT_INTERVAL_MS) || 30000); // 30s default
 const PENDING_DUEL_TTL_MS = 20000; // stale pending request guard
+const DUEL_STAGE_VERBOSE = process.env.DUEL_STAGE_VERBOSE === '1';
 const FACING_TO_DELTA = {
   1: { dx: 0, dy: 1 },   // down
   2: { dx: 0, dy: -1 },  // up
@@ -604,47 +605,20 @@ function handleMessage(client, messageStr) {
       }
 
       case 'duel_stage': {
-        // Relay battle stage sync to opponent (with diagnostic data)
-        const diagParts = [`Stage from ${client.id}: ${message.stage}`];
+        // Relay battle stage sync to opponent (compact diagnostics by default)
+        const diagParts = [`from=${client.id}`, `stage=${message.stage}`];
         if (message.reason) diagParts.push(`reason=${message.reason}`);
-        if (message.bmf) diagParts.push(`bmf=${message.bmf}`);
-        if (message.ef) diagParts.push(`ef=${message.ef}`);
-        if (message.comm) diagParts.push(`comm=[${message.comm}]`);
-        if (message.ctrl0) diagParts.push(`ctrl0=${message.ctrl0}`);
-        if (message.ctrl1) diagParts.push(`ctrl1=${message.ctrl1}`);
-        if (message.end0) diagParts.push(`end0=${message.end0}`);
-        if (message.end1) diagParts.push(`end1=${message.end1}`);
-        if (message.btf) diagParts.push(`btf=${message.btf}`);
-        if (message.cb2) diagParts.push(`cb2=${message.cb2}`);
-        if (message.comm0) diagParts.push(`comm0=${message.comm0}`);
-        if (message.hsb) diagParts.push(`hsb=${message.hsb}`);
-        if (message.ib) diagParts.push(`ib=${message.ib}`);
-        if (message.relayBufID !== undefined) diagParts.push(`rbuf=${message.relayBufID}`);
-        if (message.relayP !== undefined) diagParts.push(`rP=${message.relayP}`);
-        if (message.relayE !== undefined) diagParts.push(`rE=${message.relayE}`);
-        if (message.relaySendID !== undefined) diagParts.push(`rsnd=${message.relaySendID}`);
-        if (message.remoteRcvd !== undefined) diagParts.push(`rcvd=${message.remoteRcvd}`);
-        if (message.bufA0) diagParts.push(`bufA0=${message.bufA0}`);
-        if (message.btf_change) diagParts.push(`BTF_CHANGE=${message.btf_change}`);
-        if (message.context) diagParts.push(`ctx=${message.context}`);
-        if (message.patches) diagParts.push(`patches=[${message.patches}]`);
-        if (message.iState !== undefined) diagParts.push(`iState=${message.iState}`);
-        if (message.sPtr) diagParts.push(`sPtr=${message.sPtr}`);
-        if (message.bs) diagParts.push(`bs=${message.bs}`);
-        if (message.br) diagParts.push(`br=${message.br}`);
-        if (message.bufA) diagParts.push(`bufA=${message.bufA}`);
-        if (message.brSS) diagParts.push(`brSS=${message.brSS}`);
-        if (message.maxIS !== undefined) diagParts.push(`maxIS=${message.maxIS}`);
-        if (message.dmaZ !== undefined) diagParts.push(`dmaZ=${message.dmaZ}`);
-        if (message.taskCount !== undefined) diagParts.push(`tasks=${message.taskCount}`);
-        if (message.killed !== undefined) diagParts.push(`killed=${message.killed}`);
-        if (message.tasks) diagParts.push(`taskList=${message.tasks}`);
-        if (message.vblank1) diagParts.push(`vb1=${message.vblank1}`);
-        if (message.vblank2) diagParts.push(`vb2=${message.vblank2}`);
-        if (message.intro !== undefined) diagParts.push(`intro=${message.intro}`);
-        if (message.htass !== undefined) diagParts.push(`htass=${message.htass}`);
-        if (message.turnPhase) diagParts.push(`tp=${message.turnPhase}`);
-        console.log(`[Duel] ${diagParts.join(' ')}`);
+        if (message.turnPhase) diagParts.push(`turn=${message.turnPhase}`);
+        if (message.pendRelay !== undefined) diagParts.push(`pend=${message.pendRelay}`);
+        if (message.procCmd !== undefined) diagParts.push(`proc=${message.procCmd}`);
+        if (DUEL_STAGE_VERBOSE) {
+          if (message.bmf) diagParts.push(`bmf=${message.bmf}`);
+          if (message.ef) diagParts.push(`ef=${message.ef}`);
+          if (message.cb2) diagParts.push(`cb2=${message.cb2}`);
+          if (message.intro !== undefined) diagParts.push(`intro=${message.intro}`);
+          if (message.master !== undefined) diagParts.push(`master=${message.master}`);
+        }
+        console.log(`[Duel] duel_stage ${diagParts.join(' ')}`);
         if (!client.roomId || !client.duelOpponent) return;
 
         const opponent = clients.get(client.duelOpponent);
@@ -708,10 +682,13 @@ function generateId() {
 /**
  * Handle client disconnection
  */
-function handleDisconnect(client) {
+function handleDisconnect(client, reason) {
+  if (!client || client.disconnectHandled) return;
+  client.disconnectHandled = true;
+
+  const disconnectReason = reason || 'socket_closed';
   if (client.id) {
-    // Guard against double-disconnect (end + close both fire)
-    if (!clients.has(client.id)) return;
+    const isMappedClient = clients.get(client.id) === client;
 
     // Clean up pending duel where this client was the requester
     if (client.pendingDuel) {
@@ -726,7 +703,11 @@ function handleDisconnect(client) {
     if (client.duelOpponent) {
       const opponent = clients.get(client.duelOpponent);
       if (opponent) {
-        sendToClient(opponent, { type: 'duel_opponent_disconnected', playerId: client.id });
+        sendToClient(opponent, {
+          type: 'duel_opponent_disconnected',
+          playerId: client.id,
+          disconnectReason
+        });
         opponent.duelOpponent = null;
         opponent.duelParty = null;
       }
@@ -743,17 +724,20 @@ function handleDisconnect(client) {
     });
 
     // Broadcast disconnection to room BEFORE removing from room
-    if (client.roomId) {
+    if (isMappedClient && client.roomId) {
       broadcastToRoom(client.roomId, client.id, {
         type: 'player_disconnected',
-        playerId: client.id
+        playerId: client.id,
+        reason: disconnectReason
       });
     }
-    leaveRoom(client.id);
-    clients.delete(client.id);
-    console.log(`[Disconnect] Client ${client.id} disconnected`);
+    if (isMappedClient) {
+      leaveRoom(client.id);
+      clients.delete(client.id);
+    }
+    console.log(`[Disconnect] Client ${client.id} disconnected (reason=${disconnectReason})`);
   } else {
-    console.log('[Disconnect] Unregistered client disconnected');
+    console.log(`[Disconnect] Unregistered client disconnected (reason=${disconnectReason})`);
   }
 }
 
@@ -767,6 +751,7 @@ const server = net.createServer((socket) => {
     id: null,
     roomId: null,
     alive: true,
+    disconnectHandled: false,
     lastPosition: null,
     lastPositionMeta: null,
     buffer: ''
@@ -799,17 +784,17 @@ const server = net.createServer((socket) => {
 
   // End/close handler
   socket.on('end', () => {
-    handleDisconnect(client);
+    handleDisconnect(client, 'socket_end');
   });
 
   socket.on('close', () => {
-    handleDisconnect(client);
+    handleDisconnect(client, 'socket_close');
   });
 
   // Error handler
   socket.on('error', (error) => {
     console.error('[Error] Socket error:', error.message);
-    handleDisconnect(client);
+    handleDisconnect(client, 'socket_error');
   });
 });
 
@@ -820,16 +805,8 @@ const heartbeatInterval = setInterval(() => {
   clients.forEach((client, id) => {
     if (!client.alive) {
       console.log(`[Heartbeat] Terminating inactive client ${id}`);
-      // Broadcast disconnection before cleanup
-      if (client.roomId) {
-        broadcastToRoom(client.roomId, id, {
-          type: 'player_disconnected',
-          playerId: id
-        });
-      }
+      handleDisconnect(client, 'heartbeat_timeout');
       client.socket.destroy();
-      leaveRoom(id);
-      clients.delete(id);
       return;
     }
 

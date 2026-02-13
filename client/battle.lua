@@ -157,6 +157,7 @@ local STAGE = {
 
 local state = {
   stage = STAGE.IDLE,
+  frameCounter = 0,
   isMaster = false,
   opponentParty = nil,
   prevInBattle = 0,
@@ -231,6 +232,74 @@ local state = {
   },
 }
 
+local debugOptions = {
+  log = false,
+  screenshot = false,
+  telemetry = false,
+  screenshotCooldownFrames = 300,
+  screenshotMaxPerSession = 8,
+}
+
+local screenshotState = {
+  count = 0,
+  lastFrame = -999999,
+}
+
+local function toBoolean(value, fallback)
+  if value == nil then return fallback end
+  return value == true
+end
+
+local function toPositiveInt(value, fallback)
+  local n = tonumber(value)
+  if not n then return fallback end
+  n = math.floor(n)
+  if n < 0 then n = 0 end
+  return n
+end
+
+local function shouldCaptureScreenshot()
+  if not debugOptions.screenshot then
+    return false
+  end
+
+  local maxPerSession = debugOptions.screenshotMaxPerSession or 0
+  if maxPerSession > 0 and screenshotState.count >= maxPerSession then
+    return false
+  end
+
+  local cooldown = debugOptions.screenshotCooldownFrames or 0
+  if cooldown > 0 then
+    local frameNow = tonumber(state.frameCounter) or 0
+    if (frameNow - (screenshotState.lastFrame or -999999)) < cooldown then
+      return false
+    end
+    screenshotState.lastFrame = frameNow
+  end
+
+  screenshotState.count = screenshotState.count + 1
+  return true
+end
+
+local function captureScreenshot(path)
+  if not path or not shouldCaptureScreenshot() then
+    return false
+  end
+  pcall(function()
+    emu:screenshot(path)
+  end)
+  return true
+end
+
+function Battle.setDebugOptions(options)
+  local opts = options or {}
+  debugOptions.log = toBoolean(opts.log, debugOptions.log)
+  debugOptions.screenshot = toBoolean(opts.screenshot, debugOptions.screenshot)
+  debugOptions.telemetry = toBoolean(opts.telemetry, debugOptions.telemetry)
+  debugOptions.screenshotCooldownFrames = toPositiveInt(opts.screenshotCooldownFrames, debugOptions.screenshotCooldownFrames)
+  debugOptions.screenshotMaxPerSession = toPositiveInt(opts.screenshotMaxPerSession, debugOptions.screenshotMaxPerSession)
+end
+
 -- ============================================================
 -- Initialization
 -- ============================================================
@@ -256,6 +325,9 @@ function Battle.init(gameConfig, halModule)
       BATTLE_TYPE_IS_MASTER = config.battleFlags.IS_MASTER or BATTLE_TYPE_IS_MASTER
       BATTLE_TYPE_TRAINER = config.battleFlags.TRAINER or BATTLE_TYPE_TRAINER
       BATTLE_TYPE_RECORDED = config.battleFlags.RECORDED or BATTLE_TYPE_RECORDED
+    end
+    if config.debug and config.debug.battle then
+      Battle.setDebugOptions(config.debug.battle)
     end
 
     console:log("[Battle] Initialized (GBA-PK buffer relay mode)")
@@ -784,8 +856,11 @@ function Battle.startLinkBattle(isMaster)
 
   -- Transition to STARTING stage
   state.stage = STAGE.STARTING
+  state.frameCounter = 0
   state.stageTimer = 0
   state.stageClock = os.clock()
+  screenshotState.count = 0
+  screenshotState.lastFrame = -999999
 
   if state.sendFn then
     state.sendFn({ type = "duel_stage", stage = STAGE.STARTING })
@@ -1252,6 +1327,7 @@ end
 function Battle.tick()
   if state.stage == STAGE.IDLE then return end
 
+  state.frameCounter = (state.frameCounter or 0) + 1
   state.stageTimer = state.stageTimer + 1
 
   -- Read inBattle (bitfield: bit 1 of byte at gMain+0x439)
@@ -1491,7 +1567,7 @@ function Battle.tick()
       -- → lost commands → empty textboxes or stuck battle.
       -- The comm skip clear at L1452-1454 is sufficient.
 
-      pcall(function() emu:screenshot("transition_to_mainloop.png") end)
+      captureScreenshot("transition_to_mainloop.png")
       console:log("[Battle] Both players ready → MAIN_LOOP (GBA-PK Stage 7: LINK active, buffer relay)")
       state.stage = STAGE.MAIN_LOOP
       state.stageTimer = 0
@@ -1502,7 +1578,7 @@ function Battle.tick()
     end
 
     -- Diagnostic logging
-    if (state.stageTimer <= 5 or state.stageTimer % 30 == 0) and config and config.warp then
+    if debugOptions.log and (state.stageTimer <= 5 or state.stageTimer % 30 == 0) and config and config.warp then
       local cb2Str = "?"
       local okCb, cb2 = pcall(readMem32, config.warp.callback2Addr)
       if okCb then cb2Str = string.format("0x%08X", cb2) end
@@ -1545,7 +1621,7 @@ function Battle.tick()
 
     -- Screenshot every 150 frames in STARTING
     if state.stageTimer % 150 == 0 and state.stageTimer > 0 then
-      pcall(function() emu:screenshot(string.format("starting_f%04d.png", state.stageTimer)) end)
+      captureScreenshot(string.format("starting_f%04d.png", state.stageTimer))
     end
 
     -- Timeout: 45 seconds (real-time via os.clock, speedhack-safe)
@@ -1649,7 +1725,7 @@ function Battle.tick()
     -- === FIRST FRAME: Init relay state ===
     if state.stageTimer == 1 then
       state.relay.screenshotDir = state.isMaster and "pvp_screenshots/master/" or "pvp_screenshots/slave/"
-      pcall(function() emu:screenshot(state.relay.screenshotDir .. "mainloop_start.png") end)
+      captureScreenshot(state.relay.screenshotDir .. "mainloop_start.png")
 
       maintainLinkState(0x0F)
       maintainLinkPlayers()
@@ -1739,7 +1815,7 @@ function Battle.tick()
     if not state.relay.introComplete and state.stageTimer > 10 and not isDoBattleIntro and currentBmf ~= 0 then
       state.relay.introComplete = true
       console:log(string.format("[Battle] Intro complete! bmf=0x%08X tick=%d", currentBmf, state.stageTimer))
-      pcall(function() emu:screenshot((state.relay.screenshotDir or "pvp_screenshots/") .. "intro_complete.png") end)
+      captureScreenshot((state.relay.screenshotDir or "pvp_screenshots/") .. "intro_complete.png")
     end
 
     -- Auto-press A after intro (only if AUTO_DUEL)
@@ -1858,7 +1934,7 @@ function Battle.tick()
                   byte0 = byte0 | pbit | (1 << (4 + battler))
                 end
 
-                if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                if debugOptions.log and (state.stageTimer % 60 == 1 or state.stageTimer <= 5) then
                   console:log(string.format("[Battle] HOST: Sent bufA for battler %d %s (cmd=0x%02X)%s",
                     battler, isRemote and "REMOTE" or "LOCAL", bufA[1] or 0,
                     isRemote and " (waiting ACK)" or " (activated)"))
@@ -1871,7 +1947,7 @@ function Battle.tick()
               byte3 = byte3 & ~p2bit
               byte0 = byte0 | pbit | (1 << (4 + battler))
               state.relay.pendingAck[battler] = nil
-              if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+              if debugOptions.log and (state.stageTimer % 60 == 1 or state.stageTimer <= 5) then
                 console:log(string.format("[Battle] HOST: ACK received for REMOTE battler %d — controller activated", battler))
               end
             end
@@ -1899,7 +1975,7 @@ function Battle.tick()
                   state.relay.pendingRelay[battler] = false
                   state.relay.remoteBufferB_queue[battler] = nil
 
-                  if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                  if debugOptions.log and (state.stageTimer % 60 == 1 or state.stageTimer <= 5) then
                     console:log(string.format("[Battle] HOST: bufB done for battler %d %s%s",
                       battler, isRemote and "REMOTE" or "LOCAL", isRemote and " (written)" or " (ACK only)"))
                   end
@@ -1963,7 +2039,7 @@ function Battle.tick()
               state.relay.pendingCmd[battler] = nil
               state.relay.processingCmd[battler] = true
 
-              if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+              if debugOptions.log and (state.stageTimer % 60 == 1 or state.stageTimer <= 5) then
                 console:log(string.format("[Battle] CLIENT: Processing HOST cmd for battler %d (cmd=0x%02X)",
                   battler, (cmdData.bufA and cmdData.bufA[1]) or 0))
               end
@@ -2016,7 +2092,7 @@ function Battle.tick()
                 state.relay.activeCmd[battler] = nil  -- clear per-frame re-write data
                 state.relay.ctxWritten[battler] = nil -- allow fresh ctx write on next command
 
-                if state.stageTimer % 60 == 1 or state.stageTimer <= 5 then
+                if debugOptions.log and (state.stageTimer % 60 == 1 or state.stageTimer <= 5) then
                   console:log(string.format("[Battle] CLIENT: Sent bufB resp for battler %d", battler))
                 end
               end
@@ -2040,9 +2116,7 @@ function Battle.tick()
     -- Periodic screenshots (every 300 frames)
     -- ================================================================
     if state.stageTimer % 300 == 0 and state.stageTimer > 1 then
-      pcall(function()
-        emu:screenshot(string.format("%sf%04d.png", state.relay.screenshotDir or "pvp_screenshots/", state.stageTimer))
-      end)
+      captureScreenshot(string.format("%sf%04d.png", state.relay.screenshotDir or "pvp_screenshots/", state.stageTimer))
     end
 
     -- ================================================================
@@ -2060,50 +2134,36 @@ function Battle.tick()
     end
 
     -- ================================================================
-    -- DIAGNOSTIC (every 60 frames)
+    -- Optional telemetry (throttled, compact payload)
     -- ================================================================
-    if state.stageTimer % 60 == 0 or state.stageTimer <= 5 then
-      if state.sendFn then
-        local ef32 = 0
-        if LINK and LINK.gBattleControllerExecFlags then
-          local okEf, efVal = pcall(readMem32, LINK.gBattleControllerExecFlags)
-          if okEf then ef32 = efVal end
-        end
+    local sendTelemetryNow = debugOptions.telemetry and (state.stageTimer <= 2 or state.stageTimer % 120 == 0)
+    if sendTelemetryNow and state.sendFn then
+      local pendingCount = 0
+      for _ in pairs(state.relay.pendingRelay) do pendingCount = pendingCount + 1 end
+      local procCount = 0
+      for _ in pairs(state.relay.processingCmd) do procCount = procCount + 1 end
 
-        local diagData = {
-          type = "duel_stage", stage = state.stageTimer,
-          bmf = string.format("0x%08X", currentBmf),
-          ef = string.format("0x%08X", ef32),
-          intro = state.relay.introComplete and 1 or 0,
-          master = state.isMaster and 1 or 0,
-        }
-        if config and config.warp then
-          local okCb2, cb2val = pcall(readMem32, config.warp.callback2Addr)
-          if okCb2 then diagData.cb2 = string.format("0x%08X", cb2val) end
-        end
-        if LINK and LINK.gBattlerControllerFuncs then
-          local ok0, c0 = pcall(readMem32, LINK.gBattlerControllerFuncs)
-          local ok1, c1 = pcall(readMem32, LINK.gBattlerControllerFuncs + 4)
-          if ok0 then diagData.ctrl0 = string.format("0x%08X", c0) end
-          if ok1 then diagData.ctrl1 = string.format("0x%08X", c1) end
-        end
-        if ADDRESSES and ADDRESSES.gBattleTypeFlags then
-          local okBTF, btf = pcall(readMem32, ADDRESSES.gBattleTypeFlags)
-          if okBTF then diagData.btf = string.format("0x%08X", btf) end
-        end
-        if LINK and LINK.gBattleCommunication then
-          local okC, c = pcall(readMem8, LINK.gBattleCommunication)
-          if okC then diagData.comm0 = c end
-        end
-        -- Pending relay info
-        local pendingCount = 0
-        for _ in pairs(state.relay.pendingRelay) do pendingCount = pendingCount + 1 end
-        local procCount = 0
-        for _ in pairs(state.relay.processingCmd) do procCount = procCount + 1 end
-        diagData.pendRelay = pendingCount
-        diagData.procCmd = procCount
-        state.sendFn(diagData)
+      local diagData = {
+        type = "duel_stage",
+        stage = state.stageTimer,
+        intro = state.relay.introComplete and 1 or 0,
+        master = state.isMaster and 1 or 0,
+        pendRelay = pendingCount,
+        procCmd = procCount,
+        turnPhase = state.relay.turnPhase,
+      }
+
+      if currentBmf and currentBmf ~= 0 then
+        diagData.bmf = string.format("0x%08X", currentBmf)
       end
+      if config and config.warp then
+        local okCb2, cb2val = pcall(readMem32, config.warp.callback2Addr)
+        if okCb2 then
+          diagData.cb2 = string.format("0x%08X", cb2val)
+        end
+      end
+
+      state.sendFn(diagData)
     end
 
     -- NOTE: Relay timeout (10s) and safety timeout (1min) REMOVED.
@@ -2384,6 +2444,7 @@ function Battle.reset()
   state.cachedOutcome = nil
   state.forceEndPending = false
   state.forceEndFrame = 0
+  state.frameCounter = 0
   state.stageTimer = 0
   state.stageClock = 0
   state.remoteBuffers = {}
@@ -2440,6 +2501,8 @@ function Battle.reset()
   state.relay.lastClientBufB = {}        -- HOST: per-frame re-write of CLIENT's bufferB
   state.relay.ctxWritten = {}            -- CLIENT: context vars written once per command (not per-frame)
   state.relay.lastRelayActivityFrame = 0
+  screenshotState.count = 0
+  screenshotState.lastFrame = -999999
 end
 
 Battle.STAGE = STAGE

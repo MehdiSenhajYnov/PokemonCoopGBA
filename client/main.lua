@@ -130,7 +130,7 @@ local localMapMetaPending = {}
 -- Configuration
 local SERVER_HOST_LOCAL = "127.0.0.1"
 local SERVER_HOST_REMOTE = "5.196.23.143" -- Keep remote server IP for quick switch-back
-local USE_LOCALHOST = true
+local USE_LOCALHOST = false
 local SERVER_HOST = USE_LOCALHOST and SERVER_HOST_LOCAL or SERVER_HOST_REMOTE
 local SERVER_PORT = 3333
 local SEND_RATE_MOVING = 1     -- Send on exact frame position changes (tiles change ~once per walk anim)
@@ -145,6 +145,14 @@ local ENABLE_REMOTE_POS_DEBUG = true   -- Build remote debug snapshot state
 local SHOW_LOCAL_POS_DEBUG_OVERLAY = false  -- Draw local X/Y/map debug in top bar
 local SHOW_REMOTE_POS_DEBUG_OVERLAY = false -- Draw remote Target/Current/Projected/Screen on overlay
 local REMOTE_POS_DEBUG_CONSOLE = true  -- Optional per-frame console log (very verbose)
+local BATTLE_DEBUG_LOG = false
+local BATTLE_DEBUG_SCREENSHOT = false
+local BATTLE_DEBUG_TELEMETRY = false
+local BATTLE_DEBUG_SCREENSHOT_COOLDOWN_FRAMES = 300
+local BATTLE_DEBUG_SCREENSHOT_MAX = 8
+local GHOST_RENDER_CAPTURE_CONFIDENCE_MIN = 0.05
+local GHOST_RENDER_CONTEXT_GRACE_FRAMES = 6
+local GHOST_RENDER_DIAG_INTERVAL_FRAMES = 300
 
 -- Early detection constants
 local INPUT_CAMERA_MAX_GAP = 3     -- Max frames between input and camera for validation
@@ -201,8 +209,14 @@ local State = {
   },
   otherPlayers = {},
   showGhosts = true,
+  showTopBar = true,
+  pvpEnabled = true,
   lastRenderPosition = nil, -- Last known-good local position for rendering fallback (menus/non-overworld)
   isOverworld = true,
+  inBattleNow = false,
+  localCaptureConfidence = 0,
+  lastGhostRenderableFrame = -9999,
+  lastGhostGateDiagFrame = -9999,
   isMoving = false,
   lastMoveFrame = 0,
   sendCooldown = 0,
@@ -261,6 +275,20 @@ local H = 160
 -- Real delta time tracking (Fix 4: os.clock based)
 local lastClock = os.clock()
 local prevDuelButtonMask = 0
+local KEY_MASK_A = 0x0001
+local KEY_MASK_B = 0x0002
+local KEY_MASK_SELECT = 0x0004
+local KEY_MASK_START = 0x0008
+local KEY_MASK_RIGHT = 0x0010
+local KEY_MASK_LEFT = 0x0020
+local KEY_MASK_UP = 0x0040
+local KEY_MASK_DOWN = 0x0080
+local KEY_MASK_R = 0x0100
+local KEY_MASK_L = 0x0200
+local SHORTCUT_R_PVP_HOLD_SECONDS = 1.00
+local rShortcutHoldStartClock = nil
+local rShortcutHoldCancelled = false
+local rShortcutPvpTriggered = false
 
 -- ROM Detection
 local detectedRomId = nil
@@ -273,6 +301,89 @@ local function log(message)
     console:log("[PokéCoop] " .. message)
   end
   if _G._diagLog then _G._diagLog("[PokéCoop] " .. message) end
+end
+
+local function setPvpEnabled(enabled)
+  local nextValue = enabled and true or false
+  if State.pvpEnabled == nextValue then
+    return
+  end
+
+  State.pvpEnabled = nextValue
+  if State.pvpEnabled then
+    log("PvP mode enabled")
+  else
+    -- Immediately clear local duel prompts so no new accept/request can proceed.
+    Duel.reset()
+    log("PvP mode disabled")
+  end
+end
+
+local function toggleTopBar()
+  State.showTopBar = not State.showTopBar
+  log("Top bar " .. (State.showTopBar and "shown" or "hidden"))
+end
+
+local function handleShortcutToggles(keyState)
+  if not keyState then
+    return
+  end
+
+  -- Direct shortcuts (requested mapping): R+Select / R+Start.
+  if keyState.r and keyState.pressedSelect then
+    toggleTopBar()
+    -- Do not arm hold on this frame.
+    rShortcutHoldStartClock = nil
+    rShortcutHoldCancelled = true
+    rShortcutPvpTriggered = false
+    return
+  end
+
+  if keyState.r and keyState.pressedStart then
+    setPvpEnabled(not State.pvpEnabled)
+    -- Do not arm hold on this frame.
+    rShortcutHoldStartClock = nil
+    rShortcutHoldCancelled = true
+    rShortcutPvpTriggered = false
+    return
+  end
+
+  local exclusiveRHold = keyState.r and not keyState.start and not keyState.select
+    and not keyState.l
+    and not keyState.a and not keyState.b
+    and not keyState.left and not keyState.right
+    and not keyState.up and not keyState.down
+
+  if keyState.r then
+    if exclusiveRHold then
+      if rShortcutHoldStartClock == nil then
+        rShortcutHoldStartClock = os.clock()
+        rShortcutHoldCancelled = false
+        rShortcutPvpTriggered = false
+      elseif not rShortcutHoldCancelled and not rShortcutPvpTriggered then
+        local holdSeconds = os.clock() - rShortcutHoldStartClock
+        if holdSeconds >= SHORTCUT_R_PVP_HOLD_SECONDS then
+          setPvpEnabled(not State.pvpEnabled)
+          rShortcutPvpTriggered = true
+        end
+      end
+    elseif rShortcutHoldStartClock ~= nil then
+      -- Cancel shortcut if user mixes other inputs while holding R.
+      rShortcutHoldCancelled = true
+    end
+    return
+  end
+
+  if rShortcutHoldStartClock ~= nil and not rShortcutHoldCancelled and not rShortcutPvpTriggered then
+    local holdSeconds = os.clock() - rShortcutHoldStartClock
+    if holdSeconds < SHORTCUT_R_PVP_HOLD_SECONDS then
+      toggleTopBar()
+    end
+  end
+
+  rShortcutHoldStartClock = nil
+  rShortcutHoldCancelled = false
+  rShortcutPvpTriggered = false
 end
 
 --[[
@@ -639,6 +750,15 @@ local function initialize()
 
   -- Initialize battle module (pass HAL for triggerMapLoad)
   Battle.init(detectedConfig, HAL)
+  if Battle.setDebugOptions then
+    Battle.setDebugOptions({
+      log = BATTLE_DEBUG_LOG,
+      screenshot = BATTLE_DEBUG_SCREENSHOT,
+      telemetry = BATTLE_DEBUG_TELEMETRY,
+      screenshotCooldownFrames = BATTLE_DEBUG_SCREENSHOT_COOLDOWN_FRAMES,
+      screenshotMaxPerSession = BATTLE_DEBUG_SCREENSHOT_MAX,
+    })
+  end
   Battle.setSendFn(function(msg)
     if State.connected then Network.send(msg) end
   end)
@@ -694,6 +814,10 @@ local function initialize()
     log("Make sure server is running on " .. SERVER_HOST .. ":" .. SERVER_PORT)
   end
 
+  log("Shortcut: R+Select = Show/Hide top bar")
+  log("Shortcut: R+Start = Toggle PvP invites")
+  log(string.format("Shortcut: hold R < %.2fs then release = Show/Hide top bar", SHORTCUT_R_PVP_HOLD_SECONDS))
+  log(string.format("Shortcut: hold R >= %.2fs = Toggle PvP instantly", SHORTCUT_R_PVP_HOLD_SECONDS))
   log("Initialization complete!")
 end
 
@@ -1167,8 +1291,8 @@ local function drawOverlay(currentPos)
     playerCount = playerCount + 1
   end
 
-  -- Draw top bar (always show when debug enabled or not connected, for status visibility)
-  if playerCount > 0 or ENABLE_DEBUG or not State.connected then
+  -- Draw top bar (user-toggleable; still follows status visibility rules when enabled)
+  if State.showTopBar and (playerCount > 0 or ENABLE_DEBUG or not State.connected) then
     -- Semi-transparent black bar at top
     painter:setFillColor(0xA0000000)
     painter:drawRectangle(0, 0, W, 14)
@@ -1189,6 +1313,14 @@ local function drawOverlay(currentPos)
       painter:drawText("OFFLINE", 80, 1)
     end
 
+    if State.pvpEnabled then
+      painter:setFillColor(0xFF00FF00)
+      painter:drawText("PVP:ON", 184, 1)
+    else
+      painter:setFillColor(0xFFFF5555)
+      painter:drawText("PVP:OFF", 178, 1)
+    end
+
     -- Debug: Current position
     if ENABLE_DEBUG and SHOW_LOCAL_POS_DEBUG_OVERLAY and currentPos then
       painter:setFillColor(0xFFFFFFFF)
@@ -1197,7 +1329,26 @@ local function drawOverlay(currentPos)
     end
   end
 
-  local shouldDrawGhosts = State.showGhosts and playerCount > 0 and currentPos
+  local captureConfidence = tonumber(State.localCaptureConfidence) or 0
+  local hasSpriteRenderableSignal = captureConfidence >= GHOST_RENDER_CAPTURE_CONFIDENCE_MIN
+  local recentRenderableSignal = (State.frameCounter - (State.lastGhostRenderableFrame or -9999)) <= GHOST_RENDER_CONTEXT_GRACE_FRAMES
+  local battleModuleActive = Battle and Battle.isActive and Battle.isActive()
+  local isRenderableContext = (State.isOverworld or hasSpriteRenderableSignal or recentRenderableSignal) and not battleModuleActive
+  local shouldDrawGhosts = State.showGhosts and isRenderableContext and playerCount > 0 and currentPos
+
+  if not shouldDrawGhosts and playerCount > 0 and ENABLE_DEBUG
+    and (State.frameCounter - (State.lastGhostGateDiagFrame or -9999)) >= GHOST_RENDER_DIAG_INTERVAL_FRAMES then
+    State.lastGhostGateDiagFrame = State.frameCounter
+    log(string.format(
+      "Ghost gate closed: ow=%s conf=%.2f recent=%s inBattle=%s battleMod=%s players=%d",
+      tostring(State.isOverworld),
+      captureConfidence,
+      recentRenderableSignal and "1" or "0",
+      tostring(State.inBattleNow),
+      tostring(battleModuleActive),
+      playerCount
+    ))
+  end
 
   -- Draw ghost players using interpolated positions
   if shouldDrawGhosts then
@@ -1252,10 +1403,15 @@ local function update()
       log("Battle ended (inBattle 1→0)")
     end
     State.prevInBattle = inBattle
+    State.inBattleNow = (inBattle == 1)
   end
 
   -- Warp/Duel state machine
   if State.inputsLocked then
+    -- Never keep a stale shortcut hold while gameplay inputs are locked.
+    rShortcutHoldStartClock = nil
+    rShortcutHoldCancelled = false
+    rShortcutPvpTriggered = false
 
     -- Phase "waiting_party": waiting for opponent's party data
     if State.warpPhase == "waiting_party" then
@@ -1301,7 +1457,7 @@ local function update()
             State.lastServerMessageClock = 0
             log("Duel cancelled")
           elseif message.type == "duel_opponent_disconnected" then
-            log("Opponent disconnected — aborting duel")
+            log("Opponent disconnected — aborting duel (" .. tostring(message.disconnectReason or "unknown") .. ")")
             Battle.reset()
             State.duelPending = nil
             State.inputsLocked = false
@@ -1648,19 +1804,32 @@ local function update()
       elseif message.type == "duel_request" then
         -- Incoming duel request from another player
         local requesterName = message.requesterName
+        local requesterLabel = requesterName or message.requesterId or "unknown"
         -- Store character name if provided
         if requesterName and message.requesterId then
           State.playerNames[message.requesterId] = requesterName
         end
-        local handled = Duel.handleRequest(message.requesterId, requesterName, State.frameCounter)
-        if handled then
-          log(string.format("Duel request from: %s (state=%s)",
-            requesterName or message.requesterId, Duel.getState()))
-        elseif State.connected and message.requesterId then
-          -- If we're busy in another duel flow, reject immediately so requester doesn't hang.
-          Network.send({ type = "duel_decline", requesterId = message.requesterId })
-          log(string.format("Auto-declined duel from %s (busy state=%s)",
-            requesterName or message.requesterId, Duel.getState()))
+        if not State.pvpEnabled then
+          if State.connected and message.requesterId then
+            Network.send({
+              type = "duel_decline",
+              requesterId = message.requesterId,
+              reason = "pvp_disabled"
+            })
+          end
+          log(string.format("Auto-declined duel from %s (PvP OFF)",
+            requesterLabel))
+        else
+          local handled = Duel.handleRequest(message.requesterId, requesterName, State.frameCounter)
+          if handled then
+            log(string.format("Duel request from: %s (state=%s)",
+              requesterLabel, Duel.getState()))
+          elseif State.connected and message.requesterId then
+            -- If we're busy in another duel flow, reject immediately so requester doesn't hang.
+            Network.send({ type = "duel_decline", requesterId = message.requesterId })
+            log(string.format("Auto-declined duel from %s (busy state=%s)",
+              requesterLabel, Duel.getState()))
+          end
         end
 
       elseif message.type == "duel_warp" then
@@ -1768,7 +1937,7 @@ local function update()
 
       elseif message.type == "duel_opponent_disconnected" then
         -- Opponent disconnected during battle
-        log("Opponent disconnected during battle — returning to origin")
+        log("Opponent disconnected during battle — returning to origin (" .. tostring(message.disconnectReason or "unknown") .. ")")
         if Battle.isActive() then
           Battle.reset()
         end
@@ -1809,6 +1978,10 @@ local function update()
   -- Always attempt local sprite capture. The capture routine already no-ops
   -- when it cannot find a valid player OAM entry.
   Sprite.captureLocalPlayer()
+  State.localCaptureConfidence = Sprite.getLocalCaptureConfidence and Sprite.getLocalCaptureConfidence() or 0
+  if State.localCaptureConfidence >= GHOST_RENDER_CAPTURE_CONFIDENCE_MIN then
+    State.lastGhostRenderableFrame = State.frameCounter
+  end
 
   -- Duel module tick (expire timeouts for fallback overlay)
   Duel.tick(State.frameCounter)
@@ -1823,20 +1996,32 @@ local function update()
   prevDuelButtonMask = heldMask
 
   local keyState = {
-    a = (heldMask & 0x0001) ~= 0,
-    b = (heldMask & 0x0002) ~= 0,
-    pressedA = (pressedMask & 0x0001) ~= 0,
-    pressedB = (pressedMask & 0x0002) ~= 0,
-    pressedRight = (pressedMask & 0x0010) ~= 0,
-    pressedLeft = (pressedMask & 0x0020) ~= 0,
-    pressedUp = (pressedMask & 0x0040) ~= 0,
-    pressedDown = (pressedMask & 0x0080) ~= 0,
+    a = (heldMask & KEY_MASK_A) ~= 0,
+    b = (heldMask & KEY_MASK_B) ~= 0,
+    right = (heldMask & KEY_MASK_RIGHT) ~= 0,
+    left = (heldMask & KEY_MASK_LEFT) ~= 0,
+    up = (heldMask & KEY_MASK_UP) ~= 0,
+    down = (heldMask & KEY_MASK_DOWN) ~= 0,
+    select = (heldMask & KEY_MASK_SELECT) ~= 0,
+    start = (heldMask & KEY_MASK_START) ~= 0,
+    r = (heldMask & KEY_MASK_R) ~= 0,
+    l = (heldMask & KEY_MASK_L) ~= 0,
+    pressedA = (pressedMask & KEY_MASK_A) ~= 0,
+    pressedB = (pressedMask & KEY_MASK_B) ~= 0,
+    pressedSelect = (pressedMask & KEY_MASK_SELECT) ~= 0,
+    pressedStart = (pressedMask & KEY_MASK_START) ~= 0,
+    pressedRight = (pressedMask & KEY_MASK_RIGHT) ~= 0,
+    pressedLeft = (pressedMask & KEY_MASK_LEFT) ~= 0,
+    pressedUp = (pressedMask & KEY_MASK_UP) ~= 0,
+    pressedDown = (pressedMask & KEY_MASK_DOWN) ~= 0,
   }
   local keyA, keyB = keyState.a, keyState.b
 
+  handleShortcutToggles(keyState)
+
   -- Auto-duel support: _G.AUTO_DUEL set by wrapper scripts for automated testing
   -- In auto-duel mode, bypass textbox entirely by writing VAR_RESULT/VAR_0x8001 directly
-  if _G.AUTO_DUEL and State.connected and currentPos then
+  if _G.AUTO_DUEL and State.connected and currentPos and State.pvpEnabled then
     if _G.AUTO_DUEL == "accept" then
       -- Auto-accept: if a native textbox Yes/No is showing, write VAR_RESULT=1 (Yes) directly
       if Textbox.isActive() and Textbox.getActiveType() == "yesno" then
@@ -1878,22 +2063,32 @@ local function update()
   local duelAction = Duel.update(State.frameCounter, keyState)
   if duelAction and State.connected then
     if duelAction.action == "send_request" then
-      local sent = Network.send({ type = "duel_request", targetId = duelAction.targetId })
-      if sent then
-        if duelAction.latencyFrames then
-          log(string.format("Duel request sent to: %s (%d frames)", duelAction.targetId, duelAction.latencyFrames))
+      if State.pvpEnabled then
+        local sent = Network.send({ type = "duel_request", targetId = duelAction.targetId })
+        if sent then
+          if duelAction.latencyFrames then
+            log(string.format("Duel request sent to: %s (%d frames)", duelAction.targetId, duelAction.latencyFrames))
+          else
+            log("Duel request sent to: " .. duelAction.targetId)
+          end
         else
-          log("Duel request sent to: " .. duelAction.targetId)
+          log("ERROR: Failed to send duel_request (network disconnected)")
         end
       else
-        log("ERROR: Failed to send duel_request (network disconnected)")
+        Duel.reset()
+        log("Blocked duel request (PvP OFF)")
       end
     elseif duelAction.action == "accept" then
-      Network.send({ type = "duel_accept", requesterId = duelAction.requesterId })
-      if duelAction.latencyFrames then
-        log(string.format("Accepted duel from: %s (%d frames)", duelAction.requesterId, duelAction.latencyFrames))
+      if State.pvpEnabled then
+        Network.send({ type = "duel_accept", requesterId = duelAction.requesterId })
+        if duelAction.latencyFrames then
+          log(string.format("Accepted duel from: %s (%d frames)", duelAction.requesterId, duelAction.latencyFrames))
+        else
+          log("Accepted duel from: " .. duelAction.requesterId)
+        end
       else
-        log("Accepted duel from: " .. duelAction.requesterId)
+        Network.send({ type = "duel_decline", requesterId = duelAction.requesterId, reason = "pvp_disabled" })
+        log("Auto-declined duel (PvP OFF): " .. tostring(duelAction.requesterId))
       end
     elseif duelAction.action == "decline" then
       Network.send({ type = "duel_decline", requesterId = duelAction.requesterId })
@@ -1917,15 +2112,20 @@ local function update()
   if Duel.hasFallbackPrompt() then
     local response, reqId = Duel.checkResponse(keyA, keyB)
     if response == "accept" and reqId and State.connected then
-      Network.send({ type = "duel_accept", requesterId = reqId })
-      log("Accepted duel from: " .. reqId)
+      if State.pvpEnabled then
+        Network.send({ type = "duel_accept", requesterId = reqId })
+        log("Accepted duel from: " .. reqId)
+      else
+        Network.send({ type = "duel_decline", requesterId = reqId, reason = "pvp_disabled" })
+        log("Auto-declined duel (PvP OFF): " .. reqId)
+      end
     elseif response == "decline" and reqId and State.connected then
       Network.send({ type = "duel_decline", requesterId = reqId })
       log("Declined duel from: " .. reqId)
     end
   elseif not Duel.hasPrompt() then
     -- Check for duel trigger (A near ghost) — only when no prompt is showing
-    if currentPos and State.connected then
+    if currentPos and State.connected and State.pvpEnabled then
       local targetId = Duel.checkTrigger(currentPos, State.otherPlayers, keyA, State.frameCounter)
       if targetId then
         -- Try native textbox flow (use character name if known)
@@ -1942,7 +2142,7 @@ local function update()
   end
 
   -- Send sprite update only when local capture confidence is high enough.
-  local spriteCaptureConfidence = Sprite.getLocalCaptureConfidence and Sprite.getLocalCaptureConfidence() or 1
+  local spriteCaptureConfidence = State.localCaptureConfidence or (Sprite.getLocalCaptureConfidence and Sprite.getLocalCaptureConfidence() or 1)
   local canSendSpriteNow = spriteCaptureConfidence >= SPRITE_MIN_BROADCAST_CONFIDENCE
 
   if Sprite.hasChanged() and State.connected and canSendSpriteNow then
@@ -2100,6 +2300,7 @@ local function update()
 
       State.isMoving = true
       State.lastMoveFrame = State.frameCounter
+      State.lastGhostRenderableFrame = State.frameCounter
     else
       if State.frameCounter - State.lastMoveFrame > IDLE_THRESHOLD then
         State.isMoving = false
@@ -2264,7 +2465,8 @@ local function update()
 
   end
 
-  -- Draw overlay using render fallback position (keeps ghosts visible in menus).
+  -- Draw overlay using render fallback position for stability; ghost visibility
+  -- is still gated to real gameplay context.
   if renderPos then
     drawOverlay(renderPos)
   elseif rawCurrentPos == nil and State.frameCounter % 300 == 0 then -- Every 5 seconds

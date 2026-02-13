@@ -95,6 +95,76 @@ local transitionProjectionOffsets = {} -- legacy debug cache (kept for compatibi
 local projectedPosCache = {}           -- playerId -> {x, y, crossMap, tick}
 local renderTick = 0
 local PROJECTED_POS_CACHE_TTL = 2      -- frames, anti-flash fallback when projection blips
+local GHOST_DRAW_WARN_INTERVAL_FRAMES = 180
+local ghostDrawWarnings = {
+    invalidInput = 0,
+    drawError = 0,
+    lastWarnTick = -9999,
+}
+
+local function isFiniteNumber(value)
+    local n = tonumber(value)
+    if n == nil or n ~= n or n == math.huge or n == -math.huge then
+        return nil
+    end
+    return n
+end
+
+local function warnGhostDraw(kind, detail)
+    if kind then
+        ghostDrawWarnings[kind] = (ghostDrawWarnings[kind] or 0) + 1
+    end
+
+    if (renderTick - (ghostDrawWarnings.lastWarnTick or -9999)) < GHOST_DRAW_WARN_INTERVAL_FRAMES then
+        return
+    end
+
+    ghostDrawWarnings.lastWarnTick = renderTick
+    local message = string.format(
+        "[Render] Ghost draw warnings invalid=%d drawErr=%d",
+        ghostDrawWarnings.invalidInput or 0,
+        ghostDrawWarnings.drawError or 0
+    )
+    if detail and #detail > 0 then
+        message = message .. " " .. detail
+    end
+
+    pcall(function()
+        if console and console.log then
+            console:log(message)
+        end
+    end)
+end
+
+local function getOverlayDrawMethod(overlayImage)
+    if not overlayImage then
+        return nil
+    end
+
+    local ok, drawImage = pcall(function()
+        return overlayImage.drawImage
+    end)
+    if not ok or type(drawImage) ~= "function" then
+        return nil
+    end
+    return drawImage
+end
+
+local function isRenderableGhostForOverlay(ghost)
+    if type(ghost) ~= "table" or not ghost.playerId then
+        return false
+    end
+
+    local screenX = isFiniteNumber(ghost.screenX)
+    local screenY = isFiniteNumber(ghost.screenY)
+    if not screenX or not screenY then
+        return false
+    end
+
+    ghost.screenX = math.floor(screenX)
+    ghost.screenY = math.floor(screenY)
+    return true
+end
 
 local function oamShapeSizeForDimensions(width, height)
     return SHAPE_SIZE_LOOKUP[string.format("%dx%d", width, height)]
@@ -917,7 +987,14 @@ local function resolveForceOverlayFront(playerId, desiredFront)
 end
 
 local function drawGhostOverlayImage(overlayImage, ghost)
-    if not overlayImage or not ghost or not ghost.playerId then
+    if not isRenderableGhostForOverlay(ghost) then
+        warnGhostDraw("invalidInput", "(ghost payload invalid)")
+        return false
+    end
+
+    local drawMethod = getOverlayDrawMethod(overlayImage)
+    if not drawMethod then
+        warnGhostDraw("invalidInput", "(overlay unavailable)")
         return false
     end
     if not Sprite or not Sprite.getImageForPlayer then
@@ -925,26 +1002,51 @@ local function drawGhostOverlayImage(overlayImage, ghost)
     end
 
     local imgOk, spriteImg, spriteW, spriteH = pcall(Sprite.getImageForPlayer, ghost.playerId)
-    if not imgOk or not spriteImg or not spriteW or not spriteH or spriteW <= 0 or spriteH <= 0 then
+    local width = isFiniteNumber(spriteW)
+    local height = isFiniteNumber(spriteH)
+    if not imgOk or not spriteImg or not width or not height then
+        warnGhostDraw("drawError", "(sprite fetch failed)")
+        return false
+    end
+    width = math.floor(width)
+    height = math.floor(height)
+    if width <= 0 or height <= 0 or width > 128 or height > 128 then
+        warnGhostDraw("drawError", "(sprite dimensions invalid)")
         return false
     end
 
-    local drawX = ghost.screenX - math.floor((spriteW - TILE_SIZE) / 2)
-    local drawY = ghost.screenY - (spriteH - TILE_SIZE)
-    local drawOk = pcall(overlayImage.drawImage, overlayImage, spriteImg, drawX, drawY)
+    local drawX = ghost.screenX - math.floor((width - TILE_SIZE) / 2)
+    local drawY = ghost.screenY - (height - TILE_SIZE)
+    local safeX = isFiniteNumber(drawX)
+    local safeY = isFiniteNumber(drawY)
+    if not safeX or not safeY then
+        warnGhostDraw("drawError", "(draw coordinates invalid)")
+        return false
+    end
+    drawX = math.floor(safeX)
+    drawY = math.floor(safeY)
+
+    local drawOk = pcall(function()
+        drawMethod(overlayImage, spriteImg, drawX, drawY)
+    end)
     if not drawOk then
+        warnGhostDraw("drawError", "(overlay draw failed)")
         return false
     end
 
     ghost.drawX = drawX
     ghost.drawY = drawY
-    ghost.width = spriteW
-    ghost.height = spriteH
+    ghost.width = width
+    ghost.height = height
     return true
 end
 
 local function drawFallbackGhost(painter, overlayImage, ghost)
     if drawGhostOverlayImage(overlayImage, ghost) then
+        return
+    end
+    if not isRenderableGhostForOverlay(ghost) then
+        warnGhostDraw("invalidInput")
         return
     end
 
@@ -1465,15 +1567,18 @@ function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
 
     local activePlayers = {}
     for _, ghost in ipairs(ghosts) do
-        activePlayers[ghost.playerId] = true
+        if ghost and ghost.playerId then
+            activePlayers[ghost.playerId] = true
+        end
     end
     releaseInactiveSlots(activePlayers)
     assignPaletteSlots(ghosts)
 
     local usedSlots = {}
     for _, ghost in ipairs(ghosts) do
+        local validGhost = isRenderableGhostForOverlay(ghost)
         local data = ghost.renderData
-        if data and data.tileBytes and oamShapeSizeForDimensions(ghost.width, ghost.height) then
+        if validGhost and data and data.tileBytes and oamShapeSizeForDimensions(ghost.width, ghost.height) then
             local vramSlot = allocateVramSlot(ghost.playerId, usedSlots)
             if vramSlot ~= nil then
                 ghost.vramSlot = vramSlot
@@ -1487,8 +1592,11 @@ function Render.drawAllGhosts(painter, overlayImage, otherPlayers, playerPos)
     for _, ghost in ipairs(ghosts) do
         local rendered = false
         local data = ghost.renderData
+        local validGhost = isRenderableGhostForOverlay(ghost)
 
-        if data and ghost.vramSlot ~= nil then
+        if not validGhost then
+            warnGhostDraw("invalidInput")
+        elseif data and ghost.vramSlot ~= nil then
             local spriteKey = data.spriteHash or tostring(data.revision or 0)
             local needsVramWrite = slotSpriteHash[ghost.vramSlot] ~= spriteKey
             if not needsVramWrite and VRAM_REFRESH_INTERVAL_FRAMES > 0 then

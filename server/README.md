@@ -28,6 +28,8 @@ npm test
 ## Environment
 
 - `PORT`: listening port (default `3333`)
+- `HEARTBEAT_INTERVAL_MS`: heartbeat period in ms (default `30000`, minimum `1000`)
+- `DUEL_STAGE_VERBOSE`: set to `1` for full duel stage diagnostics in server logs (default compact logs)
 
 ## Client Lifecycle
 
@@ -113,6 +115,6 @@ Position:
 
 - Room-based broadcast (`rooms` map).
 - Per-client cached last position/sprite for late joiners.
-- Heartbeat every 30s (`ping` from server; inactive clients are dropped).
+- Heartbeat every 30s by default (`ping` from server; inactive clients are dropped).
   - Server marks a client alive on either `pong` or `ping`.
 - Disconnect cleanup includes duel cancellation and opponent notification.

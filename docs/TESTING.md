@@ -65,6 +65,7 @@ Expected:
 - movement interpolation is smooth
 - sprite updates propagate (`sprite_update`)
 - no one-frame ghost flash during idle, walk, or close overlap transitions
+- ghosts are rendered only in confirmed overworld callback state
 - overlap depth is coherent:
   - if remote ghost is below local player on Y and sprites overlap, remote should render in front
   - if remote ghost is above local player on Y, local should stay in front
@@ -82,6 +83,17 @@ Expected:
 - no intermittent blink/flicker of remote ghost
 - remote remains visible (not hidden behind map layer unexpectedly)
 - front/back ordering remains coherent during overlap crossings
+- no recurring `[FATAL] update() ... Invalid object` errors in `update_errors.txt`
+
+## 4C) Overworld Gating (Strict Callback2)
+
+1. Connect two clients and stand on same map.
+2. Open in-game menu / party / bag on one client.
+3. Enter and exit a battle encounter.
+
+Expected:
+- ghosts are hidden while not in overworld (menu transitions, battle, callback2 non-overworld)
+- ghosts return as soon as callback2 returns to overworld
 
 ## 5) Reconnect Behavior
 
@@ -92,6 +104,7 @@ Expected:
 Expected:
 - clients switch to reconnecting mode
 - reconnect attempts happen automatically
+- reconnect retry cadence increases with backoff (no per-frame connect spam)
 - after reconnect: clients re-register, re-join room, and resume sync
 
 ## 6) Duel Flow (Manual)
@@ -106,6 +119,17 @@ Expected:
 - server relays `duel_warp` to both
 - party/player-info handshake starts (`duel_party`, `duel_player_info`, `duel_ready`)
 - battle module transitions into active stage
+
+## 6B) Duel Cleanup On Timeout/Disconnect
+
+1. Start a duel so both players are in active duel state.
+2. Kill one client process or block its network until heartbeat timeout.
+3. Observe remaining client/server behavior.
+
+Expected:
+- server emits `duel_opponent_disconnected` to opponent
+- duel state is cleaned for both players (no stuck pending duel)
+- `player_disconnected` is broadcast with reason metadata
 
 ## 7) Auto-Duel Smoke (Optional)
 

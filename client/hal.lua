@@ -40,12 +40,53 @@ local mapHeaderAddr = nil
 local mapHeaderScanAttempts = 0
 local mapHeaderCandidateAddr = nil
 local mapHeaderCandidateFrames = 0
+local learnedOverworldCb2 = nil
+local lastPosForOverworldLearn = nil
+local lastLearnedOverworldCb2Log = nil
 
 local function clampGhostSlotCount(count)
   local n = math.floor(tonumber(count) or GHOST_OBJ_MAX_SLOTS)
   if n < 1 then n = 1 end
   if n > GHOST_OBJ_MAX_SLOTS then n = GHOST_OBJ_MAX_SLOTS end
   return n
+end
+
+local function normalizeCallbackPointer(value)
+  local n = tonumber(value)
+  if not n then
+    return nil
+  end
+  if n >= ROM_BASE and n < ROM_END then
+    return n & 0xFFFFFFFE
+  end
+  return n
+end
+
+local function callbackMatches(current, expected)
+  local cur = normalizeCallbackPointer(current)
+  local exp = normalizeCallbackPointer(expected)
+  return cur ~= nil and exp ~= nil and cur == exp
+end
+
+local function readPositionForOverworldLearn()
+  local x = HAL.readPlayerX()
+  local y = HAL.readPlayerY()
+  local mapId = HAL.readMapId()
+  local mapGroup = HAL.readMapGroup()
+  if x == nil or y == nil or mapId == nil or mapGroup == nil then
+    return nil
+  end
+  return { x = x, y = y, mapId = mapId, mapGroup = mapGroup }
+end
+
+local function didPositionChange(previous, current)
+  if not previous or not current then
+    return false
+  end
+  return previous.x ~= current.x
+    or previous.y ~= current.y
+    or previous.mapId ~= current.mapId
+    or previous.mapGroup ~= current.mapGroup
 end
 
 local function copyArray(values)
@@ -108,6 +149,9 @@ function HAL.init(gameConfig)
   mapHeaderScanAttempts = 0
   mapHeaderCandidateAddr = nil
   mapHeaderCandidateFrames = 0
+  learnedOverworldCb2 = nil
+  lastPosForOverworldLearn = nil
+  lastLearnedOverworldCb2Log = nil
 
   local renderConfig = gameConfig and gameConfig.render or nil
   ghostOamStrategy = "fixed"
@@ -2283,30 +2327,84 @@ function HAL.readSpritePalette(bank)
 end
 
 --[[
+  Derive coarse overworld state from callback2 (strict when profile provides it).
+  @return string "overworld" | "loading" | "other" | "battle" | "overworld_fallback" | "unknown"
+]]
+function HAL.getOverworldState()
+  local cb2 = HAL.readCallback2()
+  local inBattle = HAL.readInBattle()
+  local hasStrictCallbackProfile = config
+    and config.warp
+    and config.warp.callback2Addr
+    and config.warp.cb2Overworld
+
+  if hasStrictCallbackProfile then
+    if inBattle == 1 then
+      return "battle"
+    end
+    if not cb2 then
+      return "unknown"
+    end
+
+    if config.warp.cb2LoadMap and callbackMatches(cb2, config.warp.cb2LoadMap) then
+      return "loading"
+    end
+
+    if callbackMatches(cb2, config.warp.cb2Overworld) then
+      learnedOverworldCb2 = cb2
+      lastPosForOverworldLearn = readPositionForOverworldLearn()
+      return "overworld"
+    end
+
+    if learnedOverworldCb2 and callbackMatches(cb2, learnedOverworldCb2) then
+      return "overworld"
+    end
+
+    -- Strict mode, but self-heal profile drift:
+    -- if player position actually moves while out of battle on a stable non-loading callback,
+    -- treat that callback as runtime overworld for this session.
+    if inBattle == 0 then
+      local currentPos = readPositionForOverworldLearn()
+      if currentPos and didPositionChange(lastPosForOverworldLearn, currentPos) then
+        learnedOverworldCb2 = cb2
+        if lastLearnedOverworldCb2Log ~= cb2 then
+          lastLearnedOverworldCb2Log = cb2
+          pcall(function()
+            if console and console.log then
+              console:log(string.format("[HAL] Learned runtime overworld callback2: 0x%08X", cb2))
+            end
+          end)
+        end
+      end
+      lastPosForOverworldLearn = currentPos
+    else
+      lastPosForOverworldLearn = nil
+    end
+
+    if learnedOverworldCb2 and callbackMatches(cb2, learnedOverworldCb2) then
+      return "overworld"
+    end
+
+    return "other"
+  end
+
+  if inBattle == 1 then
+    return "battle"
+  end
+  if inBattle == 0 then
+    return "overworld_fallback"
+  end
+
+  return "unknown"
+end
+
+--[[
   Read gMain.callback2 and compare against the ROM profile's CB2_Overworld.
   @return boolean True when the game is currently in overworld callback
 ]]
 function HAL.isOverworld()
-  local cb2 = HAL.readCallback2()
-  local inBattle = HAL.readInBattle()
-
-  if config and config.warp then
-    if config.warp.cb2LoadMap and cb2 == config.warp.cb2LoadMap then
-      return false
-    end
-
-    -- Prefer explicit callback2 match over potentially noisy inBattle reads.
-    if config.warp.cb2Overworld and cb2 == config.warp.cb2Overworld then
-      return true
-    end
-  end
-
-  if inBattle == 1 then
-    return false
-  end
-
-  -- Keep ghosts visible when not in battle to avoid false negatives across ROM variants.
-  return true
+  local state = HAL.getOverworldState()
+  return state == "overworld" or state == "overworld_fallback"
 end
 
 --[[
