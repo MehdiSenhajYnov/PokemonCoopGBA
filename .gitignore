@@ -1,60 +1,98 @@
-# Node.js
+# -----------------------------------------------------------------------------
+# Project-local tooling/runtime assets (keep out of git by default)
+# -----------------------------------------------------------------------------
+ghidra_*/
+ghidra_projects/
+mgba/
+refs/
+rom/
+
+# -----------------------------------------------------------------------------
+# Dependencies
+# -----------------------------------------------------------------------------
 node_modules/
-npm-debug.log
-package-lock.json
-
-# Save files (runtime, player-specific)
-*.sav
-*.sa1
-*.sa2
-*.sa3
-
-# mGBA runtime files
-mgba/config.ini
-mgba/qt.ini
-mgba/library.sqlite3
-mgba/nointro.sqlite3
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
 # External dependencies (download separately)
 luasocket.zip
 
+# -----------------------------------------------------------------------------
 # Runtime / generated files
+# -----------------------------------------------------------------------------
 client_incoming.json
 client_outgoing.json
 client_status.json
+client/client_status.json
+test_results.json
 nul
 
 # Logs
 *.log
 logs/
 
-# OS
+# -----------------------------------------------------------------------------
+# Test / diagnostic tooling (mod-only repo target)
+# -----------------------------------------------------------------------------
+Tasks/
+scripts/
+client/auto_duel_*.lua
+server/test-connection.js
+docs/TESTING.md
+test_*.json
+test_*.txt
+scan_*_results.txt
+transition_to_mainloop.png
+
+# -----------------------------------------------------------------------------
+# Emulator save/state artifacts
+# -----------------------------------------------------------------------------
+*.sav
+*.sa1
+*.sa2
+*.sa3
+*.state
+*.ss0
+*.ss1
+*.ss2
+*.ss3
+*.bmp
+
+# -----------------------------------------------------------------------------
+# Python cache artifacts
+# -----------------------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+
+# -----------------------------------------------------------------------------
+# Temporary files
+# -----------------------------------------------------------------------------
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+
+# -----------------------------------------------------------------------------
+# Local config overrides
+# -----------------------------------------------------------------------------
+config.local.lua
+.env
+.env.*
+!.env.example
+
+# -----------------------------------------------------------------------------
+# OS / Editor
+# -----------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# mGBA state/screenshots
-*.state
-*.bmp
-
-# Temporary files
-tmp/
-temp/
-*.tmp
-
-# Config overrides
-config.local.lua
-
-# Reference repos (cloned for offline analysis, not part of project)
-refs/
-
-# ROM runtime files
-rom/*.cheats
-rom/*.ss*
