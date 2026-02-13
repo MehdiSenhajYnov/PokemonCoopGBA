@@ -21,7 +21,6 @@ local function log(msg)
 end
 
 -- Configuration
-local TRIGGER_DISTANCE = 2      -- Max tile distance to trigger a duel
 local REQUEST_TIMEOUT = 600     -- Frames before pending request expires (~10s)
 local COOLDOWN_FRAMES = 120     -- Frames between outgoing requests (~2s)
 local RESPONSE_TIMEOUT = 900    -- Frames to wait for opponent response (~15s)
@@ -29,6 +28,12 @@ local CHALLENGE_MIN_WAIT_FRAMES = 3   -- Min wait to avoid same-frame A bleed in
 local CHALLENGE_MAX_WAIT_FRAMES = 10  -- Hard cap: open prompt even if A stays held
 local TRIGGER_BLOCK_FRAMES = 12 -- Short trigger lockout after prompt decisions
 local YESNO_SENTINEL = 0x007F
+local FACING = {
+  DOWN = 1,
+  UP = 2,
+  LEFT = 3,
+  RIGHT = 4,
+}
 
 -- Textbox module reference (set by init)
 local Textbox = nil
@@ -140,17 +145,55 @@ local function tryManualYesNoFallback(keyInfo)
   return nil
 end
 
--- ========== Proximity Detection (unchanged) ==========
+local function facingToDelta(facing)
+  if facing == FACING.DOWN then return 0, 1 end
+  if facing == FACING.UP then return 0, -1 end
+  if facing == FACING.LEFT then return -1, 0 end
+  if facing == FACING.RIGHT then return 1, 0 end
+  return nil, nil
+end
+
+local function isFaceToFace(localPos, remotePos)
+  if type(localPos) ~= "table" or type(remotePos) ~= "table" then
+    return false
+  end
+
+  local lx = tonumber(localPos.x)
+  local ly = tonumber(localPos.y)
+  local rx = tonumber(remotePos.x)
+  local ry = tonumber(remotePos.y)
+  if not (lx and ly and rx and ry) then
+    return false
+  end
+
+  local dx = rx - lx
+  local dy = ry - ly
+  -- Must be exactly one cardinal tile apart.
+  if math.abs(dx) + math.abs(dy) ~= 1 then
+    return false
+  end
+
+  local ldx, ldy = facingToDelta(tonumber(localPos.facing))
+  local rdx, rdy = facingToDelta(tonumber(remotePos.facing))
+  if not (ldx and ldy and rdx and rdy) then
+    return false
+  end
+
+  -- Both players must look directly at each other.
+  return ldx == dx and ldy == dy and rdx == -dx and rdy == -dy
+end
+
+-- ========== Duel Trigger Detection ==========
 
 --[[
-  Check if button A is pressed near a ghost (trigger for sending duel request).
+  Check if button A is pressed while facing a ghost exactly one tile away.
   Only fires on rising edge (press, not hold).
 
   @param playerPos   table  {x, y, mapId, mapGroup}
-  @param otherPlayers table {playerId => {x, y, mapId, mapGroup, ...}}
+  @param otherPlayers table {playerId => {x, y, mapId, mapGroup, facing, ...}}
   @param keyA        boolean  A button currently held
   @param frameCounter number  Current frame
-  @return targetPlayerId, targetName or nil
+  @return targetPlayerId or nil
 ]]
 function Duel.checkTrigger(playerPos, otherPlayers, keyA, frameCounter)
   -- Edge detect: only on press (not hold)
@@ -175,19 +218,14 @@ function Duel.checkTrigger(playerPos, otherPlayers, keyA, frameCounter)
     return nil
   end
 
-  -- Find closest ghost within range on same map
-  local bestId, bestDist = nil, math.huge
+  -- Find a valid face-to-face opponent on same map.
+  local bestId = nil
   for playerId, ghostPos in pairs(otherPlayers) do
     if ghostPos.mapId == playerPos.mapId
-      and ghostPos.mapGroup == playerPos.mapGroup then
-
-      local dx = math.abs(ghostPos.x - playerPos.x)
-      local dy = math.abs(ghostPos.y - playerPos.y)
-      local dist = dx + dy  -- Manhattan distance
-
-      if dist <= TRIGGER_DISTANCE and dist < bestDist then
+      and ghostPos.mapGroup == playerPos.mapGroup
+      and isFaceToFace(playerPos, ghostPos) then
+      if not bestId or tostring(playerId) < tostring(bestId) then
         bestId = playerId
-        bestDist = dist
       end
     end
   end

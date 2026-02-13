@@ -13,6 +13,12 @@ const net = require('net');
 const PORT = process.env.PORT || 3333;
 const HEARTBEAT_INTERVAL = 30000; // 30s
 const PENDING_DUEL_TTL_MS = 20000; // stale pending request guard
+const FACING_TO_DELTA = {
+  1: { dx: 0, dy: 1 },   // down
+  2: { dx: 0, dy: -1 },  // up
+  3: { dx: -1, dy: 0 },  // left
+  4: { dx: 1, dy: 0 }    // right
+};
 
 // Duel: no physical warp — battle starts from overworld (GBA-PK style)
 
@@ -83,6 +89,65 @@ function clearExpiredPendingDuel(client) {
     return true;
   }
   return false;
+}
+
+function toFiniteNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Duel requests are allowed only when players are adjacent and facing each other.
+ */
+function validateFaceToFaceDuel(requester, target) {
+  const requesterPos = requester && requester.lastPosition;
+  const targetPos = target && target.lastPosition;
+  if (!requesterPos || !targetPos) {
+    return { ok: false, reason: 'position_unknown', detail: 'missing_position' };
+  }
+
+  const rx = toFiniteNumber(requesterPos.x);
+  const ry = toFiniteNumber(requesterPos.y);
+  const tx = toFiniteNumber(targetPos.x);
+  const ty = toFiniteNumber(targetPos.y);
+  const requesterMapId = toFiniteNumber(requesterPos.mapId);
+  const requesterMapGroup = toFiniteNumber(requesterPos.mapGroup);
+  const targetMapId = toFiniteNumber(targetPos.mapId);
+  const targetMapGroup = toFiniteNumber(targetPos.mapGroup);
+  if (
+    rx === null || ry === null || tx === null || ty === null
+    || requesterMapId === null || requesterMapGroup === null
+    || targetMapId === null || targetMapGroup === null
+  ) {
+    return { ok: false, reason: 'position_unknown', detail: 'invalid_position_fields' };
+  }
+
+  if (requesterMapId !== targetMapId || requesterMapGroup !== targetMapGroup) {
+    return { ok: false, reason: 'different_map', detail: 'map_mismatch' };
+  }
+
+  const dx = tx - rx;
+  const dy = ty - ry;
+  const manhattan = Math.abs(dx) + Math.abs(dy);
+  if (manhattan !== 1) {
+    return { ok: false, reason: 'not_face_to_face', detail: `manhattan=${manhattan}` };
+  }
+
+  const requesterFacing = toFiniteNumber(requesterPos.facing);
+  const targetFacing = toFiniteNumber(targetPos.facing);
+  const requesterDelta = FACING_TO_DELTA[requesterFacing];
+  const targetDelta = FACING_TO_DELTA[targetFacing];
+  if (!requesterDelta || !targetDelta) {
+    return { ok: false, reason: 'not_face_to_face', detail: 'invalid_facing' };
+  }
+
+  const requesterLooksAtTarget = requesterDelta.dx === dx && requesterDelta.dy === dy;
+  const targetLooksAtRequester = targetDelta.dx === -dx && targetDelta.dy === -dy;
+  if (!requesterLooksAtTarget || !targetLooksAtRequester) {
+    return { ok: false, reason: 'not_face_to_face', detail: `dx=${dx},dy=${dy}` };
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -301,26 +366,35 @@ function handleMessage(client, messageStr) {
           console.log(`[Duel] DROPPED: target ${message.targetId} has outgoing pending duel`);
           sendDuelDeclined(client, message.targetId, 'target_busy');
         } else {
-          // If requester had another pending target, clear it first.
-          if (client.pendingDuel && client.pendingDuel.targetId !== message.targetId) {
-            const previousTarget = clients.get(client.pendingDuel.targetId);
-            if (previousTarget && previousTarget.roomId === client.roomId) {
-              sendToClient(previousTarget, {
-                type: 'duel_cancelled',
-                requesterId: client.id
-              });
+          const duelPositioning = validateFaceToFaceDuel(client, targetClient);
+          if (!duelPositioning.ok) {
+            console.log(
+              `[Duel] DROPPED: invalid positioning ${client.id} -> ${message.targetId} `
+              + `(reason=${duelPositioning.reason}, detail=${duelPositioning.detail || 'n/a'})`
+            );
+            sendDuelDeclined(client, message.targetId, duelPositioning.reason);
+          } else {
+            // If requester had another pending target, clear it first.
+            if (client.pendingDuel && client.pendingDuel.targetId !== message.targetId) {
+              const previousTarget = clients.get(client.pendingDuel.targetId);
+              if (previousTarget && previousTarget.roomId === client.roomId) {
+                sendToClient(previousTarget, {
+                  type: 'duel_cancelled',
+                  requesterId: client.id
+                });
+              }
             }
+            // Store pending duel on the requester
+            client.pendingDuel = { targetId: message.targetId, createdAt: Date.now() };
+
+            sendToClient(targetClient, {
+              type: 'duel_request',
+              requesterId: client.id,
+              requesterName: client.characterName || client.id
+            });
+
+            console.log(`[Duel] Forwarded to ${message.targetId}`);
           }
-          // Store pending duel on the requester
-          client.pendingDuel = { targetId: message.targetId, createdAt: Date.now() };
-
-          sendToClient(targetClient, {
-            type: 'duel_request',
-            requesterId: client.id,
-            requesterName: client.characterName || client.id
-          });
-
-          console.log(`[Duel] Forwarded to ${message.targetId}`);
         }
         break;
 
